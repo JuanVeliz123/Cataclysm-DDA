@@ -172,6 +172,10 @@ class character_creator_ui_impl : public cataimgui::window
         cataimgui::bounds get_bounds() override;
 };
 
+void reset_scenario( avatar &u, const scenario *scen );
+bool get_chargen_outfit();
+void set_chargen_outfit( bool value );
+
 namespace char_creation
 {
 // an ImGui button that, when clicked, sends an action to cc_uistate

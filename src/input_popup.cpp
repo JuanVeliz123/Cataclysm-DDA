@@ -1,5 +1,9 @@
 #include "input_popup.h"
 
+#if defined(GODOT)
+#include "godot_popup_snapshot.h"
+#endif
+
 #include <cstddef>
 
 #include "coordinates.h"
@@ -18,6 +22,7 @@ input_popup::input_popup( int width, const std::string &title, const point &pos,
                           ImGuiWindowFlags flags ) :
     cataimgui::window( title, ImGuiWindowFlags_NoNavInputs | flags | ( title.empty() ?
                        ImGuiWindowFlags_NoTitleBar : 0 ) | ImGuiWindowFlags_AlwaysAutoResize ),
+    title( title ),
     pos( pos ),
     width( width )
 {
@@ -335,6 +340,26 @@ void string_input_popup_imgui::add_to_history( const std::string &value ) const
 std::string string_input_popup_imgui::query()
 {
     is_cancelled = false;
+
+#if defined(GODOT)
+    // Declined when this popup has custom key callbacks, or a history
+    // identifier: the Godot field offers neither, and silently dropping the
+    // filter history players rely on is worse than keeping the C++ field.
+    if( !has_custom_callbacks() && identifier.empty() ) {
+        std::string value = text;
+        bool cancelled = false;
+        if( godot_backend::run_text_prompt_in_godot( get_title(), get_description(),
+                label, max_input_length, value, cancelled ) ) {
+            is_cancelled = cancelled;
+            if( cancelled ) {
+                return std::string();
+            }
+            text = value;
+            add_to_history( text );
+            return text;
+        }
+    }
+#endif
 
     while( true ) {
         ui_manager::redraw_invalidated();

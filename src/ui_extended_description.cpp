@@ -1,5 +1,9 @@
 #include "ui_extended_description.h"
 
+#if defined(GODOT)
+#include "godot_textwin_snapshot.h"
+#endif
+
 #include <imgui/imgui.h>
 
 #include "cata_utility.h"
@@ -237,6 +241,30 @@ cataimgui::bounds extended_description_window::get_bounds()
 
 void extended_description_window::show()
 {
+#if defined(GODOT)
+    // Four tabs of formatted text: exactly the shared text window's shape.
+    {
+        const auto join = []( const std::vector<std::string> &lines ) {
+            std::string out;
+            for( const std::string &l : lines ) {
+                out += remove_color_tags( l );
+                out += '\n';
+            }
+            return out;
+        };
+        std::vector<godot_backend::TextWinSnapshot::tab> tabs = {
+            { _( "Creature" ), join( creature_description ) },
+            { _( "Furniture" ), join( furniture_description ) },
+            { _( "Terrain" ), join( terrain_description ) },
+            { _( "Vehicle" ), join( veh_app_description ) },
+        };
+        int current = static_cast<int>( cur_target );
+        if( godot_backend::run_textwin_in_godot( _( "Description" ), std::string(),
+                tabs, current ) ) {
+            return;
+        }
+    }
+#endif
     while( true ) {
         ui_manager::redraw_invalidated();
         std::string action = ctxt.handle_input();

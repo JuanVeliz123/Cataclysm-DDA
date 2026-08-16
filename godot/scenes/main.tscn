@@ -1,0 +1,755 @@
+[gd_scene load_steps=9 format=3]
+
+[ext_resource type="Script" path="res://scripts/host.gd" id="1"]
+[ext_resource type="Script" path="res://scripts/world_pick.gd" id="2"]
+[ext_resource type="Script" path="res://scripts/chargen.gd" id="3"]
+[ext_resource type="Script" path="res://scripts/terminal_view.gd" id="4"]
+[ext_resource type="Script" path="res://scripts/map_view.gd" id="5"]
+[ext_resource type="Script" path="res://scripts/hud_panel.gd" id="6"]
+[ext_resource type="Script" path="res://scripts/inventory_panel.gd" id="7"]
+[ext_resource type="Script" path="res://scripts/character_panel.gd" id="8"]
+
+[node name="Main" type="Node"]
+script = ExtResource("1")
+
+[node name="CDDAHost" type="CDDAHost" parent="."]
+
+[node name="SessionBg" type="ColorRect" parent="."]
+unique_name_in_owner = true
+visible = false
+z_index = -1
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+mouse_filter = 2
+color = Color(0.02, 0.02, 0.04, 1)
+
+[node name="MapView" type="Node2D" parent="."]
+unique_name_in_owner = true
+visible = false
+z_index = 0
+script = ExtResource("5")
+
+[node name="TerminalView" type="Control" parent="."]
+unique_name_in_owner = true
+visible = false
+z_index = 12
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+mouse_filter = 2
+script = ExtResource("4")
+
+[node name="HudPanel" type="Control" parent="."]
+unique_name_in_owner = true
+visible = false
+z_index = 10
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+mouse_filter = 2
+script = ExtResource("6")
+
+[node name="InventoryPanel" type="Control" parent="."]
+unique_name_in_owner = true
+visible = false
+z_index = 20
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+mouse_filter = 0
+script = ExtResource("7")
+
+[node name="CharacterPanel" type="Control" parent="."]
+unique_name_in_owner = true
+visible = false
+z_index = 20
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+mouse_filter = 0
+script = ExtResource("8")
+
+[node name="BootSplash" type="Control" parent="."]
+unique_name_in_owner = true
+z_index = 50
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+
+[node name="ColorRect" type="ColorRect" parent="BootSplash"]
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+color = Color(0.05, 0.05, 0.07, 1)
+
+[node name="SplashLabel" type="Label" parent="BootSplash"]
+unique_name_in_owner = true
+layout_mode = 1
+anchors_preset = 8
+anchor_left = 0.5
+anchor_top = 0.5
+anchor_right = 0.5
+anchor_bottom = 0.5
+offset_left = -360.0
+offset_top = -80.0
+offset_right = 360.0
+offset_bottom = 80.0
+grow_horizontal = 2
+grow_vertical = 2
+theme_override_font_sizes/font_size = 28
+text = "Loading Cataclysm…"
+horizontal_alignment = 1
+vertical_alignment = 1
+autowrap_mode = 3
+
+[node name="MainMenu" type="Control" parent="."]
+unique_name_in_owner = true
+visible = false
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+
+[node name="ColorRect" type="ColorRect" parent="MainMenu"]
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+color = Color(0.05, 0.05, 0.07, 1)
+
+[node name="VBox" type="VBoxContainer" parent="MainMenu"]
+layout_mode = 1
+anchors_preset = 8
+anchor_left = 0.5
+anchor_top = 0.5
+anchor_right = 0.5
+anchor_bottom = 0.5
+offset_left = -160.0
+offset_top = -140.0
+offset_right = 160.0
+offset_bottom = 140.0
+grow_horizontal = 2
+grow_vertical = 2
+theme_override_constants/separation = 12
+
+[node name="Title" type="Label" parent="MainMenu/VBox"]
+layout_mode = 2
+theme_override_font_sizes/font_size = 32
+text = "Cataclysm: DDA"
+horizontal_alignment = 1
+
+[node name="Subtitle" type="Label" parent="MainMenu/VBox"]
+layout_mode = 2
+theme_override_font_sizes/font_size = 14
+text = "Godot host"
+horizontal_alignment = 1
+
+[node name="NewGameButton" type="Button" parent="MainMenu/VBox"]
+layout_mode = 2
+text = "New Game"
+
+[node name="LoadGameButton" type="Button" parent="MainMenu/VBox"]
+layout_mode = 2
+text = "Load Game"
+
+[node name="QuitButton" type="Button" parent="MainMenu/VBox"]
+layout_mode = 2
+text = "Quit"
+
+[node name="NewGamePanel" type="Control" parent="."]
+unique_name_in_owner = true
+visible = false
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+
+[node name="ColorRect" type="ColorRect" parent="NewGamePanel"]
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+color = Color(0.05, 0.05, 0.07, 1)
+
+[node name="VBox" type="VBoxContainer" parent="NewGamePanel"]
+layout_mode = 1
+anchors_preset = 8
+anchor_left = 0.5
+anchor_top = 0.5
+anchor_right = 0.5
+anchor_bottom = 0.5
+offset_left = -180.0
+offset_top = -160.0
+offset_right = 180.0
+offset_bottom = 160.0
+grow_horizontal = 2
+grow_vertical = 2
+theme_override_constants/separation = 10
+
+[node name="Title" type="Label" parent="NewGamePanel/VBox"]
+layout_mode = 2
+theme_override_font_sizes/font_size = 24
+text = "New Game"
+horizontal_alignment = 1
+
+[node name="CustomButton" type="Button" parent="NewGamePanel/VBox"]
+layout_mode = 2
+text = "Custom Character"
+
+[node name="NowButton" type="Button" parent="NewGamePanel/VBox"]
+layout_mode = 2
+text = "Play Now"
+
+[node name="RandomButton" type="Button" parent="NewGamePanel/VBox"]
+layout_mode = 2
+text = "Random Character"
+
+[node name="BackButton" type="Button" parent="NewGamePanel/VBox"]
+layout_mode = 2
+text = "Back"
+
+[node name="LoadPanel" type="Control" parent="."]
+unique_name_in_owner = true
+visible = false
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+
+[node name="ColorRect" type="ColorRect" parent="LoadPanel"]
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+color = Color(0.05, 0.05, 0.07, 1)
+
+[node name="VBox" type="VBoxContainer" parent="LoadPanel"]
+layout_mode = 1
+anchors_preset = 8
+anchor_left = 0.5
+anchor_top = 0.5
+anchor_right = 0.5
+anchor_bottom = 0.5
+offset_left = -280.0
+offset_top = -220.0
+offset_right = 280.0
+offset_bottom = 220.0
+grow_horizontal = 2
+grow_vertical = 2
+theme_override_constants/separation = 8
+
+[node name="Title" type="Label" parent="LoadPanel/VBox"]
+layout_mode = 2
+theme_override_font_sizes/font_size = 24
+text = "Load Game"
+horizontal_alignment = 1
+
+[node name="WorldLabel" type="Label" parent="LoadPanel/VBox"]
+layout_mode = 2
+text = "Worlds"
+
+[node name="WorldList" type="ItemList" parent="LoadPanel/VBox"]
+unique_name_in_owner = true
+custom_minimum_size = Vector2(0, 140)
+layout_mode = 2
+size_flags_vertical = 3
+
+[node name="SaveLabel" type="Label" parent="LoadPanel/VBox"]
+layout_mode = 2
+text = "Characters"
+
+[node name="SaveList" type="ItemList" parent="LoadPanel/VBox"]
+unique_name_in_owner = true
+custom_minimum_size = Vector2(0, 140)
+layout_mode = 2
+size_flags_vertical = 3
+
+[node name="HBox" type="HBoxContainer" parent="LoadPanel/VBox"]
+layout_mode = 2
+alignment = 1
+theme_override_constants/separation = 12
+
+[node name="LoadConfirmButton" type="Button" parent="LoadPanel/VBox/HBox"]
+layout_mode = 2
+text = "Load"
+
+[node name="LoadBackButton" type="Button" parent="LoadPanel/VBox/HBox"]
+layout_mode = 2
+text = "Back"
+
+[node name="WorldPick" type="Control" parent="."]
+unique_name_in_owner = true
+visible = false
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+script = ExtResource("2")
+
+[node name="ColorRect" type="ColorRect" parent="WorldPick"]
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+color = Color(0.05, 0.05, 0.07, 1)
+
+[node name="VBox" type="VBoxContainer" parent="WorldPick"]
+layout_mode = 1
+anchors_preset = 8
+anchor_left = 0.5
+anchor_top = 0.5
+anchor_right = 0.5
+anchor_bottom = 0.5
+offset_left = -300.0
+offset_top = -240.0
+offset_right = 300.0
+offset_bottom = 240.0
+grow_horizontal = 2
+grow_vertical = 2
+theme_override_constants/separation = 8
+
+[node name="Title" type="Label" parent="WorldPick/VBox"]
+layout_mode = 2
+theme_override_font_sizes/font_size = 24
+text = "Choose World"
+horizontal_alignment = 1
+
+[node name="WorldPickList" type="ItemList" parent="WorldPick/VBox"]
+unique_name_in_owner = true
+custom_minimum_size = Vector2(0, 220)
+layout_mode = 2
+size_flags_vertical = 3
+
+[node name="CreateRow" type="HBoxContainer" parent="WorldPick/VBox"]
+layout_mode = 2
+theme_override_constants/separation = 8
+
+[node name="WorldNameEdit" type="LineEdit" parent="WorldPick/VBox/CreateRow"]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_horizontal = 3
+placeholder_text = "New world name (optional)"
+
+[node name="CreateButton" type="Button" parent="WorldPick/VBox/CreateRow"]
+layout_mode = 2
+text = "Create World"
+
+[node name="WorldPickStatus" type="Label" parent="WorldPick/VBox"]
+unique_name_in_owner = true
+layout_mode = 2
+autowrap_mode = 3
+
+[node name="Nav" type="HBoxContainer" parent="WorldPick/VBox"]
+layout_mode = 2
+alignment = 1
+theme_override_constants/separation = 12
+
+[node name="ContinueButton" type="Button" parent="WorldPick/VBox/Nav"]
+layout_mode = 2
+text = "Continue"
+
+[node name="BackButton" type="Button" parent="WorldPick/VBox/Nav"]
+layout_mode = 2
+text = "Back"
+
+[node name="ChargenRoot" type="Control" parent="."]
+unique_name_in_owner = true
+visible = false
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+script = ExtResource("3")
+
+[node name="ColorRect" type="ColorRect" parent="ChargenRoot"]
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+color = Color(0.05, 0.05, 0.07, 1)
+
+[node name="Margin" type="MarginContainer" parent="ChargenRoot"]
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+theme_override_constants/margin_left = 12
+theme_override_constants/margin_top = 12
+theme_override_constants/margin_right = 12
+theme_override_constants/margin_bottom = 12
+
+[node name="VBox" type="VBoxContainer" parent="ChargenRoot/Margin"]
+layout_mode = 2
+theme_override_constants/separation = 8
+
+[node name="TopBar" type="VBoxContainer" parent="ChargenRoot/Margin/VBox"]
+layout_mode = 2
+theme_override_constants/separation = 6
+
+[node name="Row1" type="HBoxContainer" parent="ChargenRoot/Margin/VBox/TopBar"]
+layout_mode = 2
+theme_override_constants/separation = 8
+
+[node name="NameLabel" type="Label" parent="ChargenRoot/Margin/VBox/TopBar/Row1"]
+layout_mode = 2
+text = "Name"
+
+[node name="ChargenName" type="LineEdit" parent="ChargenRoot/Margin/VBox/TopBar/Row1"]
+unique_name_in_owner = true
+custom_minimum_size = Vector2(180, 0)
+layout_mode = 2
+
+[node name="ChargenGender" type="Button" parent="ChargenRoot/Margin/VBox/TopBar/Row1"]
+unique_name_in_owner = true
+layout_mode = 2
+text = "Male"
+
+[node name="ChargenOutfit" type="Button" parent="ChargenRoot/Margin/VBox/TopBar/Row1"]
+unique_name_in_owner = true
+layout_mode = 2
+text = "Outfit: Male"
+
+[node name="ChargenAge" type="SpinBox" parent="ChargenRoot/Margin/VBox/TopBar/Row1"]
+unique_name_in_owner = true
+layout_mode = 2
+prefix = "Age "
+
+[node name="ChargenHeight" type="SpinBox" parent="ChargenRoot/Margin/VBox/TopBar/Row1"]
+unique_name_in_owner = true
+layout_mode = 2
+prefix = "Ht "
+
+[node name="ChargenBlood" type="Button" parent="ChargenRoot/Margin/VBox/TopBar/Row1"]
+unique_name_in_owner = true
+layout_mode = 2
+text = "Blood"
+
+[node name="Row2" type="HBoxContainer" parent="ChargenRoot/Margin/VBox/TopBar"]
+layout_mode = 2
+theme_override_constants/separation = 8
+
+[node name="ChargenScenarioProf" type="Label" parent="ChargenRoot/Margin/VBox/TopBar/Row2"]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_horizontal = 3
+text = "Scenario / Profession"
+
+[node name="ChargenRating" type="Label" parent="ChargenRoot/Margin/VBox/TopBar/Row2"]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_horizontal = 3
+autowrap_mode = 3
+
+[node name="Row3" type="HBoxContainer" parent="ChargenRoot/Margin/VBox/TopBar"]
+layout_mode = 2
+theme_override_constants/separation = 8
+
+[node name="RandomNameButton" type="Button" parent="ChargenRoot/Margin/VBox/TopBar/Row3"]
+layout_mode = 2
+text = "Random Name"
+
+[node name="RandomDescButton" type="Button" parent="ChargenRoot/Margin/VBox/TopBar/Row3"]
+layout_mode = 2
+text = "Randomize Description"
+
+[node name="ResetCalendarButton" type="Button" parent="ChargenRoot/Margin/VBox/TopBar/Row3"]
+layout_mode = 2
+text = "Reset Calendar"
+
+[node name="CatMinus" type="Button" parent="ChargenRoot/Margin/VBox/TopBar/Row3"]
+layout_mode = 2
+text = "Cat -1d"
+
+[node name="CatPlus" type="Button" parent="ChargenRoot/Margin/VBox/TopBar/Row3"]
+layout_mode = 2
+text = "Cat +1d"
+
+[node name="GameMinus" type="Button" parent="ChargenRoot/Margin/VBox/TopBar/Row3"]
+layout_mode = 2
+text = "Game -1d"
+
+[node name="GamePlus" type="Button" parent="ChargenRoot/Margin/VBox/TopBar/Row3"]
+layout_mode = 2
+text = "Game +1d"
+
+[node name="TemplateNameEdit" type="LineEdit" parent="ChargenRoot/Margin/VBox/TopBar/Row3"]
+unique_name_in_owner = true
+custom_minimum_size = Vector2(140, 0)
+layout_mode = 2
+placeholder_text = "Template name"
+
+[node name="SaveTemplateButton" type="Button" parent="ChargenRoot/Margin/VBox/TopBar/Row3"]
+layout_mode = 2
+text = "Save Template"
+
+[node name="Body" type="HBoxContainer" parent="ChargenRoot/Margin/VBox"]
+layout_mode = 2
+size_flags_vertical = 3
+theme_override_constants/separation = 10
+
+[node name="ChargenTabs" type="TabContainer" parent="ChargenRoot/Margin/VBox/Body"]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_horizontal = 3
+size_flags_vertical = 3
+
+[node name="Scenario" type="HBoxContainer" parent="ChargenRoot/Margin/VBox/Body/ChargenTabs"]
+layout_mode = 2
+theme_override_constants/separation = 8
+
+[node name="ScenarioList" type="ItemList" parent="ChargenRoot/Margin/VBox/Body/ChargenTabs/Scenario"]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_horizontal = 3
+size_flags_vertical = 3
+
+[node name="Profession" type="HBoxContainer" parent="ChargenRoot/Margin/VBox/Body/ChargenTabs"]
+layout_mode = 2
+
+[node name="ProfessionList" type="ItemList" parent="ChargenRoot/Margin/VBox/Body/ChargenTabs/Profession"]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_horizontal = 3
+size_flags_vertical = 3
+
+[node name="Background" type="VBoxContainer" parent="ChargenRoot/Margin/VBox/Body/ChargenTabs"]
+layout_mode = 2
+
+[node name="HobbyHint" type="Label" parent="ChargenRoot/Margin/VBox/Body/ChargenTabs/Background"]
+layout_mode = 2
+text = "Select a background, then Toggle (or double-click)."
+
+[node name="HobbyList" type="ItemList" parent="ChargenRoot/Margin/VBox/Body/ChargenTabs/Background"]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_vertical = 3
+
+[node name="HobbyToggle" type="Button" parent="ChargenRoot/Margin/VBox/Body/ChargenTabs/Background"]
+layout_mode = 2
+text = "Toggle Background"
+
+[node name="Stats" type="VBoxContainer" parent="ChargenRoot/Margin/VBox/Body/ChargenTabs"]
+layout_mode = 2
+theme_override_constants/separation = 8
+
+[node name="StatStr" type="SpinBox" parent="ChargenRoot/Margin/VBox/Body/ChargenTabs/Stats"]
+unique_name_in_owner = true
+layout_mode = 2
+prefix = "STR "
+
+[node name="StatDex" type="SpinBox" parent="ChargenRoot/Margin/VBox/Body/ChargenTabs/Stats"]
+unique_name_in_owner = true
+layout_mode = 2
+prefix = "DEX "
+
+[node name="StatInt" type="SpinBox" parent="ChargenRoot/Margin/VBox/Body/ChargenTabs/Stats"]
+unique_name_in_owner = true
+layout_mode = 2
+prefix = "INT "
+
+[node name="StatPer" type="SpinBox" parent="ChargenRoot/Margin/VBox/Body/ChargenTabs/Stats"]
+unique_name_in_owner = true
+layout_mode = 2
+prefix = "PER "
+
+[node name="Traits" type="VBoxContainer" parent="ChargenRoot/Margin/VBox/Body/ChargenTabs"]
+layout_mode = 2
+
+[node name="TraitFilter" type="OptionButton" parent="ChargenRoot/Margin/VBox/Body/ChargenTabs/Traits"]
+unique_name_in_owner = true
+layout_mode = 2
+
+[node name="TraitHint" type="Label" parent="ChargenRoot/Margin/VBox/Body/ChargenTabs/Traits"]
+layout_mode = 2
+text = "Select a trait, then Toggle (or double-click)."
+
+[node name="TraitList" type="ItemList" parent="ChargenRoot/Margin/VBox/Body/ChargenTabs/Traits"]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_vertical = 3
+
+[node name="TraitToggle" type="Button" parent="ChargenRoot/Margin/VBox/Body/ChargenTabs/Traits"]
+layout_mode = 2
+text = "Toggle Trait"
+
+[node name="Skills" type="VBoxContainer" parent="ChargenRoot/Margin/VBox/Body/ChargenTabs"]
+layout_mode = 2
+
+[node name="SkillLevelSpin" type="SpinBox" parent="ChargenRoot/Margin/VBox/Body/ChargenTabs/Skills"]
+unique_name_in_owner = true
+layout_mode = 2
+prefix = "Level "
+
+[node name="SkillList" type="ItemList" parent="ChargenRoot/Margin/VBox/Body/ChargenTabs/Skills"]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_vertical = 3
+
+[node name="Summary" type="VBoxContainer" parent="ChargenRoot/Margin/VBox/Body/ChargenTabs"]
+layout_mode = 2
+theme_override_constants/separation = 8
+
+[node name="SummaryText" type="RichTextLabel" parent="ChargenRoot/Margin/VBox/Body/ChargenTabs/Summary"]
+unique_name_in_owner = true
+custom_minimum_size = Vector2(0, 180)
+layout_mode = 2
+size_flags_vertical = 3
+fit_content = true
+scroll_active = true
+
+[node name="LocationLabel" type="Label" parent="ChargenRoot/Margin/VBox/Body/ChargenTabs/Summary"]
+layout_mode = 2
+text = "Starting location"
+
+[node name="LocationList" type="ItemList" parent="ChargenRoot/Margin/VBox/Body/ChargenTabs/Summary"]
+unique_name_in_owner = true
+custom_minimum_size = Vector2(0, 100)
+layout_mode = 2
+
+[node name="CityRow" type="HBoxContainer" parent="ChargenRoot/Margin/VBox/Body/ChargenTabs/Summary"]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_vertical = 3
+
+[node name="CityLabel" type="Label" parent="ChargenRoot/Margin/VBox/Body/ChargenTabs/Summary/CityRow"]
+layout_mode = 2
+text = "City"
+
+[node name="CityList" type="ItemList" parent="ChargenRoot/Margin/VBox/Body/ChargenTabs/Summary/CityRow"]
+unique_name_in_owner = true
+custom_minimum_size = Vector2(0, 100)
+layout_mode = 2
+size_flags_horizontal = 3
+
+[node name="DetailPane" type="PanelContainer" parent="ChargenRoot/Margin/VBox/Body"]
+custom_minimum_size = Vector2(280, 0)
+layout_mode = 2
+size_flags_vertical = 3
+
+[node name="ChargenDetail" type="RichTextLabel" parent="ChargenRoot/Margin/VBox/Body/DetailPane"]
+unique_name_in_owner = true
+layout_mode = 2
+fit_content = true
+scroll_active = true
+
+[node name="ChargenStatus" type="Label" parent="ChargenRoot/Margin/VBox"]
+unique_name_in_owner = true
+layout_mode = 2
+autowrap_mode = 3
+
+[node name="Nav" type="HBoxContainer" parent="ChargenRoot/Margin/VBox"]
+layout_mode = 2
+alignment = 1
+theme_override_constants/separation = 12
+
+[node name="PrevButton" type="Button" parent="ChargenRoot/Margin/VBox/Nav"]
+layout_mode = 2
+text = "Previous"
+
+[node name="NextButton" type="Button" parent="ChargenRoot/Margin/VBox/Nav"]
+layout_mode = 2
+text = "Next"
+
+[node name="ChargenConfirm" type="Button" parent="ChargenRoot/Margin/VBox/Nav"]
+unique_name_in_owner = true
+layout_mode = 2
+text = "Confirm & Start"
+
+[node name="CancelButton" type="Button" parent="ChargenRoot/Margin/VBox/Nav"]
+layout_mode = 2
+text = "Cancel"
+
+[connection signal="pressed" from="MainMenu/VBox/NewGameButton" to="." method="_on_new_game_pressed"]
+[connection signal="pressed" from="MainMenu/VBox/LoadGameButton" to="." method="_on_load_game_pressed"]
+[connection signal="pressed" from="MainMenu/VBox/QuitButton" to="." method="_on_quit_pressed"]
+[connection signal="pressed" from="NewGamePanel/VBox/CustomButton" to="." method="_on_new_custom_pressed"]
+[connection signal="pressed" from="NewGamePanel/VBox/NowButton" to="." method="_on_new_now_pressed"]
+[connection signal="pressed" from="NewGamePanel/VBox/RandomButton" to="." method="_on_new_random_pressed"]
+[connection signal="pressed" from="NewGamePanel/VBox/BackButton" to="." method="_on_new_back_pressed"]
+[connection signal="item_selected" from="LoadPanel/VBox/WorldList" to="." method="_on_world_selected"]
+[connection signal="pressed" from="LoadPanel/VBox/HBox/LoadConfirmButton" to="." method="_on_load_confirm_pressed"]
+[connection signal="pressed" from="LoadPanel/VBox/HBox/LoadBackButton" to="." method="_on_load_back_pressed"]
+[connection signal="pressed" from="WorldPick/VBox/CreateRow/CreateButton" to="WorldPick" method="_on_create_pressed"]
+[connection signal="pressed" from="WorldPick/VBox/Nav/ContinueButton" to="WorldPick" method="_on_continue_pressed"]
+[connection signal="pressed" from="WorldPick/VBox/Nav/BackButton" to="WorldPick" method="_on_back_pressed"]
+[connection signal="tab_changed" from="ChargenRoot/Margin/VBox/Body/ChargenTabs" to="ChargenRoot" method="_on_tab_changed"]
+[connection signal="item_selected" from="ChargenRoot/Margin/VBox/Body/ChargenTabs/Scenario/ScenarioList" to="ChargenRoot" method="_on_scenario_selected"]
+[connection signal="item_selected" from="ChargenRoot/Margin/VBox/Body/ChargenTabs/Profession/ProfessionList" to="ChargenRoot" method="_on_profession_selected"]
+[connection signal="item_activated" from="ChargenRoot/Margin/VBox/Body/ChargenTabs/Background/HobbyList" to="ChargenRoot" method="_on_hobby_activated"]
+[connection signal="item_selected" from="ChargenRoot/Margin/VBox/Body/ChargenTabs/Background/HobbyList" to="ChargenRoot" method="_on_hobby_selected"]
+[connection signal="pressed" from="ChargenRoot/Margin/VBox/Body/ChargenTabs/Background/HobbyToggle" to="ChargenRoot" method="_on_hobby_toggle_pressed"]
+[connection signal="item_activated" from="ChargenRoot/Margin/VBox/Body/ChargenTabs/Traits/TraitList" to="ChargenRoot" method="_on_trait_activated"]
+[connection signal="item_selected" from="ChargenRoot/Margin/VBox/Body/ChargenTabs/Traits/TraitList" to="ChargenRoot" method="_on_trait_selected"]
+[connection signal="pressed" from="ChargenRoot/Margin/VBox/Body/ChargenTabs/Traits/TraitToggle" to="ChargenRoot" method="_on_trait_toggle_pressed"]
+[connection signal="item_selected" from="ChargenRoot/Margin/VBox/Body/ChargenTabs/Skills/SkillList" to="ChargenRoot" method="_on_skill_selected"]
+[connection signal="value_changed" from="ChargenRoot/Margin/VBox/Body/ChargenTabs/Skills/SkillLevelSpin" to="ChargenRoot" method="_on_skill_level_changed"]
+[connection signal="item_selected" from="ChargenRoot/Margin/VBox/Body/ChargenTabs/Summary/LocationList" to="ChargenRoot" method="_on_location_selected"]
+[connection signal="item_selected" from="ChargenRoot/Margin/VBox/Body/ChargenTabs/Summary/CityRow/CityList" to="ChargenRoot" method="_on_city_selected"]
+[connection signal="item_selected" from="ChargenRoot/Margin/VBox/Body/ChargenTabs/Traits/TraitFilter" to="ChargenRoot" method="_on_trait_filter_changed"]
+[connection signal="value_changed" from="ChargenRoot/Margin/VBox/Body/ChargenTabs/Stats/StatStr" to="ChargenRoot" method="_on_stat_changed"]
+[connection signal="value_changed" from="ChargenRoot/Margin/VBox/Body/ChargenTabs/Stats/StatDex" to="ChargenRoot" method="_on_stat_changed"]
+[connection signal="value_changed" from="ChargenRoot/Margin/VBox/Body/ChargenTabs/Stats/StatInt" to="ChargenRoot" method="_on_stat_changed"]
+[connection signal="value_changed" from="ChargenRoot/Margin/VBox/Body/ChargenTabs/Stats/StatPer" to="ChargenRoot" method="_on_stat_changed"]
+[connection signal="text_submitted" from="ChargenRoot/Margin/VBox/TopBar/Row1/ChargenName" to="ChargenRoot" method="_on_name_submitted"]
+[connection signal="focus_exited" from="ChargenRoot/Margin/VBox/TopBar/Row1/ChargenName" to="ChargenRoot" method="_on_name_focus_exited"]
+[connection signal="pressed" from="ChargenRoot/Margin/VBox/TopBar/Row1/ChargenGender" to="ChargenRoot" method="_on_gender_pressed"]
+[connection signal="pressed" from="ChargenRoot/Margin/VBox/TopBar/Row1/ChargenOutfit" to="ChargenRoot" method="_on_outfit_pressed"]
+[connection signal="value_changed" from="ChargenRoot/Margin/VBox/TopBar/Row1/ChargenAge" to="ChargenRoot" method="_on_age_changed"]
+[connection signal="value_changed" from="ChargenRoot/Margin/VBox/TopBar/Row1/ChargenHeight" to="ChargenRoot" method="_on_height_changed"]
+[connection signal="pressed" from="ChargenRoot/Margin/VBox/TopBar/Row1/ChargenBlood" to="ChargenRoot" method="_on_blood_pressed"]
+[connection signal="pressed" from="ChargenRoot/Margin/VBox/TopBar/Row3/RandomNameButton" to="ChargenRoot" method="_on_random_name_pressed"]
+[connection signal="pressed" from="ChargenRoot/Margin/VBox/TopBar/Row3/RandomDescButton" to="ChargenRoot" method="_on_random_desc_pressed"]
+[connection signal="pressed" from="ChargenRoot/Margin/VBox/TopBar/Row3/ResetCalendarButton" to="ChargenRoot" method="_on_reset_calendar_pressed"]
+[connection signal="pressed" from="ChargenRoot/Margin/VBox/TopBar/Row3/CatMinus" to="ChargenRoot" method="_on_nudge_cataclysm" binds= [-24]]
+[connection signal="pressed" from="ChargenRoot/Margin/VBox/TopBar/Row3/CatPlus" to="ChargenRoot" method="_on_nudge_cataclysm" binds= [24]]
+[connection signal="pressed" from="ChargenRoot/Margin/VBox/TopBar/Row3/GameMinus" to="ChargenRoot" method="_on_nudge_game" binds= [-24]]
+[connection signal="pressed" from="ChargenRoot/Margin/VBox/TopBar/Row3/GamePlus" to="ChargenRoot" method="_on_nudge_game" binds= [24]]
+[connection signal="pressed" from="ChargenRoot/Margin/VBox/TopBar/Row3/SaveTemplateButton" to="ChargenRoot" method="_on_save_template_pressed"]
+[connection signal="pressed" from="ChargenRoot/Margin/VBox/Nav/PrevButton" to="ChargenRoot" method="_on_prev_pressed"]
+[connection signal="pressed" from="ChargenRoot/Margin/VBox/Nav/NextButton" to="ChargenRoot" method="_on_next_pressed"]
+[connection signal="pressed" from="ChargenRoot/Margin/VBox/Nav/ChargenConfirm" to="ChargenRoot" method="_on_confirm_pressed"]
+[connection signal="pressed" from="ChargenRoot/Margin/VBox/Nav/CancelButton" to="ChargenRoot" method="_on_cancel_pressed"]

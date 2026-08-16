@@ -12,6 +12,7 @@
 #include "catacharset.h"
 #include "cached_options.h"
 #include "color.h"
+#include "game_constants.h"
 #include "input.h"
 #include "output.h"
 #include "path_info.h"
@@ -19,15 +20,26 @@
 #include "ui_manager.h"
 #include "input_context.h"
 
+#if defined(GODOT)
+#include "godot_backend.h"
+#endif
+
 static ImGuiKey cata_key_to_imgui( int cata_key );
 
 #ifdef TUI
+// GODOT takes the TUI path for ImGui but renders through ImTui's text backend
+// only, so it links no curses library and must not include its headers either --
+// there is no curses.h in a MinGW sysroot. Every ImTui_ImplNcurses_* call site
+// below is already #if !defined(GODOT).
+#if !defined(GODOT)
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wold-style-cast"
 #include <curses.h>
 #pragma GCC diagnostic pop
 #include <imtui/imtui-impl-ncurses.h>
+#endif
 #include <imtui/imtui-impl-text.h>
+#include <imtui/imtui.h>
 
 #include "color_loader.h"
 
@@ -91,10 +103,22 @@ ImVec4 cataimgui::imvec4_from_color( const nc_color &color )
     return impalette[palette_index];
 }
 
+#if !defined(GODOT)
 namespace
 {
 std::vector<std::pair<int, ImTui::mouse_event>> imtui_events;
 } // namespace
+#endif
+
+#if defined(GODOT)
+static void godot_set_imgui_display_size()
+{
+    // Prefer live TERMX/TERMY (updated on host resize); fall back to defaults.
+    float cols = static_cast<float>( TERMX > 0 ? TERMX : EVEN_MINIMUM_TERM_WIDTH );
+    float rows = static_cast<float>( TERMY > 0 ? TERMY : EVEN_MINIMUM_TERM_HEIGHT );
+    ImGui::GetIO().DisplaySize = ImVec2( cols, rows );
+}
+#endif
 
 cataimgui::client::client()
 {
@@ -102,11 +126,20 @@ cataimgui::client::client()
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
 
+#if defined(GODOT)
+    // No real ncurses terminal under Godot; size ImGui from the cell grid.
+    // Still run the text backend init so the default font atlas is built
+    // (NewFrame asserts if TexIsBuilt is false without RendererHasTextures).
+    godot_set_imgui_display_size();
+    ImTui_ImplText_Init();
+    // Ncurses init normally allocates this; ImTui_ImplText_RenderDrawData needs it.
+    if( ImGui::GetIO().BackendPlatformUserData == nullptr ) {
+        ImGui::GetIO().BackendPlatformUserData = new ImTui::ImplImtui_Data();
+    }
+#else
     ImTui_ImplNcurses_Init();
     ImTui_ImplText_Init();
-    ImGuiIO &io = ImGui::GetIO();
-
-    ( void )io;
+#endif
 
     ImGui::GetIO().ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
 
@@ -116,8 +149,12 @@ cataimgui::client::client()
 
 cataimgui::client::~client()
 {
+#if defined(GODOT)
+    ImTui_ImplText_Shutdown();
+#else
     ImTui_ImplNcurses_Shutdown();
     ImTui_ImplText_Shutdown();
+#endif
     // DestroyContext runs the internal Shutdown and frees the context;
     // calling ImGui::Shutdown alone leaks the context created in the
     // constructor.
@@ -126,13 +163,17 @@ cataimgui::client::~client()
 
 void cataimgui::client::new_frame( int display_buffer_w, int display_buffer_h )
 {
-    // TUI layout is driven by the ncurses backend, not display-buffer
-    // pixel dims.
+    // TUI layout is driven by the cell grid, not display-buffer pixel dims.
     ( void )display_buffer_w;
     ( void )display_buffer_h;
+#if defined(GODOT)
+    godot_set_imgui_display_size();
+    ImTui_ImplText_NewFrame();
+#else
     ImTui_ImplNcurses_NewFrame( imtui_events );
     imtui_events.clear();
     ImTui_ImplText_NewFrame();
+#endif
 
     ImGui::NewFrame();
 }
@@ -153,8 +194,13 @@ void cataimgui::client::end_frame()
 {
     ImGui::Render();
 
+#if defined(GODOT)
+    ImTui_ImplText_RenderDrawData( ImGui::GetDrawData() );
+    godot_backend::blit_imtui_screen();
+#else
     ImTui_ImplText_RenderDrawData( ImGui::GetDrawData() );
     ImTui_ImplNcurses_DrawScreen();
+#endif
     ImGuiIO &io = ImGui::GetIO();
     for( const int &code : cata_input_trail ) {
         io.AddKeyEvent( cata_key_to_imgui( code ), false );
@@ -164,13 +210,19 @@ void cataimgui::client::end_frame()
 
 void cataimgui::client::upload_color_pair( int p, int f, int b )
 {
+#if !defined(GODOT)
     ImTui_ImplNcurses_UploadColorPair( p, static_cast<short>( f ), static_cast<short>( b ) );
+#endif
     cataimgui::init_pair( p, f, b );
 }
 
 void cataimgui::client::set_alloced_pair_count( short count )
 {
+#if defined(GODOT)
+    ( void )count;
+#else
     ImTui_ImplNcurses_SetAllocedPairCount( count );
+#endif
 }
 
 #pragma GCC diagnostic push
@@ -184,6 +236,12 @@ void cataimgui::client::process_input( void *input, int display_buffer_w, int di
     if( !any_window_shown() ) {
         return;
     }
+#if defined(GODOT)
+    // This path exists only to fill imtui_events for ImTui_ImplNcurses_NewFrame,
+    // which the Godot build never calls -- so accumulating here would leak. Godot
+    // feeds ImGui through process_cata_input()'s io.AddKeyEvent instead.
+    ( void )input;
+#else
     if( input ) {
         input_event *curses_input = static_cast<input_event *>( input );
         ImTui::mouse_event new_mouse_event = ImTui::mouse_event();
@@ -228,6 +286,7 @@ void cataimgui::client::process_input( void *input, int display_buffer_w, int di
             }
         }
     }
+#endif
 }
 #pragma GCC diagnostic pop
 
@@ -257,7 +316,7 @@ RGBTuple color_loader<RGBTuple>::from_rgb( const int r, const int g, const int b
     result.Red = r;
     return result;
 }
-#else
+#elif !defined(GODOT)
 #include "sdl_utils.h"
 #include "sdl_font.h"
 #include "sdltiles.h"
@@ -902,8 +961,19 @@ class cataimgui::filter_box_impl
         ImGuiID id;
 };
 
+namespace
+{
+int g_live_windows = 0;
+} // namespace
+
+int cataimgui::live_window_count()
+{
+    return g_live_windows;
+}
+
 cataimgui::window::window( int window_flags )
 {
+    ++g_live_windows;
     p_impl = nullptr;
 
     this->window_flags = window_flags | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize |
@@ -920,6 +990,7 @@ cataimgui::window::window( const std::string &id_, int window_flags ) : window( 
 
 cataimgui::window::~window()
 {
+    --g_live_windows;
     p_impl.reset();
     if( GImGui ) {
         ImGui::ClearWindowSettings( id.c_str() );
@@ -1276,7 +1347,6 @@ static void load_imgui_style_file( const cata_path &style_path )
 
     JsonObject jo = jsin.get_object();
 
-
     if( jo.has_bool( "inherit_base_colors" ) && jo.get_bool( "inherit_base_colors" ) ) {
         inherit_base_colors();
     }
@@ -1357,7 +1427,6 @@ static void load_imgui_style_file( const cata_path &style_path )
             style.Colors[imgui_key] = color;
         }
     }
-
 }
 
 void cataimgui::init_colors()

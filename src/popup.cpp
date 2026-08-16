@@ -1,5 +1,9 @@
 #include "popup.h"
 
+#if defined(GODOT)
+#include "godot_popup_snapshot.h"
+#endif
+
 #include <algorithm>
 #include <array>
 #include <memory>
@@ -272,6 +276,13 @@ std::vector<std::vector<std::string>> query_popup_impl::fold_query(
 
 void query_popup::invalidate_ui() const
 {
+#if defined(GODOT)
+    // A display-only popup changes by having its message rewritten -- that is how
+    // a progress popup counts up -- so this is where the Godot copy is refreshed.
+    if( godot_notice_ != 0 ) {
+        godot_backend::get_popup_snapshot().update_notice( godot_notice_, text );
+    }
+#endif
     std::shared_ptr<query_popup_impl> ui = p_impl.lock();
     if( ui ) {
         ui->mark_resized();
@@ -396,8 +407,47 @@ std::shared_ptr<query_popup_impl> query_popup::create_or_get_impl()
     }
     return impl;
 }
+const std::string &query_popup::get_message() const
+{
+    return text;
+}
+
+bool query_popup::cancel_allowed() const
+{
+    return cancel;
+}
+
+std::vector<std::pair<std::string, std::string>> query_popup::option_descriptions() const
+{
+    // Same derivation as fold_query: the visible label of an option is the
+    // input_context description of its action, not the action name.
+    input_context ctxt( category, pref_kbd_mode );
+    std::vector<std::pair<std::string, std::string>> out;
+    out.reserve( options.size() );
+    for( const query_option &opt : options ) {
+        const std::string &name = ctxt.get_action_name( opt.action );
+        out.emplace_back( opt.action, ctxt.get_desc( opt.action, name, opt.filter ) );
+    }
+    return out;
+}
+
 query_popup::result query_popup::query()
 {
+#if defined(GODOT)
+    // "Press any key" has no options to offer and its answer is the keypress
+    // itself, so it needs the capture path rather than the prompt one.
+    if( anykey && options.empty() ) {
+        input_event evt;
+        if( godot_backend::run_anykey_popup_in_godot( get_message(), evt ) ) {
+            return result( false, "ANY_INPUT", evt );
+        }
+    }
+    // Godot draws the prompt where it can; see godot_backend::run_popup_in_godot.
+    std::string action;
+    if( godot_backend::run_popup_in_godot( *this, action ) ) {
+        return result( false, action, input_event() );
+    }
+#endif
     std::shared_ptr<query_popup_impl> ui = create_or_get_impl();
 
     result res;
@@ -453,4 +503,20 @@ bool query_popup::button::contains( const point &p ) const
 static_popup::static_popup()
 {
     ui = create_or_get_impl();
+#if defined(GODOT)
+    // Takes no input and answers nothing: it is on screen for as long as this
+    // object lives. The "Saving game, this may take a while." popup is one of
+    // these, so this path runs on every autosave.
+    godot_notice_ = godot_backend::get_popup_snapshot().push_notice( get_message() );
+#endif
+}
+
+static_popup::~static_popup()
+{
+#if defined(GODOT)
+    if( godot_notice_ != 0 ) {
+        godot_backend::get_popup_snapshot().retire_notice( godot_notice_ );
+        godot_notice_ = 0;
+    }
+#endif
 }

@@ -175,6 +175,9 @@ class game
 {
         friend class editmap_ui;
         friend class main_menu;
+#if defined(GODOT)
+        friend class godot_chargen_access;
+#endif
         friend class exosuit_interact;
         friend class swap_map;
         friend achievements_tracker &get_achievements();

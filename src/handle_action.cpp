@@ -11,6 +11,9 @@
 #include <utility>
 
 #include "action.h"
+#if defined(GODOT)
+#include "godot_anim_snapshot.h"
+#endif
 #include "activity_actor_definitions.h"
 #include "advanced_inv.h"
 #include "auto_note.h"
@@ -403,6 +406,25 @@ input_context game::get_player_input( std::string &action )
                     }
                 }
             }
+
+#if defined(GODOT)
+            // Publish and commit the combat-text frame here, rather than from a
+            // draw callback.
+            //
+            // The overlay's frame boundary is the w_terrain refresh at the end of
+            // game::draw, and game::draw never runs in this build: MapView draws
+            // the map from a snapshot, the HUD is a Godot panel, and nothing asks
+            // the main ui_adaptor to redraw. Measured, not assumed -- an entire
+            // session with a fight in it produced zero commits. Anything routed
+            // through a draw callback therefore cannot reach the screen.
+            //
+            // This loop does run: it is the input wait, and it is already where
+            // SCT is stepped. Called unconditionally so that the frame after the
+            // last text expires publishes an empty list and clears the overlay;
+            // commit_frame is a no-op once there is nothing left on either side.
+            draw_sct();
+            godot_backend::get_anim_snapshot().commit_frame();
+#endif
 
             if( pixel_minimap_option && g->w_pixel_minimap ) {
                 if( liveview.is_enabled() ) {

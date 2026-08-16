@@ -22,6 +22,9 @@
 #include "translations.h"
 #include "ui_manager.h"
 #include "cata_imgui.h"
+#if defined(GODOT)
+#include "godot_uilist_snapshot.h"
+#endif
 #include "imgui/imgui.h"
 #include "imgui/imgui_internal.h"
 
@@ -486,6 +489,41 @@ void uilist::init()
     additional_actions.clear();
 }
 
+bool uilist::has_categories() const
+{
+    return !categories.empty();
+}
+
+const std::vector<std::pair<std::string, std::string>> &uilist::get_categories() const
+{
+    return categories;
+}
+
+size_t uilist::get_current_category() const
+{
+    return current_category;
+}
+
+void uilist::set_current_category( const size_t index )
+{
+    if( index < categories.size() ) {
+        current_category = index;
+    }
+}
+
+bool uilist::entry_in_category( const uilist_entry &entry, const size_t index ) const
+{
+    if( categories.empty() || index >= categories.size() ) {
+        return true;
+    }
+    // A menu can declare categories without a filter; filterlist() would crash
+    // on that, but a backend should not, so treat it as "everything matches".
+    if( !category_filter ) {
+        return true;
+    }
+    return category_filter( entry, categories[index].first );
+}
+
 input_context uilist::create_main_input_context() const
 {
     input_context ctxt( input_category, keyboard_mode::keycode );
@@ -596,15 +634,14 @@ static ImVec2 calc_size( std::string_view line )
     return ImGui::CalcTextSize( remove_color_tags( line ).c_str() );
 }
 
-void uilist::calc_data()
+/// Auto-assign hotkeys, populate the keymap, and give entries left at the
+/// default retval their index.
+///
+/// Split out of calc_data() so the Godot backend can call it: the rest of
+/// calc_data is ImGui measurement, but this part is menu semantics, and without
+/// it entries have no hotkeys and a default retval of -1.
+void uilist::assign_hotkeys()
 {
-    ImGuiStyle s = ImGui::GetStyle();
-    const float frame_padding_y = s.FramePadding.y * 2.0;
-    const float window_border = s.WindowBorderSize * 2.0;
-    const float window_padding_x = s.WindowPadding.x * 2.0;
-    const float main_view_max_y = 0.9 * ImGui::GetMainViewport()->Size.y;
-    const float item_double_spacing_y = s.ItemSpacing.y * 2.0;
-
     std::vector<int> autoassign;
     for( size_t i = 0; i < entries.size(); i++ ) {
         if( entries[ i ].enabled ) {
@@ -636,6 +673,19 @@ void uilist::calc_data()
             hotkey = ctxt.next_unassigned_hotkey( hotkeys, hotkey );
         } while( !assigned && hotkey != input_event() );
     }
+
+}
+
+void uilist::calc_data()
+{
+    ImGuiStyle s = ImGui::GetStyle();
+    const float frame_padding_y = s.FramePadding.y * 2.0;
+    const float window_border = s.WindowBorderSize * 2.0;
+    const float window_padding_x = s.WindowPadding.x * 2.0;
+    const float main_view_max_y = 0.9 * ImGui::GetMainViewport()->Size.y;
+    const float item_double_spacing_y = s.ItemSpacing.y * 2.0;
+
+    assign_hotkeys();
 
     vmax = entries.size();
 
@@ -887,6 +937,15 @@ shared_ptr_fast<uilist_impl> uilist::create_or_get_ui()
 
 shared_ptr_fast<uilist_impl> uilist::query( bool loop, int timeout, bool allow_unfiltered_hotkeys )
 {
+#if defined(GODOT)
+    // Godot renders the menu itself where it can. This is the single hook that
+    // moves most of the game's menus off the curses/ImGui overlay at once --
+    // uilist has 254 call sites. Menus it cannot reproduce fall through to the
+    // path below; see godot_backend::run_uilist_in_godot.
+    if( loop && godot_backend::run_uilist_in_godot( *this ) ) {
+        return nullptr;
+    }
+#endif
     input_context ctxt = create_main_input_context();
 
 #if defined(__ANDROID__)

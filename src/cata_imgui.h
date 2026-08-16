@@ -13,7 +13,10 @@ class nc_color;
 struct input_event;
 using ImGuiInputTextFlags = int;
 
-#if defined(IMTUI) || !(defined(WIN32) || defined(TILES))
+// GODOT drives ImGui through the ImTui *text* backend and composites the
+// resulting cell grid, so it needs the TUI path on every platform -- including
+// Windows, where WIN32 would otherwise select the SDL path.
+#if defined(IMTUI) || defined(GODOT) || !(defined(WIN32) || defined(TILES))
 #   define TUI
 #endif
 
@@ -168,6 +171,13 @@ void draw_colored_text( const std::string &original_text,
 size_t get_string_width( std::string_view str );
 // calculates how much space the text takes vertically, in pixels, including the wrapping
 size_t get_string_height( std::string_view str, float wrap_width );
+
+/// Number of live cataimgui::window objects.
+///
+/// The Godot overlay needs to know when the last menu has gone so it can retire
+/// the ImGui frame that drew it; ImGui's own any_window_shown() cannot say,
+/// because it reads ImGuiWindow::Active, which is only cleared by NewFrame().
+int live_window_count();
 
 class window
 {

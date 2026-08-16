@@ -1,5 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 option(TILES "Build graphical tileset version." "OFF")
+option(GODOT "Build with the Godot rendering backend instead of SDL." "OFF")
 # SDL2 support was removed; SDL3 is the only tiles backend. The option is kept
 # so an old -DUSE_SDL3=OFF command line fails loudly instead of silently
 # building something else.
@@ -126,16 +127,20 @@ if (NOT DYNAMIC_LINKING)
     endif()
     set(BUILD_SHARED_LIBRARIES OFF)
     check_cxx_compiler_flag (-static HAVE_STATIC_FLAG)
-    if (HAVE_STATIC_FLAG)
+    if (HAVE_STATIC_FLAG AND NOT GODOT)
         set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -static")
     endif ()
     # Workaround for cmake link library guesser
     set(CMAKE_EXE_LINK_DYNAMIC_C_FLAGS)       # remove -Wl,-Bdynamic
     set(CMAKE_EXE_LINK_DYNAMIC_CXX_FLAGS)
-    set(CMAKE_SHARED_LIBRARY_C_FLAGS)         # remove -fPIC
-    set(CMAKE_SHARED_LIBRARY_CXX_FLAGS)
-    set(CMAKE_SHARED_LIBRARY_LINK_C_FLAGS)    # remove -rdynamic
-    set(CMAKE_SHARED_LIBRARY_LINK_CXX_FLAGS)
+    if (NOT GODOT)
+        # The Godot backend's only product is a SHARED library, so it must keep
+        # -fPIC and the shared-link flags that the static executable build drops.
+        set(CMAKE_SHARED_LIBRARY_C_FLAGS)         # remove -fPIC
+        set(CMAKE_SHARED_LIBRARY_CXX_FLAGS)
+        set(CMAKE_SHARED_LIBRARY_LINK_C_FLAGS)    # remove -rdynamic
+        set(CMAKE_SHARED_LIBRARY_LINK_CXX_FLAGS)
+    endif ()
 else ()
     if (MINGW AND NOT "${CMAKE_CXX_COMPILER_ID}" MATCHES "Clang")
         # Avoid depending on MinGW runtime DLLs
@@ -163,6 +168,12 @@ endif ()
 
 # Can't compile curses and tiles build's at same time
 if (TILES)
+    set(CURSES OFF)
+endif ()
+
+# GODOT build is a separate rendering backend; mutually exclusive with SDL TILES
+if (GODOT)
+    set(TILES OFF)
     set(CURSES OFF)
 endif ()
 
@@ -217,6 +228,7 @@ endif ()
 message(STATUS "GIT_BINARY                    : ${GIT_EXECUTABLE}")
 message(STATUS "DYNAMIC_LINKING               : ${DYNAMIC_LINKING}")
 message(STATUS "TILES                         : ${TILES}")
+message(STATUS "GODOT                         : ${GODOT}")
 message(STATUS "CURSES                        : ${CURSES}")
 message(STATUS "SOUND                         : ${SOUND}")
 message(STATUS "BACKTRACE                     : ${BACKTRACE}")
@@ -446,6 +458,12 @@ add_subdirectory(src)
 add_subdirectory(data)
 if (NOT MSVC)
     add_subdirectory(src/chkjson)
+endif()
+
+# The Godot backend's only product is a shared library with no main(), so the
+# test executable has nothing to link against (the Makefile forces TESTS=0 too).
+if(GODOT)
+    set(TESTS OFF)
 endif()
 
 if(TESTS)

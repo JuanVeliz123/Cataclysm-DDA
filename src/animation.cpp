@@ -47,6 +47,10 @@
 #include "weather_type.h"
 #endif
 
+#if defined(GODOT)
+#include "godot_anim_snapshot.h"
+#endif
+
 static const activity_id ACT_TARGET_PRACTICE( "ACT_TARGET_PRACTICE" );
 
 namespace
@@ -148,11 +152,14 @@ tripoint_rel_ms relative_view_pos( const avatar &u, const tripoint_bub_ms &p ) n
 }
 
 // Convert p to screen position relative to the current terrain view
+#if !defined(GODOT)
 tripoint_rel_ms relative_view_pos( const game &g, const tripoint_bub_ms &p ) noexcept
 {
     return p - g.ter_view_p + point( POSX, POSY );
 }
+#endif
 
+#if !defined(GODOT)
 void draw_explosion_curses( game &g, const tripoint_bub_ms &center, const int r,
                             const nc_color &col )
 {
@@ -200,6 +207,7 @@ void draw_explosion_curses( game &g, const tripoint_bub_ms &center, const int r,
         anim.progress();
     }
 }
+#endif
 
 constexpr explosion_neighbors operator | ( explosion_neighbors lhs, explosion_neighbors rhs )
 {
@@ -211,6 +219,7 @@ constexpr explosion_neighbors operator ^ ( explosion_neighbors lhs, explosion_ne
     return static_cast<explosion_neighbors>( static_cast< int >( lhs ) ^ static_cast< int >( rhs ) );
 }
 
+#if !defined(GODOT)
 void draw_custom_explosion_curses( game &g,
                                    const std::list< std::map<tripoint_bub_ms, explosion_tile> > &layers )
 {
@@ -284,6 +293,7 @@ void draw_custom_explosion_curses( game &g,
         }
     }
 }
+#endif
 } // namespace
 
 #if defined(TILES)
@@ -325,6 +335,47 @@ void explosion_handler::draw_explosion( const tripoint_bub_ms &p, const int r, c
     }
 }
 
+#elif defined(GODOT)
+void explosion_handler::draw_explosion( const tripoint_bub_ms &p, const int r, const nc_color &col )
+{
+    if( test_mode ) {
+        return;
+    }
+    if( !is_radius_visible( p, r ) ) {
+        return;
+    }
+
+    // Same expanding-ring shape draw_explosion_curses produces, but published as
+    // map-positioned glyphs for the Godot overlay instead of written into the
+    // terrain window, which the Godot backend does not present.
+    explosion_animation anim;
+    int frame = 0;
+    shared_ptr_fast<game::draw_callback_t> explosion_cb =
+    make_shared_fast<game::draw_callback_t>( [&]() {
+        godot_backend::AnimSnapshot &anims = godot_backend::get_anim_snapshot();
+        if( r == 0 ) {
+            anims.add_glyph( p, U'*', col );
+        }
+        for( int i = 1; i <= frame; ++i ) {
+            // Ring of radius i, matching draw_explosion_curses glyph for glyph.
+            anims.add_glyph( p + tripoint_rel_ms( -i, -i, 0 ), U'/', col );
+            anims.add_glyph( p + tripoint_rel_ms( i, -i, 0 ), U'\\', col );
+            anims.add_glyph( p + tripoint_rel_ms( -i, i, 0 ), U'\\', col );
+            anims.add_glyph( p + tripoint_rel_ms( i, i, 0 ), U'/', col );
+            for( int j = 1 - i; j < 0 + i; j++ ) {
+                anims.add_glyph( p + tripoint_rel_ms( j, -i, 0 ), U'-', col );
+                anims.add_glyph( p + tripoint_rel_ms( j, i, 0 ), U'-', col );
+                anims.add_glyph( p + tripoint_rel_ms( -i, j, 0 ), U'|', col );
+                anims.add_glyph( p + tripoint_rel_ms( i, j, 0 ), U'|', col );
+            }
+        }
+    } );
+    g->add_draw_callback( explosion_cb );
+
+    for( frame = 1; frame <= r; frame++ ) {
+        anim.progress();
+    }
+}
 #else
 void explosion_handler::draw_explosion( const tripoint_bub_ms &p, const int r, const nc_color &col )
 {
@@ -472,6 +523,60 @@ void explosion_handler::draw_custom_explosion(
     }
 
     tilecontext->void_custom_explosion();
+#elif defined(GODOT)
+    // Same neighbourhood-to-glyph mapping as draw_custom_explosion_curses, but
+    // published in map coordinates for the Godot overlay.
+    explosion_animation anim;
+    std::map<tripoint_bub_ms, explosion_tile> combined_layer;
+
+    shared_ptr_fast<game::draw_callback_t> explosion_cb =
+    make_shared_fast<game::draw_callback_t>( [&]() {
+        godot_backend::AnimSnapshot &anims = godot_backend::get_anim_snapshot();
+        for( const auto &pr : combined_layer ) {
+            char32_t sym = U'\0';
+            switch( pr.second.neighborhood ) {
+                case N_NORTH: sym = U'^'; break;
+                case N_SOUTH: sym = U'v'; break;
+                case N_WEST: sym = U'<'; break;
+                case N_EAST: sym = U'>'; break;
+                case N_NORTH | N_SOUTH:
+                case N_NORTH | N_SOUTH | N_WEST:
+                case N_NORTH | N_SOUTH | N_EAST:
+                    sym = U'|';
+                    break;
+                case N_WEST | N_EAST:
+                case N_WEST | N_EAST | N_NORTH:
+                case N_WEST | N_EAST | N_SOUTH:
+                    sym = U'-';
+                    break;
+                case N_NORTH | N_WEST:
+                case N_SOUTH | N_EAST:
+                    sym = U'/';
+                    break;
+                case N_SOUTH | N_WEST:
+                case N_NORTH | N_EAST:
+                    sym = U'\\';
+                    break;
+                case N_NO_NEIGHBORS:
+                    sym = U'*';
+                    break;
+                case N_WEST | N_EAST | N_NORTH | N_SOUTH:
+                    // Interior of the blast; the curses path draws nothing here.
+                    break;
+            }
+            if( sym != U'\0' ) {
+                anims.add_glyph( pr.first, sym, pr.second.color );
+            }
+        }
+    } );
+    g->add_draw_callback( explosion_cb );
+
+    for( const auto &layer : layers ) {
+        combined_layer.insert( layer.begin(), layer.end() );
+        if( is_layer_visible( layer ) ) {
+            anim.progress();
+        }
+    }
 #else
     draw_custom_explosion_curses( *g, layers );
 #endif
@@ -480,6 +585,7 @@ void explosion_handler::draw_custom_explosion(
 namespace
 {
 
+#if !defined(GODOT)
 void draw_bullet_curses( map &m, const tripoint_bub_ms &t, const char bullet,
                          const tripoint_bub_ms *const p )
 {
@@ -503,6 +609,7 @@ void draw_bullet_curses( map &m, const tripoint_bub_ms &t, const char bullet,
     g->add_draw_callback( bullet_cb );
     bullet_animation().progress();
 }
+#endif
 
 } // namespace
 
@@ -545,6 +652,30 @@ void game::draw_bullet( const tripoint_bub_ms &t, const int /*i*/,
     tilecontext->void_bullet();
 }
 
+#elif defined(GODOT)
+void game::draw_bullet( const tripoint_bub_ms &t, const int /*i*/,
+                        const std::vector<tripoint_bub_ms> &/*trajectory*/,
+                        const char bullet )
+{
+    if( test_mode ) {
+        return;
+    }
+    if( !is_point_visible( t ) ) {
+        return;
+    }
+    const tripoint_bub_ms vp = u.pos_bub() + u.view_offset;
+    if( vp.z() != t.z() ) {
+        return;
+    }
+
+    shared_ptr_fast<draw_callback_t> bullet_cb = make_shared_fast<draw_callback_t>( [&]() {
+        godot_backend::get_anim_snapshot().add_glyph(
+            t, static_cast<char32_t>( bullet ), c_red );
+    } );
+    add_draw_callback( bullet_cb );
+
+    bullet_animation().progress();
+}
 #else
 void game::draw_bullet( const tripoint_bub_ms &t, const int i,
                         const std::vector<tripoint_bub_ms> &trajectory,
@@ -558,6 +689,7 @@ namespace
 {
 // short visual animation (player, monster, ...) (hit, dodge, ...)
 // cTile is a UTF-8 strings, and must be a single cell wide!
+#if !defined(GODOT)
 void hit_animation( const avatar &u, const tripoint_bub_ms &center, nc_color cColor,
                     const std::string &cTile )
 {
@@ -580,12 +712,38 @@ void hit_animation( const avatar &u, const tripoint_bub_ms &center, nc_color cCo
         inp_mngr.reset_timeout();
     }
 }
+#endif
 
+#if defined(GODOT)
+/// Godot counterpart of hit_animation(): same single-frame flash and timing, but
+/// the marker is published to the overlay rather than written into w_terrain.
+void hit_animation_godot( const tripoint_bub_ms &center, const nc_color &color,
+                          char32_t sym )
+{
+    if( relative_view_pos( get_avatar(), center ).z() != 0 ) {
+        return;
+    }
+    shared_ptr_fast<game::draw_callback_t> hit_cb =
+    make_shared_fast<game::draw_callback_t>( [&]() {
+        godot_backend::get_anim_snapshot().add_glyph( center, sym, color );
+    } );
+    g->add_draw_callback( hit_cb );
+
+    ui_manager::redraw();
+    inp_mngr.set_timeout( get_option<int>( "ANIMATION_DELAY" ) );
+    // Skip input (if any), because holding down a key with sleep_for can get yourself killed
+    inp_mngr.get_input_event();
+    inp_mngr.reset_timeout();
+}
+#endif
+
+#if !defined(GODOT)
 void draw_hit_mon_curses( const tripoint_bub_ms &center, const monster &m, const avatar &u,
                           const bool dead )
 {
     hit_animation( u, center, red_background( m.type->color ), dead ? "%" : m.symbol() );
 }
+#endif
 
 } // namespace
 
@@ -606,6 +764,18 @@ void game::draw_hit_mon( const tripoint_bub_ms &p, const monster &m, const bool 
     tilecontext->init_draw_hit( m );
 }
 
+#elif defined(GODOT)
+void game::draw_hit_mon( const tripoint_bub_ms &p, const monster &m, const bool dead )
+{
+    const std::string sym = dead ? "%" : m.symbol();
+    // The marker glyph says a hit landed; the reaction (SP-5) is what makes it
+    // read as a blow. MapView owns its timing, so this only reports the event.
+    godot_backend::get_anim_snapshot().add_hit( p, u.pos_bub(),
+            red_background( m.type->color ) );
+    hit_animation_godot( p, red_background( m.type->color ),
+                         sym.empty() ? U'%' : static_cast<char32_t>(
+                             static_cast<unsigned char>( sym[0] ) ) );
+}
 #else
 void game::draw_hit_mon( const tripoint_bub_ms &p, const monster &m, const bool dead )
 {
@@ -615,12 +785,14 @@ void game::draw_hit_mon( const tripoint_bub_ms &p, const monster &m, const bool 
 
 namespace
 {
+#if !defined(GODOT)
 void draw_hit_player_curses( const game &/* g */, const Character &p, const int dam )
 {
     nc_color const col = !dam ? yellow_background( p.symbol_color() ) : red_background(
                              p.symbol_color() );
     hit_animation( get_avatar(), p.pos_bub(), col, p.symbol() );
 }
+#endif
 } //namespace
 
 #if defined(TILES)
@@ -640,6 +812,19 @@ void game::draw_hit_player( const Character &p, const int dam ) const
     // this creates a blocking delay in user inputs, to give the player time to mentally register the hit
     bullet_animation().progress();
 }
+#elif defined(GODOT)
+void game::draw_hit_player( const Character &p, const int dam ) const
+{
+    const nc_color col = !dam ? yellow_background( p.symbol_color() )
+                         : red_background( p.symbol_color() );
+    const std::string sym = p.symbol();
+    // Nobody to point at: whoever struck is not passed in here. A hit with no
+    // direction is a straight recoil, which is the right read for the avatar.
+    godot_backend::get_anim_snapshot().add_hit( p.pos_bub(), p.pos_bub(), col );
+    hit_animation_godot( p.pos_bub(), col,
+                         sym.empty() ? U'@' : static_cast<char32_t>(
+                             static_cast<unsigned char>( sym[0] ) ) );
+}
 #else
 void game::draw_hit_player( const Character &p, const int dam ) const
 {
@@ -650,6 +835,7 @@ void game::draw_hit_player( const Character &p, const int dam ) const
 /* Line drawing code, not really an animation but should be separated anyway */
 namespace
 {
+#if !defined(GODOT)
 void draw_line_curses( game &g, const tripoint_bub_ms &center,
                        const std::vector<tripoint_bub_ms> &ret,
                        bool noreveal )
@@ -679,6 +865,7 @@ void draw_line_curses( game &g, const tripoint_bub_ms &center,
         }
     }
 }
+#endif
 } //namespace
 
 #if defined(TILES)
@@ -699,6 +886,30 @@ void game::draw_line( const tripoint_bub_ms &p, const tripoint_bub_ms &center,
     tilecontext->init_draw_line( p, points, "line_target", true );
 }
 
+#elif defined(GODOT)
+void game::draw_line( const tripoint_bub_ms &p, const tripoint_bub_ms &center,
+                      const std::vector<tripoint_bub_ms> &points, bool noreveal )
+{
+    const map &here = get_map();
+
+    if( !u.sees( here, p ) ) {
+        return;
+    }
+    ( void )center;
+
+    // The curses path re-draws each tile on the line with highlight() set; MapView
+    // owns the tiles here, so publish highlights for it to draw over them instead.
+    // Tiles the player cannot see keep the curses '?' so aiming does not reveal
+    // what is behind them.
+    godot_backend::AnimSnapshot &anims = godot_backend::get_anim_snapshot();
+    for( const tripoint_bub_ms &pt : points ) {
+        if( noreveal && !u.sees( here, pt ) ) {
+            anims.add_glyph( pt, U'?', c_dark_gray );
+        } else {
+            anims.add_highlight( pt );
+        }
+    }
+}
 #else
 void game::draw_line( const tripoint_bub_ms &p, const tripoint_bub_ms &center,
                       const std::vector<tripoint_bub_ms> &points, bool noreveal )
@@ -715,6 +926,7 @@ void game::draw_line( const tripoint_bub_ms &p, const tripoint_bub_ms &center,
 
 namespace
 {
+#if !defined(GODOT)
 void draw_line_curses( game &g, const std::vector<tripoint_bub_ms> &points )
 {
     avatar &player_character = get_avatar();
@@ -727,6 +939,7 @@ void draw_line_curses( game &g, const std::vector<tripoint_bub_ms> &points )
                               relative_view_pos( player_character, points.back() );
     mvwputch( g.w_terrain, p.xy().raw(), c_white, 'X' );
 }
+#endif
 } //namespace
 
 #if defined(TILES)
@@ -734,6 +947,17 @@ void game::draw_line( const tripoint_bub_ms &p, const std::vector<tripoint_bub_m
 {
     draw_line_curses( *this, points );
     tilecontext->init_draw_line( p, points, "line_trail", false );
+}
+#elif defined(GODOT)
+void game::draw_line( const tripoint_bub_ms &/*p*/, const std::vector<tripoint_bub_ms> &points )
+{
+    godot_backend::AnimSnapshot &anims = godot_backend::get_anim_snapshot();
+    for( const tripoint_bub_ms &pt : points ) {
+        anims.add_highlight( pt );
+    }
+    if( !points.empty() ) {
+        anims.add_glyph( points.back(), U'X', c_white );
+    }
 }
 #else
 void game::draw_line( const tripoint_bub_ms &/*p*/, const std::vector<tripoint_bub_ms> &points )
@@ -749,6 +973,11 @@ void game::draw_cursor( const tripoint_bub_ms &p ) const
     mvwputch_inv( w_terrain, rp.xy().raw(), c_light_green, 'X' );
     tilecontext->init_draw_cursor( p );
 }
+#elif defined(GODOT)
+void game::draw_cursor( const tripoint_bub_ms &p ) const
+{
+    godot_backend::get_anim_snapshot().add_glyph( p, U'X', c_light_green );
+}
 #else
 void game::draw_cursor( const tripoint_bub_ms &p ) const
 {
@@ -759,6 +988,14 @@ void game::draw_cursor( const tripoint_bub_ms &p ) const
 
 void game::draw_cursor_unobscuring( const tripoint_bub_ms &p ) const
 {
+#if defined(GODOT)
+    // Four arrows pointing inward at the target, leaving the tile itself visible.
+    godot_backend::AnimSnapshot &anims = godot_backend::get_anim_snapshot();
+    anims.add_glyph( p + tripoint_rel_ms( point::north_east.x, point::north_east.y, 0 ), U'↙', c_cyan );
+    anims.add_glyph( p + tripoint_rel_ms( point::south_east.x, point::south_east.y, 0 ), U'↖', c_cyan );
+    anims.add_glyph( p + tripoint_rel_ms( point::north_west.x, point::north_west.y, 0 ), U'↘', c_cyan );
+    anims.add_glyph( p + tripoint_rel_ms( point::south_west.x, point::south_west.y, 0 ), U'↗', c_cyan );
+#else
     const tripoint_rel_ms rp = relative_view_pos( *this, p );
     mvwputch_inv( w_terrain, ( rp.xy() + point::north_east ).raw(), c_cyan, "↙" );
     mvwputch_inv( w_terrain, ( rp.xy() + point::south_east ).raw(), c_cyan, "↖" );
@@ -767,12 +1004,18 @@ void game::draw_cursor_unobscuring( const tripoint_bub_ms &p ) const
 #if defined(TILES)
     tilecontext->init_draw_cursor( p );
 #endif
+#endif
 }
 
 #if defined(TILES)
 void game::draw_highlight( const tripoint_bub_ms &p )
 {
     tilecontext->init_draw_highlight( p );
+}
+#elif defined(GODOT)
+void game::draw_highlight( const tripoint_bub_ms &p )
+{
+    godot_backend::get_anim_snapshot().add_highlight( p );
 }
 #else
 void game::draw_highlight( const tripoint_bub_ms & )
@@ -813,6 +1056,7 @@ void game::draw_weather( const weather_printable &w ) const
 
 namespace
 {
+#if !defined(GODOT)
 void draw_sct_curses( const game &g )
 {
     avatar &player_character = get_avatar();
@@ -836,6 +1080,7 @@ void draw_sct_curses( const game &g )
         wprintz( g.w_terrain, col2, text.getText( "second" ) );
     }
 }
+#endif
 } //namespace
 
 #if defined(TILES)
@@ -845,6 +1090,68 @@ void game::draw_sct() const
         tilecontext->init_draw_sct();
     } else {
         draw_sct_curses( *this );
+    }
+}
+#elif defined(GODOT)
+/**
+ * Scrolling combat text: damage numbers, "Critical!", healing, XP.
+ *
+ * There was no GODOT branch here, so this fell to draw_sct_curses, which writes
+ * into w_terrain -- the one window the Godot backend deliberately does not
+ * present, because MapView owns the map. The numbers were being computed,
+ * positioned and stepped every turn and then discarded, so the player had no
+ * way to see how hard they hit or were hit.
+ *
+ * Positions come straight from cSCT, which already reports bubble map
+ * coordinates with the scroll offset for the current step folded in. The one
+ * adjustment is undoing cSCT's own centring: it subtracts half the text's
+ * *character count* from the x position, which is right for a grid of cells and
+ * wrong for proportional text drawn over 32-pixel tiles. cata_tiles::draw_sct_frame
+ * does the same subtraction in its font path and for the same reason; the
+ * renderer is then told the alignment and does the centring itself.
+ */
+void game::draw_sct() const
+{
+    for( const scrollingcombattext::cSCT &sct : SCT.vSCT ) {
+        const int full_width = utf8_width( sct.getText() );
+        const direction dir = sct.getDirection();
+        const int direction_offset = ( -displace_XY( dir ).x + 1 ) * full_width / 2;
+
+        godot_backend::anim_align align = godot_backend::anim_align::left;
+        switch( dir ) {
+            case direction::NORTHWEST:
+            case direction::WEST:
+            case direction::SOUTHWEST:
+                align = godot_backend::anim_align::right;
+                break;
+            case direction::NORTH:
+            case direction::CENTER:
+            case direction::SOUTH:
+                align = godot_backend::anim_align::center;
+                break;
+            default:
+                break;
+        }
+
+        // Fades out over the back half of its life, matching the curses path's
+        // switch to the dimmer colour at the same point.
+        const float life = 1.0f - static_cast<float>( sct.getStep() ) /
+                           static_cast<float>( scrollingcombattext::iMaxSteps );
+        const bool is_old = sct.getStep() >= scrollingcombattext::iMaxSteps / 2;
+        const tripoint_bub_ms at( sct.getPosX() + direction_offset, sct.getPosY(),
+                                  u.pos_bub().z() );
+
+        // Two runs, drawn adjacent and coloured separately -- "17" then
+        // "Critical!" -- exactly as the curses path prints them.
+        for( int j = 0; j < 2; ++j ) {
+            const std::string part = sct.getText( j == 0 ? "first" : "second" );
+            if( part.empty() ) {
+                continue;
+            }
+            godot_backend::get_anim_snapshot().add_text(
+                at, part, msgtype_to_color( sct.getMsgType( j == 0 ? "first" : "second" ), is_old ),
+                align, std::max( 0.0f, life ), j );
+        }
     }
 }
 #else

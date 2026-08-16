@@ -82,6 +82,10 @@
 #include "ui_manager.h"
 #include "uilist.h"
 #include "uistate.h"
+
+#if defined(GODOT)
+#include "godot_overmap_snapshot.h"
+#endif
 #include "units.h"
 #include "units_utility.h"
 #include "vehicle.h"
@@ -1330,6 +1334,17 @@ static void draw( overmap_draw_data_t &data )
         return;
     }
 #endif // TILES
+#if defined( GODOT )
+    if( godot_backend::get_overmap_snapshot().tileset_ready() ) {
+        // OvermapView paints the sprites; publish the draw list and leave the
+        // curses window erased so the cell overlay does not double it in ASCII.
+        godot_backend::update_overmap_snapshot( data.cursor_pos, data.cursor_pos,
+                                                uistate.overmap_show_overlays );
+        werase( g->w_overmap );
+        wnoutrefresh( g->w_overmap );
+        return;
+    }
+#endif // GODOT
     draw_ascii( g->w_overmap, data );
 }
 
@@ -2077,6 +2092,11 @@ static tripoint_abs_omt display()
     map &here = get_map();
 
     overmap_draw_data_t &data = g->overmap_data;
+#if defined( GODOT )
+    // Tells the Godot host to show OvermapView for exactly as long as this loop
+    // runs, and to hide it again however the loop exits.
+    const godot_backend::overmap_active_guard godot_overmap_guard;
+#endif
     tripoint_abs_omt &orig = data.origin_pos;
     std::vector<tripoint_abs_omt> &display_path = data.display_path;
     tripoint_abs_omt &select = data.select;
