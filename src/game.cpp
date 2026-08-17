@@ -3238,6 +3238,19 @@ void game::draw_callback_t::operator()()
     }
 }
 
+void game::run_draw_callbacks()
+{
+    for( auto it = draw_callbacks.begin(); it != draw_callbacks.end(); ) {
+        shared_ptr_fast<draw_callback_t> cb = it->lock();
+        if( cb ) {
+            ( *cb )();
+            ++it;
+        } else {
+            it = draw_callbacks.erase( it );
+        }
+    }
+}
+
 void game::add_draw_callback( const shared_ptr_fast<draw_callback_t> &cb )
 {
     draw_callbacks.erase(
@@ -3360,15 +3373,7 @@ void game::draw( ui_adaptor &ui )
     werase( w_terrain );
     void_blink_curses();
     draw_ter();
-    for( auto it = draw_callbacks.begin(); it != draw_callbacks.end(); ) {
-        shared_ptr_fast<draw_callback_t> cb = it->lock();
-        if( cb ) {
-            ( *cb )();
-            ++it;
-        } else {
-            it = draw_callbacks.erase( it );
-        }
-    }
+    run_draw_callbacks();
     draw_async_anim_curses();
     // Only draw blinking symbols when in active phase
     if( blink_active_phase ) {

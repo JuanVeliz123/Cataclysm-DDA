@@ -4,8 +4,55 @@
 **Read first:** [`architecture_adr.md`](architecture_adr.md), [`../GODOT_MIGRATION_TASKS.md`](../GODOT_MIGRATION_TASKS.md), [`../RENDERING_AND_GODOT_MIGRATION.md`](../RENDERING_AND_GODOT_MIGRATION.md).
 **Picking up work:** [`BACKLOG.md`](BACKLOG.md) — sprite and menu tasks, sized and ordered, with the verdicts on the sprite-pipeline design doc.
 
-## Current state (2026-08-16)
+## Current state (2026-08-17)
 
+- **Depth (ADR-005):** items 1, 3, 4 are done and 2 dissolved into four flag
+  bits; only item 6 (parallax) is open, and it waits on ADR-004. The map now
+  publishes the levels below the avatar — each column walks down and stops at
+  the first floor, which is why this cost nothing like what the ADR budgeted.
+  Read ADR-005's post-mortem before estimating any of the remaining work: four
+  items in a row were settled by printing a value that had been reasoned about
+  at length instead.
+- **3D (ADR-006, proposed):** the next question asked of the renderer is whether
+  the world can move into a 3D scene — same sprites, same fixed top-down angle,
+  but with Godot's lights, shadows, fog and depth buffer instead of hand-rolled
+  ranks and tints. ADR-006 is the analysis and `BACKLOG.md` Part 4 is the
+  sequence. Three things to know before reading either: it needs **no new art**
+  and no C++ change for its first milestone; ADR-004 is a hard prerequisite; and
+  its third milestone (the tilt experiment) is explicitly allowed to cancel the
+  rest, because most of what a *flat* 3D world buys was available in 2D anyway.
+  **ADR-006 is accepted and `USE_3D_MAP` is on** (2026-08-17): the 3D backend is the
+  product path and MapView is the fallback. 3D-0 through 3D-5 are done, the tilt experiment
+  came back positive, and the C++ that was outstanding -- the sun's real azimuth, the
+  unbuffered light sources, the per-level light texture, `fog_for_depth` moving into the
+  shader -- all landed at API 21.
+
+  **`TILT_DEGREES` defaults to 45**: the world stands up. 3D-1d, the last blocker, turned
+  out to be a fix for a problem that was not there -- the glyphs and the animation overlay
+  annotate the ground, and a ground point's screen position is unchanged by the tilt by
+  construction. Part 4 is finished.
+- **Meshes are the destination** (ADR-006's amendment): creatures first, then everything,
+  accepting a half-migrated map that looks half-migrated. The plumbing is in at API 22 --
+  `get_creatures()` publishes identity, `creature_meshes.gd` draws anything with art under
+  `res://meshes/creatures/<id>.*`, and everything else stays a sprite. **Nothing changes
+  until a mesh exists.** `godot/meshes/creatures/README.md` is what a modeller needs; the
+  first-frame log prints the creature ids it has seen, which is how to learn the name of the
+  thing you are looking at.
+- What is otherwise left: VER-1's tuning pass over the dozen constants the 3D work added,
+  and Part 2, which is the migration's actual critical path. The API is **20**: the light channel needs a `make GODOT=1`. What
+  nobody has done is *look* at the stood-up world -- `set_tilt_degrees(45)` or
+  `TILT_DEGREES`, then judge whether one angle suits trees, walls and table tops. That
+  is the question ADR-006 was written to answer and the only one still open.
+  **3D-0, 3D-1a, 3D-1b and 3D-1c are done.** The world renders in its own viewport
+  (ADR-004), and there is a flat 3D backend behind `host.gd`'s `USE_3D_MAP` — off by
+  default, drawing everything the 2D backend draws, with the depth on each sprite and
+  about a dozen batches where the 2D path needs hundreds. Its milestone is explicitly
+  *not* met: "indistinguishable from the 2D backend" is a claim about pixels and needs
+  a person with a GPU. If the map comes out dark, try `pipeline_encodes_srgb` in
+  `map_tiles_3d.gdshader` first. **The API is 21** and the light channel is nine floats
+  per source; a `make GODOT=1` is required. **What is left is the tilt experiment (3D-3), and it
+  is allowed to end Part 4** — read ADR-006's landed notes on why it turned out to
+  depend on lights and shadows rather than being independent of them.
 - **Architecture (ADR-002 + ADR-003):** Godot owns present. C++ keeps game logic + tileset
   id resolution. In-session map is drawn by **`MapView`** from
   `godot_map_snapshot` draw lists (UltimateCataclysm). Session HUD, inventory,
@@ -53,6 +100,65 @@
   `godot_animation.*` and the `GameView` node are gone. Cells go to
   `ViewSnapshot`, tiles to `MapSnapshot`, the minimap to its own RGBA snapshot.
   Do not reintroduce a CPU surface.
+- **Compile-check GDScript with Godot, not with `gdparse`.** `gdparse` (gdtoolkit)
+  checks syntax only: a script calling a `Transform2D` method on a `Transform3D`, or
+  naming an enum that does not exist, passes it and then fails to compile at load.
+  What that looks like is *not* an error anyone connects to a script — `set_script()`
+  leaves the node scriptless, `has_method("setup")` answers false, the caller's guard
+  skips it, and you get a blank map and a probe stage that "never ran". It cost two
+  rounds once; do not pay again:
+
+  ```bash
+  ./build-scripts/check-godot-scripts.sh        # scripts, shaders, 3D placement
+  GODOT=/path/to/Godot ./build-scripts/check-godot-scripts.sh
+  ```
+
+  It also runs `geometry_check.tscn`, which projects the 3D backend's sprite placements
+  back through the camera and fails if they do not land where the 2D backend draws them
+  -- at any tilt, without a GPU.
+
+  It needs neither the GDExtension nor a GPU, so it runs anywhere. Run it before
+  handing anything over.
+- **Where Godot's own logs go**, which is not obvious and is easy to destroy:
+
+  ```
+  ~/Library/Application Support/Godot/app_userdata/CataclysmDDA/logs/godot.log
+  ```
+
+  (macOS; `%APPDATA%\Godot\app_userdata\...` on Windows, `~/.local/share/godot/...` on
+  Linux.) File logging is on by Godot's own default, and the path is the *project's* user
+  directory for editor runs and game runs alike -- so every headless check writes there
+  too. `godot.log` is the latest run and Godot keeps only about five rotated copies, which
+  means **running `check-godot-scripts.sh` a few times destroys the log of whatever you
+  were trying to diagnose.** Capture first, gate second; or bypass the file entirely:
+
+  ```bash
+  /path/to/Godot --path godot --verbose 2>&1 | tee /tmp/godot-editor.log
+  ```
+
+  A hard crash also leaves a stack trace in `~/Library/Logs/DiagnosticReports/Godot-*.ips`.
+  An *empty* DiagnosticReports directory after a "crash" is information: it means the
+  process exited or hung rather than faulting.
+- **`godot/project.godot` is rewritten by the editor**, and it has already cost
+  one setting. Two rules:
+
+  1. **Comments start with `;`, never `#`.** A `#` line is not a comment in this
+     format — it is folded into the key that follows it. `viewport/hdr_2d=true`
+     sat under a `#` block and was loaded as a setting called
+     `#Letsthetileshader…viewport/hdr_2d`, so 2D HDR was off for as long as that
+     comment existed and the fire glow had nothing to key on.
+  2. **`project.godot` therefore carries no comments at all** beyond the header Godot
+     writes itself. Every one it had was deleted the next time somebody opened the
+     project, so the file churned on every editor session and a *real* mangling would
+     have hidden among the comment deletions. The reasoning lives here instead; the file
+     is settings only, and a diff on it now means something.
+  3. **Opening the project in the editor drops every comment and every value
+     equal to its default.** `renderer/rendering_method` and
+     `window/stretch/scale_mode` were both explicit and both deleted for that
+     reason; they are Godot's defaults (`forward_plus` / `mobile` /
+     `gl_compatibility`, and `fractional`), and `config/features` still records
+     the Forward+ choice. Do not re-add them and then wonder who deleted them:
+     put the reasoning in this directory instead.
 - **Tileset data:** `gfx/UltimateCataclysm/` is a **build artifact**, not something
   you download. `/gfx/*` stays gitignored; compose it from upstream source art:
 
@@ -83,6 +189,13 @@ make GODOT=1 CROSS=x86_64-w64-mingw32- BACKTRACE=0 -j$(nproc)   # Windows x86_64
   (`.dylib` / `.so` / `.dll`) → copied to `godot/bin/` (gitignored).
 - Run: `godot --path godot`
   (macOS: `arch -arm64 /Applications/Godot.app/Contents/MacOS/Godot --path godot`)
+  The engine is **4.7.1-stable**; `compatibility_minimum` in
+  `cataclysm.gdextension` is 4.5, which is the godot-cpp the bindings were
+  generated against, not the engine to run. On this Linux box it lives at
+  `~/godot-bin/` with a symlink at `~/.local/bin/godot`, so `~/.local/bin` has
+  to be on PATH. Install it somewhere durable: a copy under `/tmp` gets swept
+  and the failure reads as `env: 'godot': No such file or directory` in the
+  middle of a verification run.
 - Load check without a window: `godot --headless --path godot --editor --quit`.
   Use `--editor`: a plain `--quit` run on a project with no `.godot/` cache
   never verifies GDExtensions and exits 0 even when the library cannot load.
@@ -254,11 +367,11 @@ every turn, and then discarded before anything can show it.
 
 Three instances so far:
 
-| Feature | Wired to | Found by |
-|---|---|---|
-| Pixel minimap | never drawn by any Godot node | reading the call graph |
-| Scrolling combat text | `w_terrain`, via `draw_sct()`'s `#else` | instrumenting the chain |
-| The whole animation overlay | `commit_frame()` on the `w_terrain` refresh | `commits: 0` |
+| Feature | Wired to | Found by | Status |
+|---|---|---|---|
+| Pixel minimap | never drawn by any Godot node | reading the call graph | fixed |
+| Scrolling combat text | `w_terrain`, via `draw_sct()`'s `#else` | instrumenting the chain | fixed |
+| The whole animation overlay | `commit_frame()` on the `w_terrain` refresh | `commits: 0` | fixed |
 
 The measurement that made the third one legible, over a full session containing a
 real fight:
@@ -266,13 +379,33 @@ real fight:
     commits: 0   glyphs_added: 0   texts_added: 0   hits_added: 1   generation: 0
 
 `hits_added: 1` is the control: that one path is called directly from game logic
-rather than from a draw callback, so it works. Everything else on the overlay —
-explosions, bullets, the aim line and cursor, trajectory highlights, hit markers —
-has never reached a frame.
+rather than from a draw callback, so it worked while everything else on the
+overlay — explosions, bullets, the aim line and cursor, trajectory highlights,
+hit markers — did not.
 
-**Why our tooling missed it.** The headless probe asserts that snapshots are
-*published*. It has never asserted that anything *consumes* them, and a generation
-counter stuck at zero looks exactly like a quiet turn. "Computed and thrown away"
+**Repaired, and deliberately not by repairing `game::draw()`.** That function is
+eight statements and six are curses, all of them things this port is deleting;
+calling it to reach the other two would have resurrected the curses draw path
+and left the frame boundary depending on a `w_terrain` refresh. Instead
+`game::run_draw_callbacks()` was lifted out of it unchanged — so SDL and curses
+are unaffected — and `godot_backend::publish_transient_visuals()` runs it and
+commits, from the input wait and from the animation loops. Same fixture, after:
+
+    commits: 197   glyphs_added: 1   texts_added: 24   generation: 10
+
+`glyphs_added` leaving zero is the result: a hit marker reaching a frame through
+the path explosions and bullets use.
+
+Do not rebuild this on `ui_manager`. The animation loops used to reach
+`game::draw` through `invalidate_main_ui_adaptor` plus `redraw_invalidated`, and
+that stack goes away with the overlay at MENU-9.
+
+**Why our tooling missed it, and what now catches it.** The headless probe
+asserted that snapshots are *published*, never that anything *consumes* them, and
+a generation counter stuck at zero looks exactly like a quiet turn. VER-0 now
+fails a run on both signals — a generation still at zero, and a fixture stage
+that never executed — which would have caught all three of these on the day each
+landed. It is not a substitute for the two rules below. "Computed and thrown away"
 and "not computed at all" are indistinguishable from outside, and both look like
 "no bug" to a probe that only reads the producer side.
 
@@ -285,6 +418,26 @@ So, two rules:
    assuming it is subtly wrong.
 
 Found jointly while migrating the menus and repairing the animation overlay.
+
+## A queued command must not open a blocking screen
+
+`post_game_command` runs its work inside `drain_game_commands()`, which runs
+inside `wait_for_event()`, which is inside `handle_input()`. So a command that
+opens a modal screen starts that screen's own input loop *from inside the input
+wait*. If nothing dismisses it, the game thread never comes back: the clock
+stops, `get_player_input()` runs once and parks, and `~CDDAHost` refuses to run
+static destructors against a thread that will not stop.
+
+`request_menu_action` opens screens this way and is fine -- but only because a
+Godot panel reliably attends and can dismiss what it opened. **The safety
+property is "someone will dismiss this", not "this is a legal thing to queue."**
+In a headless run nobody attends, which makes the fixture the strict case rather
+than the lenient one.
+
+Cost of learning this: a debug hook that opened the surroundings list directly
+took the probe from 8/9 stages to 2/10, and the resulting starved command queue
+was misdiagnosed and written up as a pre-existing mystery before being traced
+back to itself.
 
 ## Constraints (do not violate)
 

@@ -22,17 +22,9 @@ window/size/window_width_override=1600
 window/size/window_height_override=900
 window/stretch/mode="canvas_items"
 window/stretch/aspect="expand"
-window/stretch/scale_mode="fractional"
 window/vsync/vsync_mode=0
 
 [rendering]
 
-; Forward+ is what makes 2D glow and post-processing available (ADR-003).
-; Mobile is the fallback tier; GL Compatibility still works and can be forced at
-; runtime with --rendering-driver opengl3 for GPUs without Vulkan.
-renderer/rendering_method="forward_plus"
-renderer/rendering_method.mobile="mobile"
-renderer/rendering_method.web="gl_compatibility"
-; Tiles are drawn from atlas sub-rects. Linear filtering samples across region
-; edges and bleeds neighbouring sprites into each tile, so keep it nearest.
 textures/canvas_textures/default_texture_filter=0
+viewport/hdr_2d=true

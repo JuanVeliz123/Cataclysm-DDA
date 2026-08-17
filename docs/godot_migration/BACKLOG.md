@@ -3,17 +3,31 @@
 **Audience:** agents continuing `godot-mig`. Read [`AGENT_HANDOFF.md`](AGENT_HANDOFF.md) first.
 
 **Status:** Part 1 (sprites) is done: SP-1…SP-10, plus character overlays.
-Part 2 (menus) has MENU-1, MENU-3 and MENU-4 done and six left. Part 3
+Part 2 (menus): MENU-1…7 are all done. What is left is larger than this list used
+to imply -- an audit found **~15 `cataimgui::window` subclasses** still drawing
+through the overlay (MENU-10…13) plus **six screens writing straight into
+`catacurses::window`** (MENU-14), and MENU-9 is gated on all of them, not just on
+MENU-8. Part 3
 (verification) is new and mostly open — read VER-1 before doing more rendering
-work.
+work. Part 4 (the 3D backend) is a **proposal**, not a queue: read ADR-006
+before taking anything out of it, and note that its own third milestone is
+allowed to cancel the rest.
 
 Every task below is verifiable without a display, though not all by the same
 route — see Part 3 for what each one can and cannot answer:
 
 ```bash
+./build-scripts/check-godot-scripts.sh                         # compile gate, first
 godot --headless --path godot res://scenes/headless_probe.tscn
 godot --headless --path godot res://scenes/shader_check.tscn   # shaders only
+godot --headless --path godot res://scenes/geometry_check.tscn # 3D placement only
 ```
+
+Run the compile gate **first**. It is the only one of the three that needs neither
+the GDExtension nor a GPU, and it catches the failure the other two report as
+something else: a script that does not compile leaves its node scriptless, so every
+`has_method()` guard around it skips silently and the symptom is a blank map or a
+stage that "never ran".
 
 And you *can* see the result — this box has Xvfb and Mesa lavapipe:
 
@@ -126,6 +140,17 @@ cmd_flag`) and become part of MapView's batch key. `INSTANCE_CUSTOM` is full and
 the stride is a contract with `map_view.gd`, so a new per-tile effect should
 take the next flag bit rather than widen the command.
 
+### Follow-up: particles are not graded
+
+The presentation grade lives in the tile shader, because a full-screen
+`CanvasLayer` would tint the sidebar and menus too — MapView sits at z 0 with its
+animation overlay at 32 while the panels run 8 to 18. The consequence is that
+`field_particles.gd` nodes have their own materials and are not graded, so smoke
+stays its own colour at night and in rain. Pushing the same modulate onto those
+nodes is the fix; the alternative, moving the world into a `SubViewport` so a
+real full-screen pass becomes possible, is the larger and probably better answer
+and would also fix the animation overlay drawing over the sidebar.
+
 ### Follow-up: ground foliage does not move
 
 Plain `t_grass` is a 32x32 ground cell and is now excluded from sway, so a lawn
@@ -154,6 +179,27 @@ grass qualifies has not been checked. Do not solve it by shearing.
 - **§5 of the pipeline document is still deferred.** SP-10 removed its
   prerequisite — atlases are now regenerable from source — but it remains an
   art-production programme, not a rendering task.
+- **The occlusion fade has never been seen.** Depth ordering means a tree in
+  front of the avatar now covers it, so something has to get out of the way.
+  The tileset's own mechanism cannot: UltimateCataclysm declares no retracted
+  offsets and ships no `_transparent` variants, so `retracted` and
+  `transparent` are both structurally zero and will stay zero. The fallback
+  dims the occluder's alpha instead, driven by the same `retract_at` value and
+  therefore by the same `PREVENT_OCCLUSION` options. `min_occluder_alpha` (90)
+  is a guess, and the probe's starting shelter has nothing tall standing
+  between the avatar and the camera, so `faded` is zero there too — the counter
+  proves the plumbing, not the policy. **Needs a forest and a person.**
+
+- **Nothing has been seen down a hole.** The map publishes the levels below the
+  avatar now (ADR-005 item 1), and every tile of the probe's shelter has a floor
+  under it, so `open_columns` is zero there and the walk never descends.
+  Everything downstream of it is therefore exercised by no run so far: the depth
+  fog in `fog_for_depth`, lower levels sitting out the light pass, a creature two
+  floors down being culled against the column it is under. **Needs a basement, a
+  staircase or the lip of a roof, and a person standing at the top of it.** The
+  render overlay has the two numbers to read while standing there — `open
+  columns` says the walk went down at all, `levels below` says how far and how
+  many commands it cost.
 
 ---
 
@@ -182,7 +228,7 @@ highest-traffic item and among the smallest.
 | Id | Size | Task | Files | Done when |
 |---|---|---|---|---|
 | MENU-1 | S | `query_popup` as a Godot panel — same snapshot pattern and attend-timeout fallback as the uilist takeover | `src/popup.cpp`, new `godot_popup_snapshot.*`, new `popup_panel.gd` | A save prompt draws with `occupied=0` in the overlay |
-| MENU-2 | S | `input_popup` as a Godot panel (single-line text entry) | `src/input_popup.*`, new `text_prompt_panel.gd` | Naming a world uses no overlay (after MENU-1) |
+| ~~MENU-2~~ | S | ~~`input_popup` as a Godot panel~~ **done** (1ca765ec47) | `src/input_popup.*`, new `text_prompt_panel.gd` | Naming a world uses no overlay (after MENU-1) |
 | MENU-3 | M | Item info: `iteminfo_window` and `extended_description_window` — mostly formatted text | `src/ui_iteminfo.*`, `ui_extended_description.*` | Examining an item never touches the overlay |
 | ~~MENU-4~~ | M | **Done.** uilist callbacks — see below; the original plan here was wrong | `src/uilist.h`, `veh_utils.cpp`, `godot_uilist_snapshot.cpp` | `pointmenu_cb` menus (20 call sites) render in Godot |
 | ~~MENU-5~~ | S | ~~uilist category tabs~~ **done** (3fa74f947a) — near-zero reach, see the commit body: tab strip in the panel, publish the category list | `godot_uilist_snapshot.*`, `uilist_panel.gd` | `can_take_over` no longer tests for categories |
@@ -192,6 +238,72 @@ highest-traffic item and among the smallest.
 | ~~MENU-7a~~ | M | ~~Options screen~~ **done** — `show()` split into `show_legacy()` plus a shared epilogue; panel edits the real `cOpt`s and reads back. `world_options_only` (worldgen-embedded) deliberately stays legacy | `src/options.*`, `godot_options_snapshot.*`, `options_panel.gd` | 5 pages, 116 options, round trip verified |
 | ~~MENU-7b~~ | M | ~~Keybindings~~ **done** — same split (`display_menu_legacy` + shared epilogue). Key capture goes out as a raw Godot event through the input bridge, so a new binding is the exact `input_event` the game later matches | `input_context.*`, `godot_keybind_snapshot.*`, `keybind_panel.gd` | 145 actions, bind/remove/reset/filter |
 | MENU-8 | M | Advanced inventory — two-pane item mover | `src/advanced_inv*.cpp` | Moving items between panes needs no overlay (after MENU-4) |
+| ~~MENU-10~~ | S | ~~`dialogue_imgui`~~ **done** (d98e4c5f87) — only the source of the action moved; the loop keeps its own re-verification, consequence prompts and trade-window hiding. `request_debug_spawn_npc()` makes it verifiable rather than lucky, and unblocks MENU-13 for the same reason | `dialogue_imgui.*`, `npctalk.cpp`, `godot_dialogue_snapshot.*`, `dialogue_panel.gd` | Verified against a live conversation, DOWN round trip included |
+| MENU-11 | M | **`overmap_sidebar`** — worth an eyeball first: the overmap is already a Godot node, so an ImGui sidebar drawn over it may already look wrong | `src/overmap_ui.*` | The overmap screen is Godot end to end |
+| MENU-12 | M | **`surroundings_menu`** — **built, wired, and not yet observed running.** Channel, row collection from `map_entity_stack`, loop hook, panel and bindings all land in 733a5897ec. Eight probe runs failed to reach it; the last four were blocked by a debug hook of mine that wedged the game thread, described below. **Next step is an observation, not more code** — run the probe on a machine where a pass completes in minutes rather than hours, or drive this screen from a fixture of its own that does not share an avatar with nine other stages | `surroundings_menu.*`, `godot_surroundings_snapshot.*`, `surroundings_panel.gd` | `[surr] tabs=3 rows=N` and a NEXT_TAB round trip |
+
+> **MENU-12's screen is committed and builds; it has not been observed running.**
+> The verification attempts are worth reading only as a cautionary tale, because
+> the blocker turned out to be self-inflicted.
+>
+> I added a debug command that called `list_surroundings()` directly, to sidestep
+> keypress races. Queued commands are drained inside `wait_for_event()`, which is
+> inside `handle_input()` -- so it opened a **modal screen with its own input loop
+> from inside the input wait**, and nothing in a headless run dismisses it. The
+> game thread parked there permanently: clock frozen at 8:00:00, `commits: 1`,
+> every later stage failing, and teardown refusing to stop the thread. It also
+> left an ImGui window shown, which made `commands_safe_to_run()` false and
+> starved the command queue -- which I then wrote up here as a pre-existing
+> mystery window. There was no such window. That entry was wrong; this replaces
+> it.
+>
+> The hook is removed. **The rule it cost us: a queued command must not open a
+> blocking screen.** `request_menu_action` gets away with it only because a Godot
+> panel reliably attends and can dismiss what it opened, so the safety property is
+> "someone will dismiss this", not "this is a legal thing to queue". In a headless
+> run nobody attends, which makes the fixture the strict case rather than the
+> lenient one.
+>
+> What is left for MENU-12 is ordinary: open it by keypress in a run that plays,
+> and read back tabs, rows and a NEXT_TAB round trip.
+| MENU-13 | M | The mid-sized panels, one channel each (`request_debug_spawn_npc()` gives the NPC-dependent ones something to talk to): `medical_ui`, `mission_ui`, `faction_ui`, `npctalk_rules`, `scores_ui`, `study_zone_ui`, `martialarts` | those files | Six more screens off the overlay |
+
+### The remaining ImGui screens, sorted by where their state lives
+
+Sorting by line count was the wrong instinct. What decides the cost of migrating
+one of these is not its size but **whether its state exists anywhere other than
+inside ImGui**. Every screen migrated so far had a model or a driving loop to
+stand beside; the ones left do not all have that.
+
+| Screen | Selection state | Shape | Cost |
+|---|---|---|---|
+| `martialarts` | 42 refs, no tabs | model + loop | tractable — largest file, but the window is a detail pane |
+| `faction_ui` | 35 refs, 4 tabs | model, tab in widget | tractable; the tab needs lifting out |
+| `mission_ui` | 41 refs, 4 tabs | model, tab in widget | same |
+| `medical_ui` | 11 refs, 2 tabs | model, tab in widget | same |
+| `scores_ui` | 9 refs, 4 tabs | model, tab in widget | same |
+| `study_zone_ui` | 5 refs, no tabs | model + its own `execute()` | **easiest — the dialogue shape exactly** |
+| `compare_item_menu` | — | opens from other screens | follows whatever opens it |
+| `npctalk_rules` | **none** | selection is ImGui *nav focus* | needs a model introduced first |
+| `end_screen` | **none** | ImGui nav | same |
+
+Two things this changes:
+
+- **`BeginTabItem` returning true is how those screens choose a tab.** There is no
+  `selected_tab` to publish until someone lifts it into a member. That is a small
+  refactor, but it is a refactor of upstream code and should be a separate commit
+  from the migration so it can be reviewed on its own.
+- **`npctalk_rules` and `end_screen` have no selection variable at all** — the
+  highlighted row is ImGui's internal nav state, moved with
+  `NavMoveRequestSubmit`. Nothing can publish that. These two need a model
+  introduced before a panel is even possible, and are the last two to attempt,
+  not the first.
+
+Suggested order: `study_zone_ui` (proves the shape), then `martialarts`, then the
+four tab-in-widget screens as a batch since they need the same lift, then the two
+nav-state ones, and `compare_item_menu` with whatever opens it.
+
+| MENU-14 | M | The six `catacurses::window` settings screens as one batch — safe mode, auto pickup, auto notes, distractions, colors, help. They share a shape (list of toggles plus a save prompt), so one channel probably serves all six. **These are why the cell buffer still exists** | `safemode_ui.cpp`, `auto_pickup.cpp`, `auto_note.cpp`, `color_loader.cpp`, `help.cpp` | Nothing draws into `catacurses::window` in a session |
 | MENU-9 | S | Delete the overlay: `terminal_view.gd`, the ImTui blit, the ImGui cell layer, `USE_CURSES_UI_OVERLAY` | `terminal_view.gd`, `godot_view_snapshot.*`, `godot_curses_backend.cpp` | The cell buffer is gone (after everything above) |
 
 ### MENU-4, and what it did not cover
@@ -274,6 +386,10 @@ Run the game, press **F3** for the render overlay, and judge:
 | Light bands | `encode_light_level` in `godot_light_snapshot.cpp` | LIT 0.88, LOW 0.30, DARK 0.10 | Does a lantern's edge fall off smoothly, and is a LOW tile clearly dimmer than a LIT one? |
 | Sway | `sway_amount` 0.09, `sway_speed` 1.6 | — | Do trees read as wind rather than as wobble? Does anything tear? (see the SP-7 note) |
 | Fire flicker | `fire_color`, `fire_strength` 0.9 | — | Does a campfire light the room, or strobe it? |
+| Fire glow | `fire_glow_gain` 2.4, `glow_intensity` 0.7, `glow_bloom` 0.15 | — | Does fire read as a light source, or as a smear? Does anything bloom that should not? **Judge this one from scratch:** the glow keys on an HDR target and `viewport/hdr_2d` was never actually in effect until 2026-08-17 (see ADR-004's landed notes), so whatever the glow looked like before, it was not looking at what these numbers describe. `glow_bloom` is 0.0, not 0.15 — it bypasses the threshold and blooms the whole frame. |
+| Night grade | `night_tint`, `night_desaturation` 0.45 | `0.62,0.72,1.0` | Does night read as night rather than as a blue filter? |
+| Rain grade | `wet_tint`, `wet_desaturation` 0.30 | `0.82,0.88,1.0` | Is a downpour distinguishable from dusk? |
+| Pain / vignette | `pain_tint`, `vignette_strength` 0.35 | — | Does being hurt register without making the map unreadable? |
 | Particles | `field_particles.gd` `scale_min/max`, `lifetime`, `amount` | — | Is smoke smoke, or a cloud of dots? |
 | Hit reaction | `map_view.gd` `HIT_DURATION` 0.22, `HIT_OFFSET` 0.34 | — | Does a melee hit read as a blow, or as a glitch? |
 
@@ -284,14 +400,16 @@ back) and a lantern gradient at night (drop a light source in the dark).
 Please write findings back into this table rather than into a commit message —
 the next person needs the numbers, not the history.
 
-### VER-0 — Assert that snapshots are *consumed*, not just published
+### ~~VER-0~~ — **Done** (e2ce7ced1b)
 
-**Five lines, and it would have caught three shipped-broken features.** The probe
-checks that producers fill snapshots and never that anything draws them, so a
-feature wired to the dead curses frame boundary looks identical to a working one.
-See "The dead frame boundary" in AGENT_HANDOFF.md. Fail the probe when a
-generation counter that should move across a session stays at zero;
-`get_anim_stats()` already exposes what it needs.
+The probe now fails when a required fixture stage never executed, or a required
+generation counter is still at zero. Exit code, not a printed note: the failure
+being guarded against is that nobody reads a green log closely. Optional
+counters (uilist, textwin, anim, overmap) are reported but never failed on --
+they depend on the world rolling the right way, and a check that cries wolf gets
+ignored.
+
+It went red on its first run and caught real crafting-fixture flakiness.
 
 ### VER-2 — Tooling that would move work off the person
 
@@ -315,12 +433,19 @@ Ranked by how much verification each unlocks per unit of effort. None exist yet.
    and can diff them. Give it an expected answer — "nothing on the terrain
    layers may differ between frames unless a sway or particle command exists" --
    and the tearing class of bug fails the run rather than needing an eye.
-4. **Live uniform editing without a rebuild.** Expose the tuning constants above
+4. ~~**A compile gate for GDScript and shaders.**~~ **Built** (2026-08-17):
+   `build-scripts/check-godot-scripts.sh`. `gdparse` was the gate and checks syntax
+   only, so a script that names a member no class has passed it and then failed to
+   compile at load -- which reads as a blank map and a stage that "never ran", with
+   no error pointing at a script. Godot's own `--check-only` names the file and line
+   and needs neither the extension nor a GPU. Verified by breaking a script and
+   watching the gate go red.
+5. **Live uniform editing without a rebuild.** Expose the tuning constants above
    as `@export` on a Godot resource rather than shader defaults and GDScript
    constants, so VER-1 becomes one sitting with a slider instead of a
    build-run-look loop. Cheap, and it makes VER-1 something a non-programmer can
    do.
-5. **A tile-inspector under the cursor.** `describe_sprite()` already answers
+6. **A tile-inspector under the cursor.** `describe_sprite()` already answers
    "why did this tile draw what it drew" for an id typed by hand. Wiring it to
    the moused-over tile makes the debug overlay answer it for the thing the
    person is actually looking at.
@@ -329,8 +454,64 @@ Ranked by how much verification each unlocks per unit of effort. None exist yet.
 
 | Route | Answers | Blind to |
 |---|---|---|
+| `check-godot-scripts.sh` | Whether every script and shader *compiles*, and every property and enum name in them exists | Anything about behaviour. But run it first: a script that does not compile leaves its node scriptless and every `has_method()` guard skips it silently |
+| `geometry_check.tscn` | Whether the 3D backend places sprites where the 2D one draws them, at any tilt, by projecting them back through the camera | Colour, lighting, order, and whether the placement it verifies is the placement the game asks for |
 | `headless_probe.tscn` | What C++ published, what MapView built, whether panels and scripts run | Anything about pixels |
 | `shader_check.tscn` | Shader language errors | GPU backend rejections; whether the shader is *right* |
 | Xvfb + lavapipe screenshot | Layout, colour, whether something is on screen at all | Motion, feel, frame pacing |
 | Two-frame diff | What moves that should not | Whether motion that should happen does |
 | A person playing | Everything above, and only this | Nothing — but it does not scale, and it is the scarce resource |
+
+---
+
+## Part 4 — The 3D backend (ADR-006)
+
+**Read [`architecture_adr.md`](architecture_adr.md) ADR-006 first.** This is a
+proposal with a kill criterion in the middle of it, not a list to work through.
+The one-line summary: keep the top-down view and the existing sprites, put them
+in a 3D scene, and use Godot's 3D renderer for the light, shadow, fog and depth
+the 2D path cannot reach. Nothing in it requires new art.
+
+**Do this before anything else in this part**, and before believing ADR-006's
+table of tilt angles:
+
+```bash
+./build-scripts/compose-tileset.sh
+python3 -c 'import json
+c = json.load(open("gfx/UltimateCataclysm/tile_config.json"))
+tw, th = c["tile_info"][0]["width"], c["tile_info"][0]["height"]
+print("tile", tw, "x", th)
+for s in c["tiles-new"]:
+    # sprite_width / sprite_height default to the tile size when absent, which
+    # is how a sheet says "these sprites fit their cell".
+    print(s.get("file"), s.get("sprite_width", tw), "x", s.get("sprite_height", th),
+          "offset", s.get("sprite_offset_x", 0), s.get("sprite_offset_y", 0))'
+```
+
+Then open a wall, a tree and a table in an image viewer and ask the one question
+the whole part turns on: **do they agree about where the camera is?** ADR-006's
+45°–55° band is arithmetic performed on an assumption, and four features in a row
+on this branch were settled by printing a value instead of arguing about it.
+
+| Id | Size | What | Notes |
+|---|---|---|---|
+| ~~3D-0~~ | M | **Done (2026-08-17): ADR-004, the world in a `SubViewport`.** `godot/scripts/world_viewport.gd`; MapView is reparented into it at startup. | Read the "What landed" section of ADR-004 before building on it. Three things it cost that were not on this list: the world viewport is a `TextureRect` with a device-pixel render target and a `size_2d_override`, because the obvious `SubViewportContainer` wiring would have quietly dropped the world to the canvas stretch's base resolution; MapView's Ctrl+wheel zoom had to move to `host.gd`, because the world viewport takes no input; and the composite has to mirror `map_view.visible`, or the main menu opens over a still of the map. The overlay-over-sidebar ordering is fixed by construction. **The grade is still in the tile shader**, so `field_particles.gd` is still ungraded — that is now possible, not done, and it should not be moved in the same step as VER-1 changes its constants. |
+| ~~3D-1a~~ | L | **Built (2026-08-17): the flat 3D backend.** `map_view_3d.gd` + `map_tiles_3d.gdshader`, behind `host.gd`'s `USE_3D_MAP`, off by default. Orthographic unrotated camera, `MultiMeshInstance3D` per batch, spatial port of the tile shader, no C++ change. | **Built, not judged.** The milestone is still open and needs a person: turn `USE_3D_MAP` on and diff a screenshot against the 2D backend's with the Xvfb + lavapipe recipe. First thing to check if the map comes out too dark: flip `pipeline_encodes_srgb` in the shader — the canvas pipeline writes sRGB and the 3D one encodes on output, and which applies here could not be read without a GPU. Depth comes from `depth_rank`'s *order*, mapped to consecutive z steps rather than to the rank value, because the rank range would outrun float32 precision at camera distance. |
+| ~~3D-1b~~ | M | **Done (2026-08-17): alpha-scissor, the opaque pass, and depth per sprite.** The batch key is down to the shader uniforms — atlas, sway, palette, receives-light — and each sprite carries its own z. | Done **before** the tilt, against this ADR's own recommended order, for a dependency the order missed: a cast shadow (3D-5) is a silhouette from an opaque-pass material, so the tilt experiment cannot show anything until this exists. The depth ranks in a frame are compacted to consecutive z steps, which is what keeps float32 able to resolve them at camera distance. The visible cost is hard sprite edges where Ultica has soft ones; judge that against a screenshot of 3D-1a, not of the canvas, and read `alpha_scissor` in the shader before assuming a threshold of zero undoes it — it does not. |
+| ~~3D-1c~~ | M | **Done (2026-08-17): the four layers that are not tiles.** Contact shadows are a MultiMesh of blob quads in the world; fire and smoke are `field_particles_3d.gd` (`GPUParticles3D`); the fallback glyphs and the animation overlay stay canvas items on a `CanvasLayer` inside the world viewport. | The split is by whether depth matters. Shadows had to become geometry — on the canvas they land on top of the creature casting them — and being depth-tested made them better than the 2D pass: a tree between camera and blob now hides it, and a blob can sit on the floor of a level *below* the avatar, which the 2D backend skips because one node has one depth to spend. The glyphs lose their per-layer ordering, which only affects tiles whose art is missing anyway. **The canvas transform is exact only while the camera is unrotated — 3D-3 breaks it**, and then those two need `unproject_position` per point or a home in the world. |
+| ~~3D-1d~~ | S | **Done (2026-08-17), and it was not the job it looked like.** The glyphs and the animation overlay stay on their canvas at any tilt; `TILT_DEGREES` defaults to 45. | They were hidden while tilted on the assumption that an affine canvas transform cannot follow a rotated camera. **It does not have to.** Everything on that canvas annotates the *ground*, and a ground point's screen position is unchanged by the tilt by construction -- that is what the pre-stretch is for, and the gate had already been printing the proof (a floor sprite lands on the same screen pixel at 0 and at 75 degrees). `geometry_check.tscn` now holds the canvas transform against the camera's own projection at six tilts, and a 5% error in either fails it. Estimated M, cost a deletion: the expensive fix was for a problem that was not there. |
+| ~~3D-2~~ | M | **Done (2026-08-17): the light channel.** `LightSnapshot::add_light` + `get_light_sources()`, seven floats per source, walked out of `level_cache::light_source_buffer`. The 3D backend builds an `OmniLight3D` per source, capped at 32. API version 20 -- **needs a `make GODOT=1`**. | **Nothing lit by them is visible yet**, and that is not an oversight: the tile shader is `unshaded`, so in a flat world a light can only multiply the frame by a constant. They are positioned, counted in the render overlay and checked by the probe, and the lit shader is what consumes them. Two things to know: the buffer is documented as valid only inside `generate_lightmap` (it is not cleared afterwards, which is why this works -- the counter is there to notice if that changes), and the unbuffered sources are still missing (glowing critters, the avatar's own torch, headlight arcs). `VOLUMETRIC_FOG` in `map_view_3d.gd` is the one switch that shows the lights early, and it is off because a fog volume in a flat world glows through walls. |
+| ~~3D-3~~ | S | **Done (2026-08-17): the world stands up.** `TILT_DEGREES` in `map_view_3d.gd`, 0.0 by default, `set_tilt_degrees()` to drive it. Ground quads horizontal, standing quads vertical, camera pitched, each axis pre-divided by its own factor. | **The geometry is verified; the look is not.** `res://scenes/geometry_check.tscn` round-trips a floor, a road, a wall, a tree and a creature through the camera at six tilts -- all thirty land 0.00 px from where the 2D backend draws them. So this ADR's claim that the tilt could not be checked without light was half wrong: the arithmetic is arithmetic. What still needs a person is whether one angle *suits* trees, walls and table tops, and that needs the lit shader. While tilted the glyphs and the animation overlay are hidden (3D-1c's debt), so it is an experiment, not a setting. |
+| ~~3D-4~~ | M | **Done (2026-08-17): levels below get a floor.** `LEVEL_DROP_TILES`, two tiles of height per level while tilted, coplanar when flat. Verified by `geometry_check.tscn`: a level one down falls exactly that many pixels, the same at every tilt, and slides sideways not at all. | Two tiles because Ultica draws a wall as 64 px in a 32 px cell and ADR-005 found the tileset declares no height of its own. **Still C++ work to finish it:** `fog_for_depth` dims lower levels in the tint, so real distance fog would dim them twice; and lower levels still get no engine light, because the light texture holds one texel per column and applying it a storey down would light a basement with the daylight on the roof. And nobody has looked down a hole yet -- that is still ADR-005 item 1's open question. |
+| ~~3D-5~~ | M | **Done (2026-08-17): the lit shader, cast shadows and a sun.** The tile shader keeps its own result in EMISSION and lets engine lights add a directional term in `light()`, masked by CDDA's per-tile light. Standing sprites cast double-sided shadows while tilted; the batch key regains `tall` so the ground does not cast onto itself. | Engine light is **off in the flat world** by design: with every normal facing the camera it could only add a uniform wash and would move the backend off its baseline. **The sun's bearing is invented** -- elevation follows the published `daylight`, azimuth is `SUN_AZIMUTH_DEGREES`. The real value is `sun_azimuth_altitude()` in `src/calendar.h`; publishing it is one line on the conditions channel and should ride with the next C++ change. `engine_light_gain` and the two `SUN_*` constants are VER-1 material. |
+| ~~3D-7a~~ | S | **Done (2026-08-17): shadow proxies.** One invisible capsule per creature, `SHADOWS_ONLY`, sized from its sprite; creature billboards stop casting so there is one shadow rather than two. Terrain that stands keeps its own silhouette. | A billboard's silhouette never changes, so a figure lit from the side cast a front view of itself -- the shadow said nothing about where the light was, which is the one thing a shadow is for. The contact blob stays: it works when nothing is casting, and the two cues answer different questions. Gated: the capsule's foot must project onto the creature's feet. |
+| ~~3D-7b~~ | S | **Done (2026-08-17): `SHOW_SHADOW_PROXIES`.** Off by default. On, the creature *sprites* are hidden and their capsules are drawn in their place, lit -- not a capsule behind a sprite, which would answer nothing. | The cheapest answer to "does a body at this scale sit correctly in this world", and it needs no art to exist first. What to look at: feet in the right place, height reading as a person against the walls, and -- since the capsule is lit and the sprites are not -- which way the sun appears to come from. That last one is the first thing in this renderer that shows where the light actually is rather than where an artist decided it was. |
+| ~~3D-7c~~ | M | **Done (2026-08-17, API 22): a mesh per creature id, defaulting to the sprite.** `CDDAHost::get_creatures()` publishes identity -- id, kind, feet in pixels, level, facing -- beside the draw list; `creature_meshes.gd` draws whatever has art under `res://meshes/creatures/<id>.*` and leaves the rest to their sprites. | **Nothing changes until a mesh exists**, which is the design: partial is the normal state. Two things worth knowing. Identity needed a channel of its own because a draw command is an atlas sub-rect -- everything a sprite needs and nothing a mesh can use. And a sprite is suppressed by *tile*, because the draw list still cannot say which creature a command belongs to; CDDA allows one creature per tile, so a tile is an identity. That correspondence is the fragile part and is gated: both sides quantise from the sprite's centre, and quantising its corner instead -- the first draft -- passes for flush sprites and fails for every overhanging one. `README.md` in the mesh directory is what a modeller needs. |
+| 3D-6 | M | **The things only 3D has.** Volumetric fog and light shafts, headlight `SpotLight3D` cones from `map::apply_light_arc`'s existing angle and width, weather as particles that fall through the scene. | `apply_light_arc` maps onto `SpotLight3D` almost field for field. Headlight cones at night are the largest apparent gain per line of code on this list. |
+
+**The hazards are the real risk, not the geometry.** Every 3D renderer default is
+wrong for a 32 px sprite and each one fails quietly: mipmaps bleed the atlas
+(the reason `default_texture_filter=0` exists), TAA/FXAA smear nearest-sampled
+pixels, and a camera on a fractional pixel makes the whole scene shimmer on every
+step the avatar takes. ADR-006 lists them; treat that list as a checklist for
+3D-1 rather than as commentary.

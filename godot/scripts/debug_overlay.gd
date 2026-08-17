@@ -73,12 +73,38 @@ func refresh() -> void:
 	_body.add_child(Nocturne.kv_row("fallback glyphs", str(st.get("glyphs", 0)),
 		Nocturne.WARN if int(st.get("glyphs", 0)) > 0 else Nocturne.TEXT))
 	_body.add_child(Nocturne.kv_row("fps", str(Engine.get_frames_per_second())))
+	# What the z-level walk cost this frame (ADR-005 item 1). "open columns"
+	# is the number that matters: it is how many of the view's columns had no
+	# floor and made the walk descend. Zero of them outdoors is the whole
+	# answer to what publishing more than one level costs there.
+	var open_cols := int(st.get("open_columns", 0))
+	_body.add_child(Nocturne.kv_row("open columns", str(open_cols),
+		Nocturne.TEXT if open_cols > 0 else Nocturne.NEUTRAL_600))
+	if open_cols > 0:
+		_body.add_child(Nocturne.kv_row("levels below",
+			"%d deep, %d commands" % [int(st.get("deepest_z_below", 0)),
+				int(st.get("below_commands", 0))]))
+		# What the 3D backend does with them (3D-4). Zero means coplanar, which is the
+		# 2D backend's behaviour and what a flat 3D world keeps.
+		var drop := float(st.get("level_drop", 0.0))
+		if drop > 0.0:
+			_body.add_child(Nocturne.kv_row("level drop",
+				"%.1f tiles of height each" % drop))
 
 	if _host.has_method("get_light_size"):
 		var lsize: Vector2i = _host.get_light_size()
 		_body.add_child(Nocturne.kv_row("light texture",
 			"%dx%d" % [lsize.x, lsize.y] if lsize.x > 0 else "off",
 			Nocturne.TEXT if lsize.x > 0 else Nocturne.NEUTRAL_600))
+
+	# Light sources (ADR-006 item 3D-2). Worth a row of its own rather than a number
+	# in a log: these are read out of state `level_cache.h` describes as valid only
+	# inside generate_lightmap, so this is the counter that would notice that
+	# contract breaking. Zero in daylight is ordinary; zero at night beside a
+	# campfire is the bug.
+	var sources := int(st.get("lights", 0))
+	_body.add_child(Nocturne.kv_row("light sources", str(sources),
+		Nocturne.TEXT if sources > 0 else Nocturne.NEUTRAL_600))
 
 	_body.add_child(Nocturne.divider())
 	_body.add_child(Nocturne.section_header(2, "BY LAYER"))

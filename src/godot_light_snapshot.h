@@ -12,6 +12,7 @@
 #include "lightmap.h"
 
 #include <godot_cpp/classes/image.hpp>
+#include <godot_cpp/variant/packed_float32_array.hpp>
 #include <godot_cpp/variant/vector2.hpp>
 #include <godot_cpp/variant/vector2i.hpp>
 
@@ -50,18 +51,49 @@ class LightSnapshot
         /// Bytes per texel in the published image (RGBA8).
         static constexpr int channels = 4;
 
+        /**
+         * Floats per light in @ref copy_lights: x, y, radius, r, g, b, luminance,
+         * bearing, cone.
+         *
+         * Floats rather than the packed ints every other channel uses, because nothing
+         * here is a pixel rect or a bitfield -- a radius, a colour and an angle want to
+         * be numbers, and packing them would cost a decode on the far side for nothing.
+         *
+         * `cone` is the full width of the beam in degrees, or 0 for a light that shines
+         * everywhere. That is the whole difference between a lamp and a headlight, and
+         * it is why both travel on one channel: `map::apply_light_arc` already carries a
+         * bearing and a width, so a spotlight is a point light that admits to having a
+         * direction.
+         */
+        static constexpr int light_stride = 9;
+
         /// Visibility values written to the R channel. Chosen so the shader can
         /// separate them with one smoothstep and no magic numbers of its own.
         static constexpr uint8_t vis_seen = 255;
         static constexpr uint8_t vis_remembered = 64;
         static constexpr uint8_t vis_unknown = 0;
 
-        /// Start a frame of @p w x @p h tiles. Clears to "never seen".
+        /**
+         * Levels the texture has room for: the avatar's, plus every one that can be
+         * published below it (@ref max_z_below + 1, the range the draw command's four
+         * flag bits hold).
+         *
+         * The published image is one block of @p h rows per level, so a lower level's
+         * light is its own rather than the column's above it. It was the column's until
+         * 3D-4: one texel per column meant a basement had to sit out the light pass
+         * entirely, because the texel over it belonged to the tile the avatar could see
+         * and applying it a storey down would light a cellar with the daylight falling on
+         * the roof. Only the levels actually reached are published.
+         */
+        static constexpr int max_levels = 16;
+
+        /// Start a frame of @p w x @p h tiles, with room for every level. Clears to
+        /// "never seen".
         void begin( int w, int h );
-        /// Set one tile. Out-of-range coordinates are ignored.
-        void set( int x, int y, uint8_t visibility, uint8_t light );
+        /// Set one tile on level @p level below the avatar's. Out-of-range is ignored.
+        void set( int x, int y, int level, uint8_t visibility, uint8_t light );
         /// Set the fire mask (B) for one tile, 0-255 (SP-6).
-        void set_fire( int x, int y, uint8_t fire );
+        void set_fire( int x, int y, int level, uint8_t fire );
         /// Spread the fire mask one tile in each direction before publishing.
         ///
         /// The B channel is sampled bilinearly like the light, but a fire
@@ -69,13 +101,63 @@ class LightSnapshot
         /// edge, which is exactly the hard-edged look the texture exists to get
         /// rid of. One box blur is enough to make the falloff read as a glow.
         void blur_fire();
+        /**
+         * Add one light source the game is casting (ADR-006 item 3D-2).
+         *
+         * **Read, not derived.** `map::generate_lightmap` already fills
+         * `level_cache::light_source_buffer` every turn from terrain, furniture and
+         * field `light_emitted`, with the source's own colour attached; this walks
+         * the view and publishes what is there. ADR-005's lesson applied before the
+         * fact rather than after it -- the estimate for this said "derive discrete
+         * lights from the lightmap", and the lightmap's *inputs* were one struct
+         * away the whole time.
+         *
+         * Not everything is in that buffer, and the rest is now tapped where the
+         * snapshot already had the object in its hand: the light the avatar is carrying
+         * (`Character::active_light`), what an NPC is carrying, what a glowing monster
+         * emits (`mtype::luminance`), and vehicle headlights, which arrive with a
+         * bearing and a cone because `map::apply_light_arc` has both.
+         *
+         * The vehicle pass mirrors the loop in `map::generate_lightmap` rather than
+         * reading a result, because there is no result to read -- an arc is applied
+         * straight to the lightmap and never buffered. That is a duplicated rule and
+         * the one place here that can silently drift from the game; if headlights stop
+         * agreeing with what the map says is lit, this is why.
+         *
+         * @param bearing_deg compass degrees the beam points along, 0 for a point light.
+         * @param cone_deg full beam width in degrees, 0 for a light with no direction.
+         *
+         * @param x view-relative pixels, tile centre. The same space
+         *        `map_draw_cmd::dest_x` is in, so the renderer needs no second
+         *        mapping from tiles to anything.
+         * @param y as @p x.
+         * @param radius pixels, from `LIGHT_RANGE( luminance )` -- the game's own
+         *        answer to how far this source reaches, rather than a number the
+         *        renderer invents.
+         * @param color the source's colour. White when it declares none, which is
+         *        most of them.
+         * @param luminance raw game units, deliberately unnormalised: how bright a
+         *        lamp should *look* is the renderer's decision, and CDDA's scale is
+         *        the only honest input to it.
+         */
+        void add_light( float x, float y, float radius, const light_color_rgb &color,
+                        float luminance, float bearing_deg = 0.0f, float cone_deg = 0.0f );
+
         /// Publish the frame started by @ref begin and bump the generation.
         void commit();
 
         /// The published frame as an RGBA8 Image, or null when there is none.
         godot::Ref<godot::Image> copy_image() const;
+        /// Tiles per level: the view's extent, not the image's height.
         godot::Vector2i size() const;
+        /// Level blocks in the published image, at least one.
+        int levels() const;
         uint64_t generation() const;
+
+        /// The frame's light sources, @ref light_stride floats each.
+        godot::PackedFloat32Array copy_lights() const;
+        /// How many sources the published frame holds.
+        int light_count() const;
 
         /**
          * Whether the Godot side is running the light pass.
@@ -89,6 +171,19 @@ class LightSnapshot
          */
         void set_pass_enabled( bool on );
         bool pass_enabled() const;
+
+        /**
+         * Whether the renderer dims lower z-levels itself (ADR-006 item 3D-4).
+         *
+         * The same shape of handshake as @ref set_pass_enabled, and for the same
+         * reason. `fog_for_depth` bakes a per-level dimming into every tint C++
+         * publishes, which is right for a backend that draws all levels at one height
+         * and wrong for one that puts them at real elevations and fades them itself --
+         * both together would dim a basement twice. A host that never says so keeps
+         * the baked fog, so the 2D backend is untouched.
+         */
+        void set_depth_fog_enabled( bool on );
+        bool depth_fog_enabled() const;
 
         /**
          * Wind, for the sway shader (SP-7).
@@ -106,19 +201,68 @@ class LightSnapshot
         /// Screen-space wind: unit direction times 0..1 strength.
         godot::Vector2 wind() const;
 
+        /**
+         * Conditions the presentation pass grades by.
+         *
+         * The game already computes all of this every turn and none of it has
+         * ever reached the screen: the map looks the same at midnight in a
+         * downpour as at noon in clear weather, because the only thing the
+         * renderer reads is per-tile light. These are the cheap inputs that
+         * make time of day and weather visible.
+         *
+         * All normalised 0..1 so the shader needs no game constants.
+         */
+        struct conditions {
+            /// Astronomical daylight, 0 at night and 1 at noon.
+            float daylight = 1.0f;
+            /// Precipitation, 0 none to 1 heavy.
+            float precipitation = 0.0f;
+            /// Perceived pain, saturating well before the maximum -- the point
+            /// is that being hurt is visible, not that it scales linearly.
+            float pain = 0.0f;
+            /// Where the sun actually is, in compass degrees and degrees above the
+            /// horizon, from `sun_azimuth_altitude( time_point )`.
+            ///
+            /// Published because the renderer was inventing it. A directional light
+            /// needs a bearing, the 3D backend had a constant, and the game has known
+            /// the answer all along -- `calendar.cpp` even builds the direction vector
+            /// already. Altitude goes negative at night, which is the honest way to say
+            /// "no sun" and is why this is not folded into @ref daylight.
+            float sun_azimuth = 0.0f;
+            float sun_altitude = -90.0f;
+        };
+        void set_conditions( const conditions &c );
+        conditions get_conditions() const;
+
     private:
+        /// Out-of-range marker for @ref texel.
+        static constexpr size_t npos = static_cast<size_t>( -1 );
+        /// Byte offset of one tile's texel on one level, or @ref npos.
+        size_t texel( int x, int y, int level ) const;
+
         mutable std::mutex mutex_;
         /// Frame under construction. Game thread only, no lock needed.
         std::vector<uint8_t> pending_;
         int pending_w_ = 0;
         int pending_h_ = 0;
+        /// Deepest level any @ref set touched this frame, so @ref commit publishes the
+        /// blocks that exist rather than sixteen mostly-empty ones.
+        int pending_deepest_ = 0;
+        int levels_ = 1;
         std::vector<uint8_t> published_;
+        /// Light sources under construction, then published; see @ref add_light.
+        /// Flat, @ref light_stride floats per source, so it copies straight into a
+        /// PackedFloat32Array without a per-entry conversion.
+        std::vector<float> pending_lights_;
+        std::vector<float> published_lights_;
         int w_ = 0;
         int h_ = 0;
         uint64_t generation_ = 0;
         std::atomic<bool> pass_enabled_{ false };
+        std::atomic<bool> depth_fog_enabled_{ false };
         float wind_x_ = 0.0f;
         float wind_y_ = 0.0f;
+        conditions conditions_;
 };
 
 LightSnapshot &get_light_snapshot();

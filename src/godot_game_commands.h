@@ -113,6 +113,20 @@ std::string request_item_action( int64_t uid, item_action action );
  */
 std::string request_debug_spawn( const std::string &mtype );
 
+/**
+ * Spawn a random NPC next to the avatar, for verification.
+ *
+ * The dialogue, faction, mission and follower screens all need somebody to talk
+ * to, and a fresh character stands alone in a shelter. Without this the fixtures
+ * for those screens can only run when the world happens to offer an NPC, which
+ * is the difference between a check and a coin flip -- MENU-10 shipped
+ * unverified for exactly that reason.
+ *
+ * Placed adjacent rather than at the debug menu's -4,-4, so the probe can reach
+ * it by walking one step.
+ */
+std::string request_debug_spawn_npc();
+
 } // namespace godot_backend
 
 #endif // GODOT

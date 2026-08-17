@@ -59,6 +59,31 @@ uniform float memory_saturation = 0.18;
 // looks like a bug rather than like a fire.
 uniform vec3 fire_color : source_color = vec3(1.0, 0.58, 0.24);
 uniform float fire_strength = 0.9;
+// Pushes fire above 1.0 so it survives into the glow pass. Only meaningful with
+// HDR 2D on; without it the canvas clamps and this is just a brighter fire.
+// Nothing else in the renderer writes above 1.0, which is what keeps the UI --
+// drawn at 1.0 at most -- from blooming.
+uniform float fire_glow_gain = 2.4;
+
+// --- Presentation grade -----------------------------------------------------
+//
+// Time of day, weather and pain are computed by the game every turn and until
+// now reached the screen only as per-tile light, so midnight in a downpour
+// looked like noon in clear weather. These grade the world and nothing else:
+// applying them here rather than as a full-screen pass means the sidebar,
+// menus and combat text keep their own colours, which a CanvasLayer over the
+// whole viewport could not do without tinting the UI too.
+uniform float daylight = 1.0;
+uniform float precipitation = 0.0;
+uniform float pain = 0.0;
+// Night is blue and low-contrast rather than merely dark.
+uniform vec3 night_tint : source_color = vec3(0.62, 0.72, 1.0);
+uniform float night_desaturation = 0.45;
+// Rain drains colour and cools it.
+uniform vec3 wet_tint : source_color = vec3(0.82, 0.88, 1.0);
+uniform float wet_desaturation = 0.30;
+uniform vec3 pain_tint : source_color = vec3(1.0, 0.35, 0.30);
+uniform float vignette_strength = 0.35;
 
 // --- Sway (SP-7) -------------------------------------------------------------
 //
@@ -156,13 +181,35 @@ void fragment() {
         if (fire > 0.004) {
             float f = sin(TIME * 9.1 + luv.x * 47.0) * 0.5
                     + sin(TIME * 13.7 + luv.y * 31.0) * 0.5;
-            lit += col * fire * fire_strength * (0.78 + 0.22 * f) * fire_color;
+            lit += col * fire * fire_strength * (0.78 + 0.22 * f)
+                 * fire_color * fire_glow_gain;
         }
 
         float grey = dot(col, vec3(0.299, 0.587, 0.114));
         vec3 remembered = mix(vec3(grey), col, memory_saturation) * memory_color;
         col = mix(lit, remembered, mem);
     }
+
+    // --- Grade ---------------------------------------------------------
+    // After lighting, because these describe the conditions light arrives in,
+    // not the light itself.
+    float luma = dot(col, vec3(0.299, 0.587, 0.114));
+
+    float night = 1.0 - clamp(daylight, 0.0, 1.0);
+    col = mix(col, vec3(luma), night * night_desaturation) * mix(vec3(1.0), night_tint, night);
+
+    float wet = clamp(precipitation, 0.0, 1.0);
+    col = mix(col, vec3(luma), wet * wet_desaturation) * mix(vec3(1.0), wet_tint, wet);
+
+    if (pain > 0.001) {
+        // Screen-space, so it frames the viewport rather than the map: being
+        // hurt is a property of the viewer, not of the terrain.
+        float edge = distance(SCREEN_UV, vec2(0.5));
+        col = mix(col, col * pain_tint, clamp(pain, 0.0, 1.0) * smoothstep(0.15, 0.75, edge));
+    }
+
+    float vig = 1.0 - vignette_strength * smoothstep(0.35, 0.95, distance(SCREEN_UV, vec2(0.5)));
+    col *= vig;
 
     COLOR = vec4(col, tex.a * tint.a);
 }

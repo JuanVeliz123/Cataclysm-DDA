@@ -77,6 +77,16 @@ class dialogue_imgui_impl : public cataimgui::window
         bool is_remote = false;
         std::string remote_name;
         void set_responses( const std::vector<talk_data> &responses );
+#if defined(GODOT)
+        /**
+         * Publish this frame to the Godot dialogue channel.
+         *
+         * A member rather than a free function because the history is private
+         * here, and copying it out to somewhere that could reach it would be a
+         * second copy to keep in step.
+         */
+        void publish_to_godot( const std::string &header ) const;
+#endif
         void set_responses_debug( const std::vector<std::string> &responses );
 
         bool show_dynamic_line_conditionals = true;

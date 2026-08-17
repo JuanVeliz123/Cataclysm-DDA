@@ -38,7 +38,37 @@ enum cmd_flag : int32_t {
     /// (SP-8). Fifteen palettes is more than a tileset is likely to want.
     cmd_palette_shift = 4,
     cmd_palette_mask = 0xF << cmd_palette_shift,
+    /// The sprite is larger than its tile cell, so it overhangs its neighbours
+    /// and has to draw above the flat sprites of the same layer.
+    ///
+    /// MapView batches per atlas and cannot interleave two batches by y, so
+    /// ordering whole batches puts every sprite of one atlas above every sprite
+    /// of another. Within a layer that is wrong for exactly the sprites that
+    /// overlap: it drew the ground on top of tree canopies. Splitting tall from
+    /// flat gives them separate depth bands, which is right for a fixed-angle
+    /// view anyway -- a tree belongs above the grass around its base.
+    cmd_flag_tall = 1 << 8,
+    /// Bits 9-12: how many z-levels *below* the avatar this sprite stands on,
+    /// 0-15 (ADR-005 item 1). Zero is the level the avatar is on, which is the
+    /// only value that existed before z-levels were published.
+    ///
+    /// Rides in rot_flags for the same reason everything else here does: the
+    /// stride is a contract with map_view.gd, and ADR-005 item 2 already found
+    /// that depth *within* a level needs no field of its own. This is the range
+    /// that item said was still missing -- it turned out to be four bits, not a
+    /// wider command.
+    ///
+    /// Only downward. Nothing above the avatar is published: the view draws what
+    /// you stand in and what you can see down into, and a ceiling drawn over it
+    /// would hide the thing the view is for.
+    cmd_z_below_shift = 9,
+    cmd_z_below_mask = 0xF << cmd_z_below_shift,
 };
+
+/// Deepest level below the avatar a draw command can name; see
+/// @ref cmd_z_below_shift. The game's own limit is fov_3d_z_range (10), so the
+/// four bits are not the binding constraint -- the first floor underfoot is.
+constexpr int max_z_below = 15;
 
 /// One draw command for MapView: atlas sub-rect → screen pixels.
 /// Packed as 10 ints: atlas, src_x, src_y, src_w, src_h, dest_x, dest_y, layer,
@@ -194,6 +224,38 @@ constexpr bool is_creature_layer( const map_layer layer )
 }
 
 /**
+ * One creature in view, published so the renderer can know *what* it is drawing
+ * (ADR-006's mesh amendment, item 3D-7c).
+ *
+ * The draw list deliberately carries no identity: a `map_draw_cmd` is an atlas
+ * sub-rect and a destination, which is everything a sprite needs and nothing a mesh
+ * can use. Choosing a model for a zombie requires knowing it is a zombie, so the
+ * identity travels on its own channel rather than being smuggled into the command.
+ *
+ * A handful of entries per frame -- one per visible creature -- so this is an Array of
+ * Dictionaries rather than a packed int array. The same reasoning as
+ * @ref MapSnapshot::copy_sprite_coverage: the data is small, strings are the point of
+ * it, and packing would cost a decode on the far side for nothing.
+ */
+struct creature_record {
+    /// What the mesh registry looks up: a monster's type id, or the body sprite id a
+    /// character draws with ("player_male", "npc_female").
+    std::string id;
+    /// 0 monster, 1 NPC, 2 the avatar. Enough to scale a stand-in differently, and to
+    /// tell the one creature that is the viewpoint from the rest.
+    int32_t kind = 0;
+    /// View-relative pixels of the creature's **feet**: the bottom centre of its tile.
+    /// The same space `map_draw_cmd::dest_x` is in, so a renderer needs no second
+    /// mapping, and the same anchor the contact shadows and proxies use.
+    int32_t x = 0;
+    int32_t y = 0;
+    /// Levels below the avatar's; see @ref cmd_z_below_shift.
+    int32_t z_below = 0;
+    /// Facing left, which SDL draws by mirroring rather than by rotating.
+    bool flip = false;
+};
+
+/**
  * Godot-owned tileset present bridge (ADR-002 tileset MapView).
  * Game thread loads UltimateCataclysm (or fallback), builds a draw list;
  * Godot main thread copies atlas Images once and paints the draw list.
@@ -279,7 +341,8 @@ class MapSnapshot
          *           codepoint, sways }.
          */
         godot::Dictionary describe_sprite( const std::string &id,
-                                           const std::string &category ) const;
+                                           const std::string &category,
+                                           const std::string &variant = {} ) const;
 
         /**
          * The avatar's character overlays, as resolved by the last rebuild.
@@ -298,6 +361,15 @@ class MapSnapshot
          * which is the race this whole class exists to avoid.
          */
         godot::Array copy_avatar_overlays() const;
+
+        /**
+         * Every creature in view, by identity (@ref creature_record).
+         *
+         * Each entry is { id, kind, x, y, z_below, flip }. Published every frame beside
+         * the draw list, from the same walk, so a consumer that matches a creature to
+         * its sprite by tile is matching within one frame's state.
+         */
+        godot::Array copy_creatures() const;
 
         /// Bumped by every @ref update_from_game. The Godot side polls this so it
         /// can skip copying and re-batching an unchanged draw list -- MapView
@@ -329,6 +401,8 @@ class MapSnapshot
             bool drawn = false;
         };
         std::vector<overlay_record> avatar_overlays_;
+        /// Creatures in view this frame; see @ref creature_record.
+        std::vector<creature_record> creatures_;
 
         /// One id's fallback history, for @ref copy_sprite_coverage.
         struct coverage_entry {
@@ -346,6 +420,36 @@ class MapSnapshot
         std::array<int32_t, static_cast<size_t>( sprite_fallback::last )> fallback_counts_{};
         /// Commands emitted on each @ref map_layer, this frame.
         std::array<int32_t, 16> layer_counts_{};
+        /// Sprites drawn ducked out of the player's way this frame, and of
+        /// those, how many swapped to a "_transparent" variant. A consumption
+        /// signal: the data has been parsed since the port began and a counter
+        /// stuck at zero is how "never runs" hides.
+        int32_t retracted_count_ = 0;
+        int32_t transparent_count_ = 0;
+        /// Tall sprites dimmed because they were standing in front of the
+        /// avatar. The fallback for a tileset that cannot retract, which is
+        /// every tileset the port has run against so far.
+        int32_t faded_count_ = 0;
+        /// Tall sprites the fade was *considered* for. Reported alongside
+        /// faded_count_ because zero faded means nothing on its own: zero of
+        /// zero is a scene with nothing tall in it, zero of many is a bug.
+        int32_t tall_candidates_ = 0;
+        /// What the z-level walk cost this frame (ADR-005 item 1).
+        ///
+        /// The ADR called item 1 the expensive one on the grounds that per-tile
+        /// work multiplies by the number of levels drawn. These three numbers
+        /// are that multiplier, measured rather than assumed -- which is the
+        /// habit the same ADR named after three features in a row that were
+        /// reasoned about at length and settled by printing a value.
+        ///
+        /// `open_columns_` is the count of view columns whose tile had no floor,
+        /// so the walk descended; on an outdoor level it is zero and the whole
+        /// feature costs one floor_cache lookup per tile.
+        int32_t open_columns_ = 0;
+        /// Deepest level below the avatar any command reached, 0 for a flat view.
+        int32_t deepest_z_below_ = 0;
+        /// Commands emitted for levels below the avatar's.
+        int32_t below_cmds_ = 0;
         // Deduped NORMAL atlas pixel buffers for Godot-side ImageTexture creation.
         struct atlas_pixels {
             int w = 0;

@@ -77,6 +77,12 @@ static func strip(text: String) -> String:
 		i = close + 1
 	return result.replace("</color>", "")
 
+## Resolve a bare CDDA colour name -- "c_light_green", as it arrives in a
+## snapshot field rather than inside markup -- to a hex string. Empty when it is
+## not one we know, which callers should read as "use your own default".
+static func hex_for_name(name: String) -> String:
+	return _hex_for(name)
+
 ## Strip the `c_`/`h_`/`i_` prefix and any `_<background>` suffix; what is left is
 ## the foreground name. A highlighted or inverted variant reads as its base
 ## colour, which loses the emphasis but never loses the meaning.

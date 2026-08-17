@@ -10,6 +10,7 @@ const TILE_SHADER := preload("res://shaders/map_tiles.gdshader")
 const ANIM_OVERLAY := preload("res://scripts/anim_overlay.gd")
 const GLYPH_LAYER := preload("res://scripts/glyph_layer.gd")
 const FIELD_PARTICLES := preload("res://scripts/field_particles.gd")
+const SHADOW_LAYER := preload("res://scripts/shadow_layer.gd")
 
 ## Ints per packed draw command: atlas, src x/y/w/h, dest x/y, layer, tint, rot_flags.
 ## Must match MapSnapshot::cmd_stride in src/godot_map_snapshot.h.
@@ -33,6 +34,82 @@ const FLAG_SWAY := 1 << 2
 const FLAG_FLIP_X := 1 << 3
 const PALETTE_SHIFT := 4
 const PALETTE_MASK := 0xF << PALETTE_SHIFT
+## The sprite overhangs its tile cell; see cmd_flag_tall.
+const FLAG_TALL := 1 << 8
+## Bits 9-12: z-levels below the avatar's own, 0-15; see cmd_z_below_shift.
+const Z_BELOW_SHIFT := 9
+const Z_BELOW_MASK := 0xF << Z_BELOW_SHIFT
+
+## Everything MapView owns has to stay inside a narrow z window. The host stacks
+## the UI over the map starting at the minimap panel on z 8 and running to 18,
+## and SessionBg sits under the map on -1, so the map's whole budget is 0..7 --
+## eight values for eleven layers. Spending z on layer ordering does not fit, and
+## trying to (batches climbed to 43, particles sat on 19, the animation overlay
+## on 64) is what put sprites on top of open menus.
+##
+## So z_index does not order the map at all. Same-z canvas items draw in tree
+## order, _rebuild_batches already re-seats every batch every frame, and tree
+## order has no range limit -- so the ordering is free and the z budget stays
+## spent on separating map from UI, which is all it is good for.
+## Everything the map draws into the world shares one z and orders by child
+## order. The particles and the contact shadows are in here too: they are part
+## of the world and have to interleave with it.
+const Z_TILES := 1
+## The animation overlay is not. Combat text and explosion frames are drawn over
+## the world rather than in it, so they take the one z above it -- and no more
+## than one, because they must still lose to a menu.
+const Z_ANIM := 2
+## Lowest z the host's UI panels use. Nothing under MapView may reach it.
+const Z_UI_FLOOR := 8
+
+## Where the tall band starts. Everything flat ranks below this, everything
+## depth-sorted above it, and the few whole-map effect layers sit in the gap.
+const TALL_BAND := 32
+## Rows above the top of the view still have sprites hanging into it, so the row
+## a rank is built from can be negative. Bias it so those stay in the tall band
+## instead of wrapping down into the flat one.
+const ROW_BIAS := 8
+## Rank values one z-level occupies. A rank inside a level is
+## TALL_BAND + (row + ROW_BIAS) * 16 + layer, so this has to clear the tallest
+## view anyone will publish -- 4096 rows of it, which is twenty times the
+## reality bubble.
+const Z_LEVEL_SPAN := 1 << 16
+## Deepest level below the avatar a command can name; matches max_z_below in
+## src/godot_map_snapshot.h, and is what the four flag bits can hold.
+const MAX_Z_BELOW := 15
+## Where the avatar's own level starts. Anything seated by hand rather than
+## from a command's flags belongs in this block: the whole-map effect layers
+## draw on the floor the player is standing on, not on the bottom of a pit.
+const TOP_LEVEL_BASE := MAX_Z_BELOW * Z_LEVEL_SPAN
+
+## Draw order within the map; see Z_TILES for why this is a rank and not a
+## z_index.
+##
+## Sprites are anchored to the bottom of their cell, so a sprite can only ever
+## cover rows *above* its own -- which means a sprite that fits its cell cannot
+## overlap another cell at all, and its order against other rows does not
+## matter. Those rank by layer alone and draw first, all of them, cheaply.
+##
+## What is left is the content that stands up: tall sprites and creatures. Those
+## rank by row, so a tree one row in front of a zombie covers it and the same
+## tree one row behind it does not. This is the depth ordering of ADR-005 item 3,
+## and it is why the map is no longer strictly layer-major: layer only breaks
+## ties within a row now.
+##
+## Creatures count as standing even when their sprite fits its cell. A 32x32
+## monster is still a thing at a position rather than part of the floor, and
+## ranking it with the flat content would put it under every tree on the map.
+##
+## `z_below` is levels below the avatar's (ADR-005 item 1), and it outranks
+## everything else: a whole level is either nearer the camera than another or it
+## is not, and no arrangement of rows within one can change that. So each level
+## gets its own block of ranks, deepest first, and the ordering inside a block is
+## exactly what it was when there was only one.
+static func depth_rank(layer: int, tall: bool, row: int, z_below: int = 0) -> int:
+	var base := (MAX_Z_BELOW - clampi(z_below, 0, MAX_Z_BELOW)) * Z_LEVEL_SPAN
+	if not tall:
+		return base + layer * 2
+	return base + TALL_BAND + (row + ROW_BIAS) * 16 + layer
 
 var _host: Node
 var _atlases: Array[Texture2D] = []
@@ -63,14 +140,12 @@ var _batched_area: Vector2 = Vector2.ZERO
 var _anim_overlay: Node2D
 ## Fire and smoke particles (SP-6), likewise a child so it shares the transform.
 var _field_particles: Node2D
+## Contact shadows under creatures (ADR-005 item 4).
+var _shadow_layer: Node2D
 ## Map-tile coordinate of the top-left of the current view.
 var _view_origin: Vector2i = Vector2i.ZERO
 ## Last extent published to C++, so we only ask when it actually changes.
 var _requested_tiles: Vector2i = Vector2i.ZERO
-## Width the sidebar occupies on the right. The map must not use it: centring in
-## the whole viewport pushed the map left and left a black band beside it, which
-## is space the map could have been drawn into.
-var _reserved_right: float = 0.0
 
 ## The light/visibility texture (SP-3, SP-4): one texel per published tile, R
 ## visibility and G light amount. Uploaded when C++ bumps its generation.
@@ -84,6 +159,16 @@ var _light_pass_announced: bool = false
 ## identity row. Null when the tileset declares none.
 var _palette_tex: ImageTexture
 
+## Glow over the world, so fire and explosions read as light sources rather than
+## as bright squares. It lives here rather than on a CanvasLayer over everything
+## because a viewport-wide environment would bloom the UI too; keyed on an HDR
+## threshold, only what the tile shader writes above 1.0 blooms, and nothing
+## else in the renderer does.
+var _world_env: WorldEnvironment
+## Held separately so it can be detached and reattached; see
+## _sync_world_environment.
+var _map_environment: Environment
+
 ## Layers the avatar draws on -- map_layer::player and ::player_overlay in
 ## src/godot_map_snapshot.h. Their batches opt out of the light pass: the player
 ## is the viewpoint, and dimming it to match the floor makes the character hard
@@ -94,6 +179,13 @@ const PLAYER_LAYERS := [9, 10]
 ## instances can move between map rebuilds (SP-5), and a hit has to displace a
 ## character's clothes along with the character.
 const CREATURE_LAYERS := [7, 8, 9, 10]
+## The body halves of those pairs -- map_layer::monster and ::player. Overlays
+## share their body's anchor, so anything that is per-creature rather than
+## per-sprite must filter to these.
+const MONSTER_LAYER_BODY := 7
+const PLAYER_LAYER_BODY := 9
+## map_layer::field, which the smoke particles seat themselves against.
+const FIELD_LAYER := 4
 
 ## Ints per packed hit event: id, x, y, z, dir x/y, flash.
 ## Must match AnimSnapshot::hit_stride in src/godot_anim_snapshot.h.
@@ -112,12 +204,6 @@ var _hit_seen: int = 0
 ## Rebuilt with the batches; this is what lets a hit find the right instance
 ## without lifting the creature out of the MultiMesh.
 var _creature_slots: Dictionary = {}
-
-func set_reserved_right(px: float) -> void:
-	if is_equal_approx(px, _reserved_right):
-		return
-	_reserved_right = maxf(0.0, px)
-	_update_zoom_and_camera()
 
 func setup(host: Node) -> void:
 	_host = host
@@ -138,7 +224,68 @@ func setup(host: Node) -> void:
 	_batched_area = Vector2.ZERO
 	_ensure_anim_overlay()
 	_ensure_field_particles()
+	_ensure_shadow_layer()
+	_ensure_world_environment()
 	queue_redraw()
+
+func _ensure_shadow_layer() -> void:
+	if _shadow_layer != null and is_instance_valid(_shadow_layer):
+		return
+	_shadow_layer = Node2D.new()
+	_shadow_layer.name = "ShadowLayer"
+	_shadow_layer.set_script(SHADOW_LAYER)
+	# Under the creatures that cast them and over the floor they fall on. That is
+	# a position in the child order, not a z_index (see Z_TILES); the seating pass
+	# in _rebuild_batches puts it just before the monster-body band.
+	_shadow_layer.z_index = Z_TILES
+	add_child(_shadow_layer)
+
+## The environment is viewport-global, so it must follow MapView's visibility
+## rather than its position in the tree. Called from refresh and on show/hide.
+##
+## Detaching the Environment resource, not hiding the node: WorldEnvironment
+## derives from Node and has no `visible` property, so assigning one throws and
+## leaves the glow on everywhere -- which is how the first attempt at this fix
+## silently did nothing. A null environment is the supported way to switch it
+## off.
+func _sync_world_environment() -> void:
+	if _world_env == null or not is_instance_valid(_world_env):
+		return
+	_world_env.environment = _map_environment if visible else null
+
+func _notification(what: int) -> void:
+	if what == NOTIFICATION_VISIBILITY_CHANGED:
+		_sync_world_environment()
+
+func _ensure_world_environment() -> void:
+	if _world_env != null and is_instance_valid(_world_env):
+		return
+	var env := Environment.new()
+	env.background_mode = Environment.BG_CANVAS
+	env.glow_enabled = true
+	env.glow_hdr_threshold = 1.0
+	env.glow_intensity = 0.7
+	# glow_bloom must be zero. It is a constant lift applied to every pixel
+	# *before* the HDR threshold is considered, so any value above zero blooms
+	# the entire frame -- which is why every letter in the game started shining,
+	# menus included. The threshold is the whole safety mechanism here and
+	# glow_bloom bypasses it.
+	env.glow_bloom = 0.0
+	env.glow_blend_mode = Environment.GLOW_BLEND_MODE_ADDITIVE
+	_map_environment = env
+	_world_env = WorldEnvironment.new()
+	_world_env.name = "WorldEnvironment"
+	add_child(_world_env)
+	# A WorldEnvironment applies to the whole viewport no matter where it sits in
+	# the tree, so parenting it to MapView does not scope it to the map. It has
+	# to be switched off by hand whenever the map is not being shown, or the
+	# main menu and every other screen get the map's post-processing.
+	#
+	# Under the host that viewport is now the world's own (ADR-004), which scopes
+	# the environment to exactly what it was always meant to cover. The switching
+	# stays: "the whole viewport" is still the rule, and MapView still has to work
+	# parented to an ordinary canvas, which is how headless_probe.gd drives it.
+	_sync_world_environment()
 
 func _ensure_field_particles() -> void:
 	if _field_particles != null and is_instance_valid(_field_particles):
@@ -146,6 +293,8 @@ func _ensure_field_particles() -> void:
 	_field_particles = Node2D.new()
 	_field_particles.name = "FieldParticles"
 	_field_particles.set_script(FIELD_PARTICLES)
+	# Ordered by the seating pass into the field layer's tall band, not by z.
+	_field_particles.z_index = Z_TILES
 	add_child(_field_particles)
 	_field_particles.setup()
 
@@ -155,6 +304,9 @@ func _ensure_anim_overlay() -> void:
 	_anim_overlay = Node2D.new()
 	_anim_overlay.name = "AnimOverlay"
 	_anim_overlay.set_script(ANIM_OVERLAY)
+	# Over every tile, under every panel. Combat text and explosions belong on
+	# top of the world but must not survive a menu opening over them.
+	_anim_overlay.z_index = Z_ANIM
 	add_child(_anim_overlay)
 	_anim_overlay.setup(_host)
 
@@ -194,30 +346,32 @@ func refresh() -> void:
 		if _host.has_method("get_wind_vector"):
 			wind = _host.get_wind_vector()
 		_field_particles.refresh(_host.get_map_field_list(), _tile_size, wind)
+		if _host.has_method("get_conditions"):
+			var pc: Dictionary = _host.get_conditions()
+			_field_particles.set_conditions(float(pc.get("daylight", 1.0)),
+				float(pc.get("precipitation", 0.0)), float(pc.get("pain", 0.0)))
 	_update_zoom_and_camera()
 	_rebuild_batches()
 	_rebuild_glyph_layers()
 	_update_light_texture()
 	_update_light_uniforms()
+	_sync_world_environment()
 	_batched_generation = generation
 	_batched_area = area
 	queue_redraw()
 
-func _unhandled_input(event: InputEvent) -> void:
-	if not visible:
+## Step the manual zoom one notch: +1 in, -1 out.
+##
+## Driven from outside rather than from an `_unhandled_input` here, because the
+## world now renders inside a SubViewport that deliberately accepts no input
+## (see `world_viewport.gd`) -- so no event reaches this node any more. The host
+## owns the Ctrl+wheel binding and calls this.
+func zoom_step(direction: int) -> void:
+	if direction == 0:
 		return
-	# Ctrl+wheel adjusts map zoom without stealing plain wheel from CDDA.
-	if event is InputEventMouseButton and event.pressed and event.ctrl_pressed:
-		if event.button_index == MOUSE_BUTTON_WHEEL_UP:
-			_user_zoom = clampf(_user_zoom * 1.1, 0.5, 4.0)
-			_update_zoom_and_camera()
-			queue_redraw()
-			get_viewport().set_input_as_handled()
-		elif event.button_index == MOUSE_BUTTON_WHEEL_DOWN:
-			_user_zoom = clampf(_user_zoom / 1.1, 0.5, 4.0)
-			_update_zoom_and_camera()
-			queue_redraw()
-			get_viewport().set_input_as_handled()
+	_user_zoom = clampf(_user_zoom * (1.1 if direction > 0 else 1.0 / 1.1), 0.5, 4.0)
+	_update_zoom_and_camera()
+	queue_redraw()
 
 func _load_atlases() -> void:
 	_atlases.clear()
@@ -267,12 +421,15 @@ func _tiles_for_viewport(area: Vector2) -> Vector2i:
 ## was scaled to whatever the curses grid happened to hand over and then centred,
 ## which is where the black bars either side came from. Now the zoom is fixed and
 ## the tile count follows it, so the draw list always covers the whole viewport.
+##
+## "The whole viewport" is the drawable area exactly, with no sidebar to subtract
+## from it: the world has its own SubViewport and that viewport is sized to what
+## the sidebar leaves (ADR-004, `world_viewport.gd`). MapView used to carry a
+## `_reserved_right` for this and no longer needs to know the sidebar exists.
 func _update_zoom_and_camera() -> void:
-	var full := get_viewport_rect().size
-	if full.x < 2.0 or full.y < 2.0:
+	var area := get_viewport_rect().size
+	if area.x < 2.0 or area.y < 2.0:
 		return
-	# The drawable area is everything the sidebar does not cover.
-	var area := Vector2(maxf(64.0, full.x - _reserved_right), full.y)
 	_zoom = _user_zoom
 	scale = Vector2(_zoom, _zoom)
 
@@ -335,15 +492,37 @@ func _update_light_uniforms() -> void:
 			enabled = false
 		else:
 			inv_size = Vector2(1.0 / world.x, 1.0 / world.y)
+			# The light image is one block of rows per z-level now (ADR-006 item 3D-4),
+			# deepest last. This backend draws every level at one height and wants the
+			# avatar's, which is block 0 -- so V has to be scaled into that block rather
+			# than stretched over the whole texture, or a hole coming into view would
+			# quietly squash the lighting of everything.
+			var levels := 1
+			if _host != null and _host.has_method("get_light_levels"):
+				levels = maxi(1, int(_host.get_light_levels()))
+			inv_size.y /= float(levels)
 	var wind := Vector2.ZERO
 	if _host != null and _host.has_method("get_wind_vector"):
 		wind = _host.get_wind_vector()
+	# Time of day, weather and pain. Read once and pushed to every batch rather
+	# than sampled per material, since they are the same for the whole world.
+	var daylight := 1.0
+	var precipitation := 0.0
+	var pain := 0.0
+	if _host != null and _host.has_method("get_conditions"):
+		var c: Dictionary = _host.get_conditions()
+		daylight = float(c.get("daylight", 1.0))
+		precipitation = float(c.get("precipitation", 0.0))
+		pain = float(c.get("pain", 0.0))
 	for key in _batches:
 		var node: MultiMeshInstance2D = _batches[key]
 		if not is_instance_valid(node) or node.material == null:
 			continue
 		var mat: ShaderMaterial = node.material
 		mat.set_shader_parameter("wind", wind)
+		mat.set_shader_parameter("daylight", daylight)
+		mat.set_shader_parameter("precipitation", precipitation)
+		mat.set_shader_parameter("pain", pain)
 		mat.set_shader_parameter("light_enabled", enabled)
 		mat.set_shader_parameter("light_origin", origin)
 		mat.set_shader_parameter("light_inv_size", inv_size)
@@ -412,11 +591,9 @@ func _glyph_layer_for(layer: int) -> Node2D:
 	var node := Node2D.new()
 	node.name = "GlyphLayer_%d" % layer
 	node.set_script(GLYPH_LAYER)
-	# Same z_index as that layer's tile batches, which puts the glyph under every
-	# layer above and over every layer below. Order against its own layer's
-	# sprites is tree order and is not worth pinning down: a glyph is only ever
-	# emitted for a tile that produced no sprite.
-	node.z_index = layer + 1
+	# Ordered by the seating pass, not by z (see Z_TILES): it lands in its own
+	# layer's flat band, under every layer above and over every layer below.
+	node.z_index = Z_TILES
 	add_child(node)
 	_glyph_layers[layer] = node
 	return node
@@ -428,8 +605,10 @@ func _glyph_layer_for(layer: int) -> Node2D:
 ## is the lighting tint. Splitting the batch instead costs one extra draw call
 ## per distinct combination, and only foliage and declared palette variants use
 ## anything but the default -- so in practice it is one or two.
-func _batch_for(layer: int, atlas_i: int, sway: bool, palette: int) -> MultiMeshInstance2D:
-	var key := "%d:%d:%d:%d" % [layer, atlas_i, 1 if sway else 0, palette]
+func _batch_for(layer: int, atlas_i: int, sway: bool, palette: int,
+		tall: bool, row: int, z_below: int) -> MultiMeshInstance2D:
+	var key := "%d:%d:%d:%d:%d:%d:%d" % [layer, atlas_i, 1 if sway else 0, palette,
+		1 if tall else 0, row, z_below]
 	var existing = _batches.get(key)
 	if existing != null and is_instance_valid(existing):
 		return existing
@@ -449,7 +628,15 @@ func _batch_for(layer: int, atlas_i: int, sway: bool, palette: int) -> MultiMesh
 		Vector2(1.0 / float(tex.get_width()), 1.0 / float(tex.get_height())))
 	# The avatar is the viewpoint. Dimming it to match the floor it stands on
 	# makes it hard to find on a dark screen, so its layer sits out the pass.
-	mat.set_shader_parameter("receives_light", not PLAYER_LAYERS.has(layer))
+	#
+	# A level below the avatar sits it out for an unrelated reason: the light
+	# texture holds one texel per column and that texel belongs to the tile
+	# the avatar can see, so applying it to what is underneath would light a
+	# basement floor with the daylight falling down the hole above it. C++
+	# sends those commands with the CPU lighting baked into the tint instead
+	# (see fog_for_depth in src/godot_map_snapshot.cpp).
+	mat.set_shader_parameter("receives_light",
+		not PLAYER_LAYERS.has(layer) and z_below == 0)
 
 	mat.set_shader_parameter("sway_enabled", sway)
 	mat.set_shader_parameter("palette_row", palette)
@@ -458,13 +645,18 @@ func _batch_for(layer: int, atlas_i: int, sway: bool, palette: int) -> MultiMesh
 		mat.set_shader_parameter("palette_rows", float(_palette_tex.get_height()))
 
 	var node := MultiMeshInstance2D.new()
-	node.name = "TileBatch_%d_%d_%d_%d" % [layer, atlas_i, 1 if sway else 0, palette]
+	# Every field of the batch key belongs in the name, tall included: without it
+	# a layer's flat and tall batches collide and Godot quietly renames one, which
+	# makes the child order unreadable in a debugger at exactly the moment you are
+	# trying to read it.
+	node.name = "TileBatch_%d_%d_%d_%d_%d_%d_%d" % [layer, atlas_i, 1 if sway else 0,
+		palette, 1 if tall else 0, row, z_below]
 	node.multimesh = mm
 	node.texture = tex
 	node.material = mat
-	# The C++ draw list is layer-sorted; z_index reproduces that ordering in the
-	# scene tree. Layer 0 sits above the background rect drawn in _draw().
-	node.z_index = layer + 1
+	# The C++ draw list is layer-sorted; the seating pass reproduces that ordering
+	# as child order, with a separate band for sprites that overhang their cell.
+	node.z_index = Z_TILES
 	add_child(node)
 	_batches[key] = node
 	return node
@@ -472,7 +664,12 @@ func _batch_for(layer: int, atlas_i: int, sway: bool, palette: int) -> MultiMesh
 ## Place a sprite of w x h at (x, y), rotated about its own centre. SDL rotates
 ## about the destination rect's centre, so the origin has to compensate rather than
 ## being the top-left corner.
-func _tile_transform(x: float, y: float, w: float, h: float, rotation: int,
+##
+## Static, and named without the underscore, because `map_view_3d.gd` builds its
+## Transform3D out of this. Of everything the two backends have in common this is
+## the piece least worth having two copies of: the flip case took two attempts to
+## get right, and a second copy would be a second chance to get it wrong.
+static func tile_transform(x: float, y: float, w: float, h: float, rotation: int,
 		flip_x: bool = false) -> Transform2D:
 	# Mirroring is a negative x basis about the sprite's centre, which is how a
 	# character faces left. SDL spells the same thing as render_copy_ex's
@@ -505,10 +702,24 @@ func _unpack_tint(packed: int) -> Color:
 		packed & 0xFF
 	)
 
+## The row a command's sprite stands on, for the command at offset `i`.
+##
+## dest_y is the sprite's top edge *after* its offset has been applied, so it is
+## not the row: a 32x64 tree at row 10 has the same dest_y as a 32x32 rock at row
+## 9. The bottom edge is the row, and it is already derivable from what the
+## command carries -- which is why depth ordering needed no new field on
+## map_draw_cmd and no change to the stride.
+##
+## The same anchor the contact shadows use, for the same reason: bottom centre is
+## the one point on a sprite that says which tile it is standing on.
+func _row_of(i: int) -> int:
+	var th: int = maxi(1, _tile_size.y)
+	return int(floor(float(_cmds[i + 6] + _cmds[i + 4]) / float(th)))
+
 func _rebuild_batches() -> void:
-	# Bucket the draw list by (layer, atlas). Ordering across atlases inside one
-	# layer is not significant -- CDDA separates anything that must overlap
-	# (furniture, monsters, player) into distinct layers.
+	# Bucket the draw list by everything that has to be uniform across a batch:
+	# the atlas and the two shader uniforms, plus the depth the batch sits at,
+	# because a MultiMesh draws as one unit and cannot interleave with another.
 	var buckets: Dictionary = {}
 	var n := _cmds.size()
 	var i := 0
@@ -516,9 +727,33 @@ func _rebuild_batches() -> void:
 		var atlas_i: int = _cmds[i]
 		if atlas_i >= 0 and atlas_i < _atlases.size() and _atlases[atlas_i] != null:
 			var flags: int = _cmds[i + 9]
-			var key := "%d:%d:%d:%d" % [_cmds[i + 7], atlas_i,
+			var layer: int = _cmds[i + 7]
+			var tall := (flags & FLAG_TALL) != 0 or CREATURE_LAYERS.has(layer)
+			# A batch may not span depths, or its instances cannot interleave
+			# with another batch's -- so the row goes in the key. Only for the
+			# standing content: bucketing the flat sprites per row too would
+			# multiply the draw calls by the height of the view for an ordering
+			# that provably cannot matter (see depth_rank).
+			#
+			# Cost: one draw call per (row, atlas, sway, palette, layer) that
+			# holds standing content, so the bound is the view height times the
+			# atlases in use -- a few hundred in a dense forest, against six for
+			# the whole map before. Fine for 2D, but if it ever bites, drop the
+			# layer from the tall key: a MultiMesh draws its instances in array
+			# order and the C++ list is layer-major within a row, so a row's
+			# layers stay ordered inside one batch. That trades roughly a third
+			# of the calls for having to carry the layer in _creature_slots,
+			# which the shadow pass currently reads off the key.
+			# The level goes in the key for two reasons at once: it is part of
+			# the depth -- a batch may not span two levels any more than it
+			# may span two rows -- and it decides receives_light, which is a
+			# shader uniform and therefore per batch.
+			var key := "%d:%d:%d:%d:%d:%d:%d" % [layer, atlas_i,
 				1 if (flags & FLAG_SWAY) != 0 else 0,
-				(flags & PALETTE_MASK) >> PALETTE_SHIFT]
+				(flags & PALETTE_MASK) >> PALETTE_SHIFT,
+				1 if tall else 0,
+				_row_of(i) if tall else 0,
+				(flags & Z_BELOW_MASK) >> Z_BELOW_SHIFT]
 			if not buckets.has(key):
 				buckets[key] = PackedInt32Array()
 			var bucket: PackedInt32Array = buckets[key]
@@ -532,12 +767,12 @@ func _rebuild_batches() -> void:
 			if is_instance_valid(idle):
 				idle.multimesh.instance_count = 0
 
-	# Batches within a layer draw in tree order, so a coat on human_body.png and
-	# a rifle on tall.png -- same layer, different atlas -- had no defined order
-	# between them. Sort the keys by the first command each holds and re-seat the
-	# nodes to match, so "later in the draw list" means "on top" even across
-	# atlases. Only characters need this, but it costs a handful of move_child
-	# calls per rebuild and removes a whole class of "sometimes wrong" bug.
+	# Batches at the same rank draw in tree order, so a coat on human_body.png and
+	# a rifle on tall.png -- same layer, same row, different atlas -- would have
+	# no defined order between them. Sort the keys by the first command each
+	# holds, so "later in the draw list" breaks that tie the way the game meant
+	# it. The C++ list is layer-then-row sorted, which within one rank is exactly
+	# the order the overlays were emitted in.
 	var ordered_keys: Array = buckets.keys()
 	ordered_keys.sort_custom(func(a, b): return (buckets[a] as PackedInt32Array)[0] \
 		< (buckets[b] as PackedInt32Array)[0])
@@ -546,7 +781,8 @@ func _rebuild_batches() -> void:
 		var parts := (key as String).split(":")
 		var layer := int(parts[0])
 		var atlas_i := int(parts[1])
-		var node := _batch_for(layer, atlas_i, int(parts[2]) != 0, int(parts[3]))
+		var node := _batch_for(layer, atlas_i, int(parts[2]) != 0, int(parts[3]),
+			int(parts[4]) != 0, int(parts[5]), int(parts[6]))
 		var tex: Texture2D = _atlases[atlas_i]
 		var inv_w := 1.0 / float(tex.get_width())
 		var inv_h := 1.0 / float(tex.get_height())
@@ -564,7 +800,7 @@ func _rebuild_batches() -> void:
 			var o: int = offsets[slot]
 			var src_w: int = _cmds[o + 3]
 			var src_h: int = _cmds[o + 4]
-			var xf := _tile_transform(
+			var xf := tile_transform(
 				float(_cmds[o + 5]), float(_cmds[o + 6]),
 				float(src_w), float(src_h), _cmds[o + 9] & ROTATION_MASK,
 				(_cmds[o + 9] & FLAG_FLIP_X) != 0)
@@ -594,13 +830,98 @@ func _rebuild_batches() -> void:
 			_creature_slots[key] = creatures
 		else:
 			_creature_slots.erase(key)
-	# Now that every batch exists, put them in draw-list order within their layer.
-	var seat := 0
+	# Shadows come straight from the creature records: an anchor and a width are
+	# all a blob needs, so nothing extra has to be published for them.
+	if _shadow_layer != null and is_instance_valid(_shadow_layer):
+		var blobs: Array = []
+		for key in _creature_slots:
+			# Bodies only. A character is one body plus a dozen clothing
+			# overlays, each its own instance at the same anchor, so taking
+			# every creature instance stacked twelve shadows on one pair of
+			# feet -- 36 blobs for what should have been three. The overlay
+			# layers are the odd ones: monster 7 / monster_overlay 8,
+			# player 9 / player_overlay 10.
+			var parts := (key as String).split(":")
+			var layer := int(parts[0])
+			if layer != MONSTER_LAYER_BODY and layer != PLAYER_LAYER_BODY:
+				continue
+			# One shadow layer draws the whole map, so it can only sit at one
+			# depth, and that depth is the avatar's level. A blob for a creature
+			# two floors down would be painted on the floor the player is
+			# standing on, beside the hole rather than at the bottom of it.
+			if int(parts[6]) != 0:
+				continue
+			for entry in _creature_slots[key]:
+				var xf: Transform2D = entry["xform"]
+				blobs.append({
+					"anchor": entry["anchor"],
+					# The quad's x basis is the sprite's width in pixels.
+					"width": xf.x.length(),
+				})
+		var strength := 1.0
+		if _host != null and _host.has_method("get_conditions"):
+			strength = float((_host.get_conditions() as Dictionary).get("daylight", 1.0))
+		_shadow_layer.set_shadows(blobs, _tile_size, strength)
+
+	# Now that every batch exists, put the map in draw order. Child order is the
+	# only thing ordering it (see Z_TILES), so this pass has to seat the shadow
+	# and glyph layers as well -- while z_index still carried the layers, those
+	# two sorted themselves and being left at the end of the child list cost
+	# nothing. They are the parts that break quietly if this is ever narrowed
+	# back to batches only.
+	var seats: Array = []
 	for key in ordered_keys:
 		var node = _batches.get(key)
 		if node != null and is_instance_valid(node):
-			move_child(node, seat)
-			seat += 1
+			var parts := (key as String).split(":")
+			seats.append({
+				"node": node,
+				"rank": depth_rank(int(parts[0]), int(parts[4]) != 0, int(parts[5]),
+					int(parts[6])),
+				"tie": (buckets[key] as PackedInt32Array)[0],
+			})
+	for glyph_layer in _glyph_layers:
+		var gnode = _glyph_layers[glyph_layer]
+		if gnode != null and is_instance_valid(gnode):
+			# Last within its layer's flat band. A glyph is only ever emitted for
+			# a tile that produced no sprite, so nothing in the band can hide it.
+			#
+			# Not depth-sorted: one node holds a whole layer's glyphs, so it can
+			# only sit at one rank. Glyphs are the missing-art path and a tileset
+			# with full coverage emits none, so the approximation is not worth a
+			# node per row to remove.
+			#
+			# Same approximation across z: a glyph for a tile two floors down is
+			# seated on the avatar's level. The command list carries the level
+			# and the glyph list does not (map_glyph_cmd has no flags field), so
+			# fixing it means either a node per level or a wider glyph command,
+			# for art that is missing in the first place. C++ dims those glyphs
+			# with the same depth fog it dims the sprites with, which is what
+			# keeps a basement question mark from reading as a nearby one.
+			seats.append({
+				"node": gnode,
+				"rank": depth_rank(int(glyph_layer), false, 0),
+				"tie": 0x7FFFFFFF,
+			})
+	# The two whole-map effect layers go in the gap between the flat content and
+	# the standing content. Neither can be depth-sorted -- each is a single node
+	# drawing the whole map -- so this is the one position that is right more
+	# often than not: over the ground, under anything standing on it.
+	if _shadow_layer != null and is_instance_valid(_shadow_layer):
+		# A shadow is on the floor, so being under every tree is correct.
+		seats.append({"node": _shadow_layer,
+			"rank": TOP_LEVEL_BASE + TALL_BAND - 2, "tie": 0})
+	if _field_particles != null and is_instance_valid(_field_particles):
+		# Smoke drifts over the fire it comes from but does not hide the zombie
+		# walking through it.
+		seats.append({"node": _field_particles,
+			"rank": TOP_LEVEL_BASE + TALL_BAND - 1, "tie": 0})
+	seats.sort_custom(func(a, b):
+		return a["rank"] < b["rank"] if a["rank"] != b["rank"] else a["tie"] < b["tie"])
+	var seat := 0
+	for entry in seats:
+		move_child(entry["node"], seat)
+		seat += 1
 
 	# A hit that was mid-flight when the map changed now refers to instances that
 	# have been renumbered, so re-seat it against the new slots.

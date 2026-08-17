@@ -6,6 +6,7 @@
 
 #include <cstdint>
 #include <mutex>
+#include <atomic>
 #include <string>
 #include <vector>
 
@@ -71,6 +72,24 @@ class OvermapSnapshot
         int command_count() const;
         uint64_t generation() const;
 
+        /// The sidebar's text, recorded from the same functions that draw it.
+        /// Its own generation: the map redraws on every blink, the sidebar only
+        /// changes when the cursor moves or a setting is toggled.
+        struct sidebar_line {
+            std::string text;
+            std::string color;
+            int indent = 0;
+            bool join = false;
+            bool header = false;
+        };
+        void publish_sidebar( const std::vector<sidebar_line> &lines );
+        godot::Dictionary copy_sidebar() const;
+        uint64_t sidebar_generation() const;
+        /// Proof a Godot panel is drawing the sidebar. Until one is, the ImGui
+        /// window keeps drawing it -- the screen must not be left with neither.
+        void note_sidebar_attended();
+        bool sidebar_attended() const;
+
         /// True while the overmap UI is on screen. Set by an RAII guard around
         /// overmap_ui's display loop so the Godot host knows when to show the view.
         bool active() const;
@@ -88,6 +107,9 @@ class OvermapSnapshot
         int origin_x_ = 0;
         int origin_y_ = 0;
         uint64_t generation_ = 0;
+        std::vector<sidebar_line> sidebar_;
+        uint64_t sidebar_generation_ = 0;
+        std::atomic<bool> sidebar_attended_{ false };
         std::vector<map_draw_cmd> cmds_;
 
         struct atlas_pixels {

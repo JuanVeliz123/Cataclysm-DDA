@@ -12,6 +12,8 @@
 #include "field.h"
 #include "field_type.h"
 #include "game.h"
+#include "game_constants.h"
+#include "map_scale_constants.h"
 #include "enums.h"
 #include "godot_light_snapshot.h"
 #include "godot_tileset_loader.h"
@@ -30,13 +32,16 @@
 #include "trap.h"
 #include "type_id.h"
 #include "veh_type.h"
+#include "units_utility.h"
 #include "vehicle.h"
 #include "vpart_position.h"
 #include "weather.h"
+#include "weather_type.h"
 
 #include <algorithm>
 #include <array>
 #include <bitset>
+#include <cmath>
 #include <cstring>
 #include <string>
 #include <string_view>
@@ -388,6 +393,11 @@ struct resolved_sprite {
     /// 1-based palette row for the shader to recolour through, 0 for none
     /// (SP-8).
     int32_t palette_row = 0;
+    /// The tileset id that actually matched. Worth carrying because "exact" on
+    /// its own cannot distinguish a correct longest-variant match from a lucky
+    /// short one -- vp_frame_horizontal_2_front and vp_frame_horizontal are
+    /// both "exact" and only one of them is right.
+    std::string matched_id;
 };
 
 /// Whether this terrain or furniture should bend in the wind (SP-7).
@@ -449,6 +459,33 @@ bool sprite_overhangs_cell( const int sprite_idx, const int tile_w, const int ti
     return tex.src_w() > tile_w || tex.src_h() > tile_h;
 }
 
+/// How far a sprite standing in front of the avatar is allowed to fade, as the
+/// alpha it reaches at full occlusion. Not zero: the tree has to stay visible
+/// enough to be a tree.
+constexpr int32_t min_occluder_alpha = 90;
+
+/**
+ * How many cells a sprite reaches over, as (columns, rows).
+ *
+ * Sprites are anchored to the bottom of their cell and centred across it, so a
+ * 32x96 sprite at row R covers rows R-2..R and a 96x32 one covers columns
+ * C-1..C+1. Used to answer "does this actually cover the avatar" rather than
+ * inferring it from distance, which fades things that are not in the way.
+ */
+point sprite_cells_covered( const int sprite_idx, const int tile_w, const int tile_h )
+{
+    if( sprite_idx < 0 || sprite_idx >= static_cast<int>( g_tileset.tile_values.size() ) ) {
+        return point( 1, 1 );
+    }
+    const godot_texture &tex = g_tileset.tile_values[static_cast<size_t>( sprite_idx )];
+    if( !tex.is_valid() ) {
+        return point( 1, 1 );
+    }
+    const int w = std::max( 1, tile_w );
+    const int h = std::max( 1, tile_h );
+    return point( ( tex.src_w() + w - 1 ) / w, ( tex.src_h() + h - 1 ) / h );
+}
+
 /**
  * Resolve a tileset id to something drawable (SP-1).
  *
@@ -466,10 +503,63 @@ bool sprite_overhangs_cell( const int sprite_idx, const int tile_w, const int ti
  * says what the tile is, which matters most for exactly the tilesets that are
  * missing the most art.
  */
-resolved_sprite resolve_sprite( const std::string &id, const sprite_category cat )
+/**
+ * Try @p id with @p variant applied, the way this category spells variants.
+ *
+ * Two conventions, both from cata_tiles::find_tile_looks_like:
+ *
+ * - Vehicle parts join with a plain underscore and are matched greedily, longest
+ *   first: "vp_frame" with variant "horizontal_2_front" tries
+ *   vp_frame_horizontal_2_front, then _horizontal_2, then _horizontal, then the
+ *   bare part. Ultica is built to that -- it ships vp_frame_horizontal_2_front
+ *   and vp_frame_horizontal as separate sprites.
+ * - Everything else uses "_var_", or appends directly when the variant already
+ *   begins with an underscore.
+ */
+const godot_tile_type *find_variant( const std::string &id, const std::string &variant,
+                                     const sprite_category cat, std::string &matched )
+{
+    if( variant.empty() ) {
+        return nullptr;
+    }
+    if( cat == sprite_category::vehicle_part ) {
+        std::string chunk = variant;
+        while( !chunk.empty() ) {
+            const std::string candidate = id + "_" + chunk;
+            if( const godot_tile_type *t = g_tileset.find_tile_type( candidate ) ) {
+                matched = candidate;
+                return t;
+            }
+            const size_t cut = chunk.rfind( '_' );
+            chunk = cut == std::string::npos ? std::string() : chunk.substr( 0, cut );
+        }
+        return nullptr;
+    }
+    const std::string candidate = variant.front() == '_' ? id + variant
+                                  : id + "_var_" + variant;
+    if( const godot_tile_type *t = g_tileset.find_tile_type( candidate ) ) {
+        matched = candidate;
+        return t;
+    }
+    return nullptr;
+}
+
+resolved_sprite resolve_sprite( const std::string &id, const sprite_category cat,
+                                const std::string &variant = {} )
 {
     resolved_sprite out;
     if( id.empty() ) {
+        return out;
+    }
+
+    // A variant is more specific than the base id, so it is tried first -- and
+    // it counts as an exact hit, because the tileset does have art for exactly
+    // this thing.
+    std::string matched;
+    if( const godot_tile_type *t = find_variant( id, variant, cat, matched ) ) {
+        out.tile = t;
+        out.level = sprite_fallback::exact;
+        out.matched_id = matched;
         return out;
     }
 
@@ -490,6 +580,7 @@ resolved_sprite resolve_sprite( const std::string &id, const sprite_category cat
     if( const godot_tile_type *t = g_tileset.find_tile_type( lookup ) ) {
         out.tile = t;
         out.level = sprite_fallback::exact;
+        out.matched_id = lookup;
         return out;
     }
 
@@ -504,6 +595,7 @@ resolved_sprite resolve_sprite( const std::string &id, const sprite_category cat
         if( const godot_tile_type *t = g_tileset.find_tile_type( found ) ) {
             out.tile = t;
             out.level = sprite_fallback::looks_like;
+            out.matched_id = found;
             return out;
         }
     }
@@ -594,6 +686,8 @@ const char *subtile_name( const int subtile )
         case t_connection: return "t_connection";
         case end_piece: return "end_piece";
         case unconnected: return "unconnected";
+        case open_: return "open";
+        case broken: return "broken";
         default: return nullptr;
     }
 }
@@ -662,6 +756,57 @@ light_tints tints_for_light( const lit_level ll, const bool nv_goggles, const bo
 {
     return { tint_for_light( ll, nv_goggles, light_pass ),
              tint_for_light( ll, nv_goggles, false ) };
+}
+
+/**
+ * Push a tint one z-level's worth further away (ADR-005 item 1).
+ *
+ * SDL draws a translucent rectangle over every level below the viewer --
+ * cata_tiles::draw_zlevel_overlay, alpha 100/255 on a non-isometric tileset --
+ * so distance reads as haze. There is no geometry pass here and the per-command
+ * tint is a multiply, which can take light out of a sprite but cannot wash it
+ * toward grey. So the same idea arrives as a darkening with a cool cast, which
+ * is the half of the effect that carries in a fixed-angle view: the floor of the
+ * basement you are looking down into should be dimmer than the floor you stand
+ * on, and dimmer again two levels down.
+ *
+ * Compounding per level, as SDL's does -- it draws the overlay once per level
+ * crossed, so two levels down is fogged twice.
+ *
+ * Alpha is untouched. Fading the lower level instead of dimming it would show
+ * the void through it, which is not what is under a floor.
+ */
+int32_t fog_for_depth( const int32_t tint, const int z_below )
+{
+    if( z_below <= 0 ) {
+        return tint;
+    }
+    // A renderer that puts levels at real elevations fades them itself, and doing both
+    // would dim a basement twice. Same handshake as the light pass: silence means the
+    // baked fog stays, so the 2D backend never notices this exists.
+    if( get_light_snapshot().depth_fog_enabled() ) {
+        return tint;
+    }
+    // Blue kept highest of the three: what is left of the light down a stairwell
+    // is bounced and cold.
+    constexpr float per_level[3] = { 0.55f, 0.58f, 0.66f };
+    const uint32_t packed = static_cast<uint32_t>( tint );
+    int channel[3];
+    for( int i = 0; i < 3; ++i ) {
+        float value = static_cast<float>( ( packed >> ( 24 - i * 8 ) ) & 0xFFu );
+        for( int step = 0; step < z_below; ++step ) {
+            value *= per_level[i];
+        }
+        channel[i] = static_cast<int>( value );
+    }
+    return pack_tint( channel[0], channel[1], channel[2],
+                      static_cast<int>( packed & 0xFFu ) );
+}
+
+light_tints fog_for_depth( const light_tints &tints, const int z_below )
+{
+    return { fog_for_depth( tints.sprite, z_below ),
+             fog_for_depth( tints.glyph, z_below ) };
 }
 
 struct picked_sprite {
@@ -1031,6 +1176,22 @@ godot::Dictionary MapSnapshot::copy_render_stats() const
     out["commands"] = static_cast<int>( cmds_.size() );
     out["glyphs"] = static_cast<int>( glyphs_.size() );
     out["field_emitters"] = static_cast<int>( fields_.size() );
+    // Light sources published this frame (ADR-006 item 3D-2). A consumption
+    // signal, in the tradition of `retracted` and `faded` below: these come out of
+    // state level_cache.h describes as valid only inside generate_lightmap, so a
+    // counter stuck at zero on a lit night is how that contract breaking would
+    // announce itself instead of the lights quietly never arriving.
+    out["lights"] = get_light_snapshot().light_count();
+    out["retracted"] = retracted_count_;
+    out["transparent"] = transparent_count_;
+    out["faded"] = faded_count_;
+    out["tall_candidates"] = tall_candidates_;
+    // ADR-005 item 1. open_columns is the one that answers "what did z-levels
+    // cost": it is how many of the view's columns had no floor and made the walk
+    // descend, and on an outdoor level it is zero.
+    out["open_columns"] = open_columns_;
+    out["deepest_z_below"] = deepest_z_below_;
+    out["below_commands"] = below_cmds_;
     out["missing_ids"] = static_cast<int>( coverage_.size() );
     out["palettes"] = palette_pixels_.h > 0 ? palette_pixels_.h - 1 : 0;
 
@@ -1051,7 +1212,7 @@ godot::Dictionary MapSnapshot::copy_render_stats() const
 }
 
 godot::Dictionary MapSnapshot::describe_sprite( const std::string &id,
-        const std::string &category ) const
+        const std::string &category, const std::string &variant ) const
 {
     godot::Dictionary out;
     sprite_category cat = sprite_category::none;
@@ -1076,8 +1237,12 @@ godot::Dictionary MapSnapshot::describe_sprite( const std::string &id,
         resolved = var->second.sprite;
     }
 
-    const resolved_sprite res = resolve_sprite( id, cat );
+    const resolved_sprite res = resolve_sprite( id, cat, variant );
+    out["variant"] = godot::String::utf8( variant.c_str() );
     out["resolved"] = godot::String::utf8( resolved.c_str() );
+    // The sprite that was actually chosen, which is the only thing that says
+    // whether the variant walk landed where it should have.
+    out["matched"] = godot::String::utf8( res.matched_id.c_str() );
     out["level"] = static_cast<int>( res.level );
     out["level_name"] = godot::String( fallback_name( res.level ) );
     out["palette_row"] = res.palette_row;
@@ -1105,6 +1270,23 @@ godot::Dictionary MapSnapshot::describe_sprite( const std::string &id,
     out["vegetation"] = vegetation;
     out["overhangs_cell"] = overhangs;
     out["sways"] = vegetation && overhangs;
+    return out;
+}
+
+godot::Array MapSnapshot::copy_creatures() const
+{
+    std::lock_guard<std::mutex> lock( mutex_ );
+    godot::Array out;
+    for( const creature_record &rec : creatures_ ) {
+        godot::Dictionary d;
+        d["id"] = godot::String::utf8( rec.id.c_str() );
+        d["kind"] = rec.kind;
+        d["x"] = rec.x;
+        d["y"] = rec.y;
+        d["z_below"] = rec.z_below;
+        d["flip"] = rec.flip;
+        out.push_back( d );
+    }
     return out;
 }
 
@@ -1168,6 +1350,78 @@ void MapSnapshot::update_from_game()
     // 32x48 with sprite_offset_y=-16) are anchored via tile_type.offset, not cell origin.
     const int base_tw = std::max( 1, g_tileset.get_tile_width() );
 
+    /**
+     * How much a tall sprite should duck out of the player's way, 0-100.
+     *
+     * A 96x96 tree drawn at the tile in front of the avatar covers the avatar.
+     * Tilesets solve this by shipping a second, shorter offset per sprite
+     * (offset_retracted) and a transparent variant, and by declaring the
+     * distance band over which to blend between them. Ultica ships all of it;
+     * the renderer has been parsing it and throwing it away since the port
+     * began, so tall things simply hid the player.
+     *
+     * Mirrors cata_tiles::draw_from_id_string_internal: option 0 disables it,
+     * 1 retracts always, 2 blends over the distance band, with the option's
+     * band overriding the tileset's when set.
+     */
+    const int occlusion_mode = get_option<int>( "PREVENT_OCCLUSION" );
+    const bool occlusion_transp = get_option<bool>( "PREVENT_OCCLUSION_TRANSP" );
+    const bool occlusion_retract = get_option<bool>( "PREVENT_OCCLUSION_RETRACT" );
+    const float opt_d_min = get_option<float>( "PREVENT_OCCLUSION_MIN_DIST" );
+    const float opt_d_max = get_option<float>( "PREVENT_OCCLUSION_MAX_DIST" );
+
+    auto retract_at = [&]( int dest_tx, int dest_ty ) -> int {
+        if( occlusion_mode == 0 || ( !occlusion_transp && !occlusion_retract ) )
+        {
+            return 0;
+        }
+        if( occlusion_mode == 1 ) {
+            return 100;
+        }
+        const float d_min = opt_d_min > 0.0f ? opt_d_min
+                            : g_tileset.get_prevent_occlusion_min_dist();
+        const float d_max = opt_d_max > 0.0f ? opt_d_max
+                            : g_tileset.get_prevent_occlusion_max_dist();
+        const float range = d_max - d_min;
+        const float slope = range <= 0.0f ? 100.0f : 1.0f / range;
+        // Distance from the avatar's tile, which is the centre of the view.
+        const float dx = static_cast<float>( dest_tx - ( center.x() - origin_x ) );
+        const float dy = static_cast<float>( dest_ty - ( center.y() - origin_y ) );
+        const float distance = std::sqrt( dx * dx + dy * dy );
+        return static_cast<int>( 100.0f * ( 1.0f -
+                                            std::clamp( ( distance - d_min ) * slope, 0.0f, 1.0f ) ) );
+    };
+
+    // The avatar's tile in view coordinates. Everything below asks questions
+    // about what is standing in front of it.
+    const int avatar_tx = center.x() - origin_x;
+    const int avatar_ty = center.y() - origin_y;
+
+    /**
+     * Does this sprite actually cover the avatar?
+     *
+     * Distance alone is what cata_tiles uses, and it is the right test for
+     * retraction -- a sprite that ducks looks fine ducking whether or not it
+     * was in the way. It is the wrong test for a fade, which is visible: it
+     * would put a halo of half-transparent trees around the player, including
+     * behind them where nothing is being hidden.
+     *
+     * Only something drawn *in front of* the avatar can hide it, now that the
+     * depth order draws everything a row further back first.
+     */
+    auto covers_avatar = [&]( const int dest_tx, const int dest_ty, const int sprite_idx ) -> bool {
+        if( dest_ty <= avatar_ty )
+        {
+            return false;
+        }
+        const point cells = sprite_cells_covered( sprite_idx, tw, th );
+        // Reaches back far enough to still be over the avatar's row?
+        if( dest_ty - avatar_ty >= cells.y ) {
+            return false;
+        }
+        return std::abs( dest_tx - avatar_tx ) <= cells.x / 2;
+    };
+
     // Per-frame render statistics and the running coverage report (SP-2).
     // Accumulated locally and merged in one go at the end, so the resolver does
     // not take the snapshot mutex once per tile.
@@ -1176,6 +1430,23 @@ void MapSnapshot::update_from_game()
     std::unordered_map<std::string, coverage_entry> cov;
     std::array<int32_t, static_cast<size_t>( sprite_fallback::last )> fb_counts{};
     std::array<int32_t, 16> layer_counts{};
+    int32_t retracted = 0;
+    int32_t transparent = 0;
+    int32_t faded = 0;
+    int32_t tall_candidates = 0;
+
+    /**
+     * Which z-level the emitters below are currently working on, as levels below
+     * the avatar's (ADR-005 item 1).
+     *
+     * Set by the column walk, read by emit_sprite, and zero everywhere else --
+     * including for the creature pass, which sets it per creature. A level is
+     * hundreds of sprites and a dozen emit sites, and every one of them would
+     * have had to carry the same constant argument to avoid this; the failure
+     * mode of missing one is a sprite drawn at the wrong depth, which reads as a
+     * sorting bug rather than as a dropped parameter.
+     */
+    int cur_z_below = 0;
 
     auto emit_sprite = [&]( std::vector<map_draw_cmd> &out, int sprite_idx,
     int dest_tx, int dest_ty, map_layer layer, const point &tile_offset, int32_t tint,
@@ -1205,7 +1476,9 @@ void MapSnapshot::update_from_game()
         cmd.dest_y = dest_ty * th + off_y;
         cmd.layer = static_cast<int32_t>( layer );
         cmd.tint = tint;
-        cmd.rot_flags = rot_flags;
+        cmd.rot_flags = rot_flags |
+                        ( ( std::clamp( cur_z_below, 0, max_z_below ) << cmd_z_below_shift ) &
+                          cmd_z_below_mask );
         const size_t li = static_cast<size_t>( layer );
         if( li < layer_counts.size() ) {
             ++layer_counts[li];
@@ -1239,8 +1512,8 @@ void MapSnapshot::update_from_game()
     auto emit_tile_id = [&]( std::vector<map_draw_cmd> &out, const std::string &id,
     sprite_category cat, int dest_tx, int dest_ty, map_layer fg_layer, bool with_bg,
     const light_tints &tint, unsigned int seed, int rotation = 0, bool sway = false,
-    bool flip_x = false ) {
-        const resolved_sprite res = resolve_sprite( id, cat );
+    bool flip_x = false, const std::string &variant = {} ) {
+        const resolved_sprite res = resolve_sprite( id, cat, variant );
         ++fb_counts[static_cast<size_t>( res.level )];
         if( res.level != sprite_fallback::exact ) {
             coverage_entry &ce = cov[id];
@@ -1267,9 +1540,117 @@ void MapSnapshot::update_from_game()
         if( res.level == sprite_fallback::ascii || res.level == sprite_fallback::category ) {
             rotation = 0;
         }
+        const std::vector<int> *first_fg = tt->fg.pick( 0 );
+        const bool overhangs = first_fg && !first_fg->empty() &&
+                               sprite_overhangs_cell( ( *first_fg )[0], tw, th );
         const int32_t palette_bits =
             ( ( res.palette_row & 0xF ) << cmd_palette_shift ) |
-            ( flip_x ? cmd_flag_flip_x : 0 );
+            ( flip_x ? cmd_flag_flip_x : 0 ) |
+            ( overhangs ? cmd_flag_tall : 0 );
+
+        // Occlusion handling. Only sprites that overhang their cell can hide
+        // anything, so only they are considered -- the same test the sway flag
+        // uses, and for a related reason.
+        point draw_offset = tt->offset;
+        const godot_tile_type *draw_tt = tt;
+        /// 255 unless this sprite is standing in front of the avatar; see below.
+        int32_t draw_alpha = 255;
+        // Creatures never retract. cata_tiles passes retract = 0 explicitly when
+        // drawing a character, and the reason shows up immediately without it:
+        // the avatar is a 32x48 sprite standing at distance zero from itself, so
+        // it and every one of its overlays ducked to avoid occluding the player
+        // they *are*. The counter caught it as 12 retracted sprites in an empty
+        // shelter -- one body and eleven pieces of clothing.
+        const bool is_creature = cat == sprite_category::character ||
+                                 cat == sprite_category::monster;
+        // Nothing on a lower level can hide the avatar: the whole level draws
+        // under it. Considering them anyway would fade trees at the bottom of a
+        // pit for standing in front of someone two floors above them, and would
+        // put those in tall_candidates, where the number is there to say whether
+        // the fade ever gets a chance to fire.
+        if( occlusion_mode != 0 && !is_creature && cur_z_below == 0 &&
+            res.level == sprite_fallback::exact ) {
+            const bool tall = overhangs;
+            // Nothing to retract *to*. The loader defaults offset_retracted to
+            // offset, so a tileset that declares no retracted offsets -- Ultica
+            // declares none -- makes the blend a no-op, and with no
+            // "_transparent" variant either there is no way for this to change
+            // what is drawn. Skipping outright keeps it from being suspected
+            // when something else is wrong, and costs nothing when it could
+            // have worked.
+            const bool can_retract = tt->offset_retracted != tt->offset ||
+                                     find_tile_by_id_exact( id + "_transparent" );
+            if( tall && can_retract ) {
+                const int retract = retract_at( dest_tx, dest_ty );
+                if( retract > 0 ) {
+                    ++retracted;
+                    if( occlusion_retract ) {
+                        draw_offset = retract >= 100
+                                      ? tt->offset_retracted
+                                      : tt->offset +
+                                      ( ( tt->offset_retracted - tt->offset ) * retract ) / 100;
+                    }
+                    // Ultica ships 44 "_transparent" sprites for exactly this.
+                    if( occlusion_transp ) {
+                        if( const godot_tile_type *clear =
+                                g_tileset.find_tile_type( id + "_transparent" ) ) {
+                            draw_tt = clear;
+                            ++transparent;
+                        }
+                    }
+                }
+            } else if( tall ) {
+                // The tileset has nothing to retract to. That used to mean the
+                // whole mechanism was inert and tall things simply never got
+                // out of the way -- harmless while the draw order put every
+                // creature over every tree anyway, and not harmless now that
+                // depth ordering lets a tree in front of the avatar cover it.
+                // A player hidden behind a trunk is worse than a player pasted
+                // in front of one.
+                //
+                // So the same policy is applied through the one channel that is
+                // always available: the sprite's own alpha, which the tint
+                // already carries and the shader already multiplies in. Same
+                // 0-100 from retract_at, so the game's PREVENT_OCCLUSION
+                // options and the tileset's distance band still decide when and
+                // how much. Only the mechanism differs, and only because the
+                // art cannot do the intended one.
+                // Deliberately not gated on retract_at, which every other path
+                // here uses. That distance band exists to *guess* whether a
+                // sprite is in the way without doing the geometry, and
+                // UltimateCataclysm declares it as (-1, 1) -- which works out
+                // to a retraction of 50% on the avatar's own tile and exactly
+                // zero one tile away, in SDL as much as here. Gating on it
+                // would have made this inert for the same reason retraction is
+                // inert, and for the same underlying reason: a tileset value
+                // nobody had read.
+                //
+                // The band is also answering a question we no longer have to
+                // ask. It was tuned against a renderer that drew every creature
+                // over every tree, so nothing was ever really occluded and
+                // there was nothing to tune it against. covers_avatar knows.
+                //
+                // PREVENT_OCCLUSION still decides whether any of this happens
+                // at all -- it is off at 0, which is the setting for "I want to
+                // see the walls" -- but On and Auto collapse to the same thing,
+                // because coverage *is* the automatic condition.
+                const std::vector<int> *fg0 = tt->fg.pick( 0 );
+                // Counted before the geometry test, not after. "0 faded" on its
+                // own cannot tell "nothing was standing in front of the avatar"
+                // from "the test never fires", and those want opposite
+                // responses. With the candidates alongside it, zero of zero is
+                // a scene with nothing tall in it and zero of many is a bug.
+                ++tall_candidates;
+                if( fg0 && !fg0->empty() && covers_avatar( dest_tx, dest_ty, ( *fg0 )[0] ) ) {
+                    ++faded;
+                    // Never to nothing. A tree you cannot see is a tree you
+                    // walk into, and the point is to read the character
+                    // through the canopy, not to delete it.
+                    draw_alpha = min_occluder_alpha;
+                }
+            }
+        }
+        tt = draw_tt;
         // A picked variant is already the right orientation, so it is drawn
         // square. Only a lone sprite gets turned -- and then by a quarter turn,
         // because rotation can be 0-15 when the tileset offers 8 or 16 variants
@@ -1280,14 +1661,20 @@ void MapSnapshot::update_from_game()
             // The background is the ground the plant stands on. Swaying it too
             // would shear the floor.
             emit_sprite( out, bg.index, dest_tx, dest_ty, map_layer::terrain_bg,
-                         tt->offset, tint.sprite,
+                         draw_offset, tint.sprite,
                          ( bg.rotate ? rotation % 4 : 0 ) | palette_bits );
         }
         const picked_sprite fg = pick_sprite_rota( tt->fg, seed, true, rotation );
         // Being vegetation is not enough to sway: the sprite also has to be one
         // that can move without tearing. See sprite_overhangs_cell.
         const bool shears = sway && sprite_overhangs_cell( fg.index, tw, th );
-        emit_sprite( out, fg.index, dest_tx, dest_ty, fg_layer, tt->offset, tint.sprite,
+        // Only the foreground fades. The background is the ground the tall thing
+        // stands on, and fading the floor would show the void through it.
+        // Multiplied into the tint's alpha rather than replacing it. Every
+        // lighting tint is opaque today, so the two are the same thing; they
+        // stop being the same thing the moment one is not.
+        emit_sprite( out, fg.index, dest_tx, dest_ty, fg_layer, draw_offset,
+                     ( tint.sprite & ~0xFF ) | ( ( ( tint.sprite & 0xFF ) * draw_alpha ) / 255 ),
                      ( fg.rotate ? rotation % 4 : 0 ) | palette_bits |
                      ( shears ? cmd_flag_sway : 0 ) );
     };
@@ -1325,158 +1712,337 @@ void MapSnapshot::update_from_game()
     lights.begin( view_w, view_h );
     lights.set_wind( static_cast<float>( get_weather().winddirection ),
                      static_cast<float>( get_weather().windspeed ) );
+    {
+        // Conditions for the presentation grade. All of this is computed every
+        // turn already and none of it reached the screen before.
+        LightSnapshot::conditions cond;
+        // Against default_daylight_level, not max_sun_irradiance. The two are
+        // different units -- sun_light_at returns the game's light scale, which
+        // peaks around 100, while max_sun_irradiance is 1000 W/m2. Dividing by
+        // the wrong one put 8am at 0.0996 and would have graded a spring
+        // morning as very nearly night.
+        const float full_day = std::max( 1.0f, default_daylight_level() );
+        cond.daylight = std::clamp( sun_light_at( calendar::turn ) / full_day, 0.0f, 1.0f );
+        switch( get_weather().weather_id->precip ) {
+            case precip_class::very_light: cond.precipitation = 0.33f; break;
+            case precip_class::light:      cond.precipitation = 0.66f; break;
+            case precip_class::heavy:      cond.precipitation = 1.0f;  break;
+            case precip_class::none:
+            case precip_class::last:
+            default:                       cond.precipitation = 0.0f;  break;
+        }
+        // Saturating: the point is that being hurt is visible, not that the
+        // effect keeps growing until the screen is unreadable.
+        // Where the sun is, rather than where a renderer guessed. The 3D backend aims a
+        // directional light with this; before it existed the bearing was a constant in
+        // map_view_3d.gd, which is the kind of invention ADR-006 argued against on the
+        // very page that then committed it.
+        const std::pair<units::angle, units::angle> sun = sun_azimuth_altitude( calendar::turn );
+        cond.sun_azimuth = static_cast<float>( to_degrees( sun.first ) );
+        cond.sun_altitude = static_cast<float>( to_degrees( sun.second ) );
+        cond.pain = std::clamp( static_cast<float>( u.get_perceived_pain() ) / 60.0f,
+                                0.0f, 1.0f );
+        lights.set_conditions( cond );
+    }
+
+    /**
+     * Publish one tile of one z-level, and say whether the walk may carry on
+     * downward past it (ADR-005 item 1).
+     *
+     * @param z_below levels below the one the avatar stands on; 0 is that level.
+     *        Everything that differs between the floor you are on and a floor you
+     *        are looking down at is decided from this one number.
+     * @return false when there would be nothing to see below this tile anyway.
+     */
+    auto emit_column_tile = [&]( const tripoint_bub_ms & p, const int tx, const int ty,
+    const int z_below ) -> bool {
+        const bool top = z_below == 0;
+        // Brightness for a lower level cannot come from the light pass: that
+        // texture holds one texel per *column*, and the column's texel describes
+        // the tile the avatar is looking through, not the one at the bottom of
+        // the hole. Lower levels keep the CPU lighting the renderer used before
+        // the pass existed, and MapView takes them out of the pass
+        // (receives_light = false) rather than lighting them a second time with
+        // another tile's light.
+        const bool tile_light_pass = light_pass && top;
+
+        const unsigned int seed = simple_point_hash( here.get_abs( p ).raw().xy() );
+
+        if( !u.sees( here, p, true ) )
+        {
+            // Not currently visible: draw what the character remembers rather
+            // than leaving a hole. Previously the whole tile was skipped, so
+            // anything out of sight simply vanished.
+            const memorized_tile &mem = u.get_memorized_tile( here.get_abs( p ) );
+            const light_tints mem_tint = fog_for_depth(
+                                             tints_for_light( lit_level::MEMORIZED, false, tile_light_pass ), z_below );
+            // Remembered, not seen -- but only where there is actually a
+            // memory. Marking every unseen tile as remembered would tell the
+            // shader that the whole unexplored map is somewhere the player
+            // has been, and LightSnapshot::begin has already cleared this to
+            // "never seen".
+            const bool remembered = !mem.get_ter_id().empty() || !mem.get_dec_id().empty();
+            if( remembered ) {
+                lights.set( tx, ty, z_below, LightSnapshot::vis_remembered, 0 );
+            }
+            if( !mem.get_ter_id().empty() ) {
+                emit_tile_id( cmds, mem.get_ter_id(), sprite_category::terrain, tx, ty,
+                              map_layer::terrain_fg, true,
+                              mem_tint, seed );
+            }
+            if( !mem.get_dec_id().empty() ) {
+                emit_tile_id( cmds, mem.get_dec_id(), sprite_category::furniture, tx, ty,
+                              map_layer::furniture, false,
+                              mem_tint, seed );
+            }
+            // A tile with no memory and no sight is the one case worth stopping
+            // for: there is no way to have learned what is under a square you
+            // have never seen. Where there *is* a memory, the floor check below
+            // decides, as it does for a lit tile -- the floor cache is map data
+            // and does not depend on being looked at.
+            return remembered;
+        }
+
+        const lit_level ll = here.light_at( p );
+        lights.set( tx, ty, z_below, LightSnapshot::vis_seen,
+                    encode_light_level( ll, here.ambient_light_at( p ) ) );
+        if( top )
+        {
+            // Light *sources*, for the 3D backend's real lights (ADR-006 item
+            // 3D-2). The texture above says how lit each tile is, which is the
+            // authority and stays so; this says where the light is coming from,
+            // which a per-tile value cannot express and a 3D renderer needs.
+            //
+            // Read rather than derived: generate_lightmap filled this buffer this
+            // turn, from terrain / furniture / field light_emitted, with each
+            // source's colour. The estimate for this item assumed discrete lights
+            // would have to be recovered from the lightmap; its inputs were one
+            // struct away.
+            //
+            // Top level and seen only, matching the texture. A lamp you cannot see
+            // is a lamp the game has already decided is not lighting you, and a
+            // lamp in the basement would light the floor above it.
+            //
+            // **This reads state level_cache.h calls "only valid during
+            // generate_lightmap".** It is scratch space: filled at the top of that
+            // function and consumed inside it, never cleared at the end -- so after
+            // do_turn it still holds this turn's sources, which is what this wants
+            // and is not what it promises. The alternative is to re-derive the
+            // sources here from terrain / furniture / field `light_emitted`, which
+            // duplicates a rule the game owns and would drift from it silently.
+            // Reading the game's own answer and saying so is the better trade, but
+            // it is a trade: if this ever comes back empty, that contract is where
+            // to look, and `lights` in the render stats is the number that says so.
+            const auto &src = here.get_cache_ref( p.z() ).light_source_buffer[p.x()][p.y()];
+            if( src.luminance > 0.0f ) {
+                lights.add_light(
+                    static_cast<float>( tx * tw ) + tw * 0.5f,
+                    static_cast<float>( ty * th ) + th * 0.5f,
+                    static_cast<float>( LIGHT_RANGE( src.luminance ) * tw ),
+                    src.color, src.luminance );
+            }
+        }
+        const light_tints tint = fog_for_depth(
+                                     tints_for_light( ll, nv_goggles, tile_light_pass ), z_below );
+
+        const ter_id tid = here.ter( p );
+        if( tid ) {
+            std::string ter_sprite = tid.id().str();
+            int ter_rotation = 0;
+            const std::bitset<NUM_TERCONN> &ter_connect = tid.obj().connect_to_groups;
+            if( ter_connect.any() ) {
+                // rotates_to is what makes a road turn to face the verge it
+                // runs alongside; with no group, get_known_rotates_to returns
+                // CHAR_MAX and the no-rotation path applies.
+                ter_sprite = connected_id( ter_sprite,
+                                           here.get_known_connections( p, ter_connect ),
+                                           static_cast<char>( here.get_known_rotates_to(
+                                                   p, tid.obj().rotate_to_groups ) ),
+                                           ter_rotation );
+            }
+            emit_tile_id( cmds, ter_sprite, sprite_category::terrain, tx, ty,
+                          map_layer::terrain_fg, true, tint, seed,
+                          ter_rotation, is_vegetation( tid.id().str(), tid.obj() ) );
+        }
+
+        const furn_id fid = here.furn( p );
+        if( fid ) {
+            // Movable furniture keeps seed 0 so dragging it does not make its
+            // sprite flicker between variants, matching cata_tiles.
+            const unsigned int furn_seed = fid.obj().is_movable() ? 0u : seed;
+            std::string furn_sprite = fid.id().str();
+            int furn_rotation = 0;
+            const std::bitset<NUM_TERCONN> &furn_connect = fid.obj().connect_to_groups;
+            if( furn_connect.any() ) {
+                furn_sprite = connected_id( furn_sprite,
+                                            here.get_known_connections_f( p, furn_connect ),
+                                            static_cast<char>( here.get_known_rotates_to_f(
+                                                    p, fid.obj().rotate_to_groups, {}, {} ) ),
+                                            furn_rotation );
+            }
+            emit_tile_id( cmds, furn_sprite, sprite_category::furniture, tx, ty,
+                          map_layer::furniture, false, tint,
+                          furn_seed, furn_rotation,
+                          is_vegetation( fid.id().str(), fid.obj() ) );
+        }
+
+        const trap &tr = here.tr_at( p );
+        if( !tr.is_null() && here.can_see_trap_at( p, u ) ) {
+            emit_tile_id( cmds, tr.id.str(), sprite_category::trap, tx, ty, map_layer::trap,
+                          false, tint, seed );
+        }
+
+        // Fields: fire, smoke, gas clouds. Intensity picks a distinct sprite
+        // where the tileset provides one ("<id>_int<N>"), as in cata_tiles.
+        const field &fld = here.field_at( p );
+        const field_type_id displayed = fld.displayed_field_type();
+        if( displayed ) {
+            const int intensity = fld.displayed_intensity();
+            const std::string base = displayed.id().str();
+            bool drawn = false;
+            if( intensity > 0 ) {
+                const std::string with_int = base + "_int" + std::to_string( intensity );
+                if( find_tile_by_id_exact( with_int ) ) {
+                    emit_tile_id( cmds, with_int, sprite_category::field, tx, ty, map_layer::field,
+                                  false, tint, seed );
+                    drawn = true;
+                }
+            }
+            if( !drawn ) {
+                emit_tile_id( cmds, base, sprite_category::field, tx, ty, map_layer::field,
+                              false, tint, seed );
+            }
+            // Anything that burns or drifts also gets particles (SP-6).
+            // Decided from the field type rather than from a list of ids, so
+            // a mod's own smoke behaves like smoke without being enumerated.
+            //
+            // Top level only. Both channels here are 2D and per column: the
+            // particle system positions emitters in the view's world space,
+            // where there is no depth to put a lower one at, and the fire
+            // channel of the light texture is one texel per column. A fire in
+            // the basement would light the ground floor and drift its smoke
+            // across it.
+            const field_type &ftype = displayed.obj();
+            if( top && ( ftype.has_fire || ftype.phase == phase_id::GAS ) ) {
+                map_field_cmd fc;
+                fc.dest_x = tx * tw;
+                fc.dest_y = ty * th;
+                fc.kind = static_cast<int32_t>( ftype.has_fire ? field_particle::fire
+                                                : field_particle::smoke );
+                fc.intensity = std::max( 1, intensity );
+                fields.push_back( fc );
+                if( ftype.has_fire ) {
+                    // Feeds the flicker the tile shader adds around a fire.
+                    // Intensity 3 is a wall of flame; 1 is a burning scrap.
+                    lights.set_fire( tx, ty, z_below, static_cast<uint8_t>(
+                                         std::min( 255, 90 + 55 * fc.intensity ) ) );
+                }
+            }
+        }
+
+        // Vehicles. vpart_display already resolves which part of a stack is
+        // the visible one, including its tileset id.
+        if( const optional_vpart_position ovp = here.veh_at( p ) ) {
+            const vehicle &veh = ovp->vehicle();
+            const vpart_display vd = veh.get_display_of_tile( ovp->mount_pos() );
+            if( !vd.id.is_null() ) {
+                // NOT get_tileset_id(). That joins the part and its variant
+                // with vehicles::variant_separator, which is '#', and no
+                // tileset id contains one -- Ultica has 656 vp_ ids and not a
+                // single '#'. So every part that has a variant missed and
+                // drew a placeholder, while the variantless ones (a trunk, a
+                // siren) resolved and looked fine. That is why a car came out
+                // as grey boxes with the occasional real part in it.
+                //
+                // '#' is the *memory* encoding; cata_tiles draws with the id
+                // and the variant kept apart, which is what resolve_sprite
+                // now takes.
+                std::string vp_id = "vp_" + vd.id.str();
+
+                // Open and broken are subtiles, as they are for terrain.
+                const int sub = vd.is_open ? open_ : vd.is_broken ? broken : 0;
+                if( sub != 0 ) {
+                    if( const char *name = subtile_name( sub ) ) {
+                        const std::string with_sub = vp_id + "_" + name;
+                        if( find_tile_by_id_exact( with_sub ) ) {
+                            vp_id = with_sub;
+                        }
+                    }
+                }
+
+                // The whole vehicle turns. Without this every part drew in
+                // its default orientation, so the pieces never assembled into
+                // a car no matter which sprites resolved.
+                const int rot = angle_to_dir4( veh.face.dir() - 270_degrees );
+
+                emit_tile_id( cmds, vp_id, sprite_category::vehicle_part, tx, ty,
+                              map_layer::vehicle, false,
+                              tint, simple_point_hash( ovp->mount_pos().raw() ),
+                              rot, false, false, vd.variant.id );
+            }
+        }
+
+        // Draw the whole visible stack, not just the first item: a pile of
+        // loot rendered as one sprite hid everything under it.
+        map_stack items = here.i_at( p );
+        for( const item &it : items ) {
+            emit_tile_id( cmds, it.typeId().str(), sprite_category::item, tx, ty, map_layer::item,
+                          false, tint, seed );
+        }
+        return true;
+    };
+
+    /**
+     * Walk each column of the view downward from the avatar's level.
+     *
+     * This is ADR-005 item 1, and the ADR budgeted it as the expensive one on the
+     * grounds that per-tile work multiplies by the number of levels drawn. It
+     * does not, because of the stop condition: `dont_draw_lower_floor` reads one
+     * bool out of the level cache, and every tile with a floor under it -- which
+     * on an outdoor level is every tile -- stops the walk after the level the
+     * avatar is on. What descends is holes: a stairwell, a pit, the lip of a
+     * roof, the shaft of a manhole. `open_columns` in the render stats is that
+     * count, measured per frame rather than assumed, because the ADR's own
+     * post-mortem is a list of features settled by printing a value.
+     *
+     * Deepest level per column is kept because the creature pass below needs it:
+     * a zombie two floors down is only visible through the same hole its floor
+     * is, and there is no cheaper way to ask that afterwards than to remember
+     * where the walk stopped.
+     */
+    const int min_z = std::max( center.z() - fov_3d_z_range, -OVERMAP_DEPTH );
+    // Lowest level published per column, indexed ty * view_w + tx.
+    std::vector<int> column_floor( static_cast<size_t>( view_w ) * view_h, center.z() );
+    int32_t open_columns = 0;
 
     for( int ty = 0; ty < view_h; ++ty ) {
         for( int tx = 0; tx < view_w; ++tx ) {
-            const tripoint_bub_ms p( origin_x + tx, origin_y + ty, center.z() );
-            if( !here.inbounds( p ) ) {
-                continue;
-            }
-            const unsigned int seed = simple_point_hash( here.get_abs( p ).raw().xy() );
-
-            if( !u.sees( here, p, true ) ) {
-                // Not currently visible: draw what the character remembers rather
-                // than leaving a hole. Previously the whole tile was skipped, so
-                // anything out of sight simply vanished.
-                const memorized_tile &mem = u.get_memorized_tile( here.get_abs( p ) );
-                const light_tints mem_tint =
-                    tints_for_light( lit_level::MEMORIZED, false, light_pass );
-                // Remembered, not seen -- but only where there is actually a
-                // memory. Marking every unseen tile as remembered would tell the
-                // shader that the whole unexplored map is somewhere the player
-                // has been, and LightSnapshot::begin has already cleared this to
-                // "never seen".
-                if( !mem.get_ter_id().empty() || !mem.get_dec_id().empty() ) {
-                    lights.set( tx, ty, LightSnapshot::vis_remembered, 0 );
+            for( int z = center.z(); z >= min_z && center.z() - z <= max_z_below; --z ) {
+                const tripoint_bub_ms p( origin_x + tx, origin_y + ty, z );
+                if( !here.inbounds( p ) ) {
+                    break;
                 }
-                if( !mem.get_ter_id().empty() ) {
-                    emit_tile_id( cmds, mem.get_ter_id(), sprite_category::terrain, tx, ty,
-                                  map_layer::terrain_fg, true,
-                                  mem_tint, seed );
+                const int z_below = center.z() - z;
+                // Read by emit_sprite, which is where the bits reach the command.
+                // Threading it through emit_tile_id instead would mean touching
+                // every call site for a value that is constant across a whole
+                // level -- and getting one of them wrong is a sprite drawn at the
+                // wrong depth, which looks like a sorting bug rather than a
+                // missing argument.
+                cur_z_below = z_below;
+                const bool descend = emit_column_tile( p, tx, ty, z_below );
+                column_floor[static_cast<size_t>( ty ) * view_w + tx] = z;
+                if( !descend || here.dont_draw_lower_floor( p ) ) {
+                    break;
                 }
-                if( !mem.get_dec_id().empty() ) {
-                    emit_tile_id( cmds, mem.get_dec_id(), sprite_category::furniture, tx, ty,
-                                  map_layer::furniture, false,
-                                  mem_tint, seed );
-                }
-                continue;
-            }
-
-            const lit_level ll = here.light_at( p );
-            lights.set( tx, ty, LightSnapshot::vis_seen,
-                        encode_light_level( ll, here.ambient_light_at( p ) ) );
-            const light_tints tint = tints_for_light( ll, nv_goggles, light_pass );
-
-            const ter_id tid = here.ter( p );
-            if( tid ) {
-                std::string ter_sprite = tid.id().str();
-                int ter_rotation = 0;
-                const std::bitset<NUM_TERCONN> &ter_connect = tid.obj().connect_to_groups;
-                if( ter_connect.any() ) {
-                    // rotates_to is what makes a road turn to face the verge it
-                    // runs alongside; with no group, get_known_rotates_to returns
-                    // CHAR_MAX and the no-rotation path applies.
-                    ter_sprite = connected_id( ter_sprite,
-                                               here.get_known_connections( p, ter_connect ),
-                                               static_cast<char>( here.get_known_rotates_to(
-                                                       p, tid.obj().rotate_to_groups ) ),
-                                               ter_rotation );
-                }
-                emit_tile_id( cmds, ter_sprite, sprite_category::terrain, tx, ty,
-                              map_layer::terrain_fg, true, tint, seed,
-                              ter_rotation, is_vegetation( tid.id().str(), tid.obj() ) );
-            }
-
-            const furn_id fid = here.furn( p );
-            if( fid ) {
-                // Movable furniture keeps seed 0 so dragging it does not make its
-                // sprite flicker between variants, matching cata_tiles.
-                const unsigned int furn_seed = fid.obj().is_movable() ? 0u : seed;
-                std::string furn_sprite = fid.id().str();
-                int furn_rotation = 0;
-                const std::bitset<NUM_TERCONN> &furn_connect = fid.obj().connect_to_groups;
-                if( furn_connect.any() ) {
-                    furn_sprite = connected_id( furn_sprite,
-                                                here.get_known_connections_f( p, furn_connect ),
-                                                static_cast<char>( here.get_known_rotates_to_f(
-                                                        p, fid.obj().rotate_to_groups, {}, {} ) ),
-                                                furn_rotation );
-                }
-                emit_tile_id( cmds, furn_sprite, sprite_category::furniture, tx, ty,
-                              map_layer::furniture, false, tint,
-                              furn_seed, furn_rotation,
-                              is_vegetation( fid.id().str(), fid.obj() ) );
-            }
-
-            const trap &tr = here.tr_at( p );
-            if( !tr.is_null() && here.can_see_trap_at( p, u ) ) {
-                emit_tile_id( cmds, tr.id.str(), sprite_category::trap, tx, ty, map_layer::trap,
-                              false, tint, seed );
-            }
-
-            // Fields: fire, smoke, gas clouds. Intensity picks a distinct sprite
-            // where the tileset provides one ("<id>_int<N>"), as in cata_tiles.
-            const field &fld = here.field_at( p );
-            const field_type_id displayed = fld.displayed_field_type();
-            if( displayed ) {
-                const int intensity = fld.displayed_intensity();
-                const std::string base = displayed.id().str();
-                bool drawn = false;
-                if( intensity > 0 ) {
-                    const std::string with_int = base + "_int" + std::to_string( intensity );
-                    if( find_tile_by_id_exact( with_int ) ) {
-                        emit_tile_id( cmds, with_int, sprite_category::field, tx, ty, map_layer::field,
-                                      false, tint, seed );
-                        drawn = true;
-                    }
-                }
-                if( !drawn ) {
-                    emit_tile_id( cmds, base, sprite_category::field, tx, ty, map_layer::field,
-                                  false, tint, seed );
-                }
-                // Anything that burns or drifts also gets particles (SP-6).
-                // Decided from the field type rather than from a list of ids, so
-                // a mod's own smoke behaves like smoke without being enumerated.
-                const field_type &ftype = displayed.obj();
-                if( ftype.has_fire || ftype.phase == phase_id::GAS ) {
-                    map_field_cmd fc;
-                    fc.dest_x = tx * tw;
-                    fc.dest_y = ty * th;
-                    fc.kind = static_cast<int32_t>( ftype.has_fire ? field_particle::fire
-                                                    : field_particle::smoke );
-                    fc.intensity = std::max( 1, intensity );
-                    fields.push_back( fc );
-                    if( ftype.has_fire ) {
-                        // Feeds the flicker the tile shader adds around a fire.
-                        // Intensity 3 is a wall of flame; 1 is a burning scrap.
-                        lights.set_fire( tx, ty, static_cast<uint8_t>(
-                                             std::min( 255, 90 + 55 * fc.intensity ) ) );
-                    }
+                // Counted here rather than off the floor cache alone: this is
+                // where the walk actually went down, which is the thing the
+                // number is for.
+                if( z_below == 0 ) {
+                    ++open_columns;
                 }
             }
-
-            // Vehicles. vpart_display already resolves which part of a stack is
-            // the visible one, including its tileset id.
-            if( const optional_vpart_position ovp = here.veh_at( p ) ) {
-                const vpart_display vd = ovp->vehicle().get_display_of_tile( ovp->mount_pos() );
-                if( !vd.id.is_null() ) {
-                    // get_tileset_id() already yields "vp_<id>_<variant>" (or
-                    // "vp_<id>" when there is no variant), so variants are picked
-                    // up for free. Seeded by position within the vehicle, so a
-                    // part keeps its sprite as the vehicle drives (as cata_tiles).
-                    emit_tile_id( cmds, vd.get_tileset_id(), sprite_category::vehicle_part, tx, ty,
-                                  map_layer::vehicle, false,
-                                  tint, simple_point_hash( ovp->mount_pos().raw() ) );
-                }
-            }
-
-            // Draw the whole visible stack, not just the first item: a pile of
-            // loot rendered as one sprite hid everything under it.
-            map_stack items = here.i_at( p );
-            for( const item &it : items ) {
-                emit_tile_id( cmds, it.typeId().str(), sprite_category::item, tx, ty, map_layer::item,
-                              false, tint, seed );
-            }
+            cur_z_below = 0;
         }
     }
 
@@ -1490,6 +2056,7 @@ void MapSnapshot::update_from_game()
      * and MapView is what has to preserve it.
      */
     std::vector<overlay_record> avatar_overlays;
+    std::vector<creature_record> creatures;
     auto emit_overlays = [&]( const std::vector<std::pair<std::string, std::string>> &overlays,
     bool male, int tx, int ty, map_layer layer, const light_tints & tint, bool flip,
     bool record = false ) {
@@ -1541,8 +2108,78 @@ void MapSnapshot::update_from_game()
         if( !u.sees( here, critter ) ) {
             continue;
         }
-        const light_tints critter_tint =
-            tints_for_light( here.light_at( p ), nv_goggles, light_pass );
+        // Which level it is standing on, and whether that level is one this
+        // column actually published (ADR-005 item 1).
+        //
+        // This pass walks the creature list rather than the view, so it never
+        // consulted z at all: a zombie in the basement was drawn on the ground
+        // floor, at the right x and y, indistinguishable from one in the room.
+        // u.sees() is true through a hole and stays true for fov_3d_z_range
+        // levels, so this could not be left to it. A creature above the avatar
+        // is dropped outright -- nothing above is published -- and one below is
+        // drawn only as deep as the floor the column walk reached.
+        const int z_below = center.z() - p.z();
+        if( z_below < 0 || z_below > max_z_below ) {
+            continue;
+        }
+        if( p.z() < column_floor[static_cast<size_t>( ty ) * view_w + tx] ) {
+            continue;
+        }
+        cur_z_below = z_below;
+        // What this creature is carrying or emitting (ADR-006 item 3D-2).
+        //
+        // Not in level_cache's buffered set: generate_lightmap applies a critter's glow
+        // and a character's held light with apply_light_source, which writes the lightmap
+        // and never goes through the buffer the light channel reads. So an NPC's torch and
+        // a glowing zombie were invisible to it. Tapped here because this loop already has
+        // the creature, its view coordinates, its visibility and its level in hand.
+        //
+        // The avatar's own is emitted after this loop; it is skipped at the top of it.
+        if( z_below == 0 ) {
+            float carried = 0.0f;
+            if( const monster *glow = dynamic_cast<const monster *>( &critter ) ) {
+                // mtype::luminance, without the enchantment modifier generate_lightmap
+                // applies. A mutant's brighter glow is a difference of degree in a value
+                // that is already only deciding how a light looks.
+                carried = glow->type->luminance;
+            } else if( const Character *lamp = critter.as_character() ) {
+                carried = lamp->active_light();
+            }
+            if( carried > 0.0f ) {
+                lights.add_light( static_cast<float>( tx * tw ) + tw * 0.5f,
+                                  static_cast<float>( ty * th ) + th * 0.5f,
+                                  static_cast<float>( LIGHT_RANGE( carried ) * tw ),
+                                  light_color_rgb{}, carried );
+            }
+        }
+        const light_tints critter_tint = fog_for_depth(
+                                             tints_for_light( here.light_at( p ), nv_goggles,
+                                                     light_pass ), z_below );
+        // Identity, for the mesh path (3D-7c). Emitted for every visible creature whether
+        // or not any art exists for it: a registry with nothing in it means every creature
+        // falls back to its sprite, which is the current behaviour exactly.
+        {
+            creature_record rec;
+            rec.x = tx * tw + tw / 2;
+            rec.y = ( ty + 1 ) * th;
+            rec.z_below = z_below;
+            rec.flip = critter.as_character() != nullptr
+                       ? critter.as_character()->facing == FacingDirection::LEFT
+                       : false;
+            if( const monster *mon = dynamic_cast<const monster *>( &critter ) ) {
+                rec.id = mon->type->id.str();
+                rec.kind = 0;
+                rec.flip = mon->facing == FacingDirection::LEFT;
+            } else if( const Character *ch = critter.as_character() ) {
+                // The body sprite's id, not the character's name: it is what the tileset
+                // keys on, so it is what a mesh registry should key on too.
+                rec.id = ch->male ? "npc_male" : "npc_female";
+                rec.kind = 1;
+            }
+            if( !rec.id.empty() ) {
+                creatures.push_back( rec );
+            }
+        }
         if( const monster *mon = dynamic_cast<const monster *>( &critter ) ) {
             // cata_tiles leaves the seed at 0 for creatures (its switch has no
             // MONSTER case), so a position hash here would disagree with SDL.
@@ -1560,6 +2197,12 @@ void MapSnapshot::update_from_game()
                             critter_tint );
         }
     }
+    // After the loop, not at the end of its body: half the paths through that
+    // body are `continue`, so a reset inside it is skipped by exactly the
+    // iterations that end early -- and the avatar, which is emitted next and is
+    // always on the avatar's own level, would inherit the level of the last
+    // creature that was culled.
+    cur_z_below = 0;
 
     {
         const int tx = center.x() - origin_x;
@@ -1568,6 +2211,15 @@ void MapSnapshot::update_from_game()
         // makes it hard to find on screen in the dark.
         const light_tints lit{ pack_tint( 255, 255, 255, 255 ),
                                pack_tint( 255, 255, 255, 255 ) };
+        {
+            creature_record rec;
+            rec.id = u.male ? "player_male" : "player_female";
+            rec.kind = 2;
+            rec.x = tx * tw + tw / 2;
+            rec.y = ( ty + 1 ) * th;
+            rec.flip = u.facing == FacingDirection::LEFT;
+            creatures.push_back( rec );
+        }
         if( g_tileset.find_tile_type( u.male ? "player_male" : "player_female" ) ) {
             emit_character( u, tx, ty, map_layer::player, map_layer::player_overlay, lit,
                             /*record=*/true );
@@ -1585,8 +2237,20 @@ void MapSnapshot::update_from_game()
     // immediately after the body, and they tie on every key here. std::sort is
     // free to shuffle equal elements, which would put the coat under the shirt
     // on an arbitrary frame.
+    //
+    // Depth is the first key now. MapView derives its own draw order from the
+    // command's flags and does not depend on this ordering, but it does use "who
+    // came first in the list" to break ties between batches at the same rank --
+    // so the list has to agree with the ranking about which level is further
+    // away, or two batches on different levels could tie-break each other's way.
     std::stable_sort( cmds.begin(), cmds.end(),
     []( const map_draw_cmd & a, const map_draw_cmd & b ) {
+        const int32_t az = ( a.rot_flags & cmd_z_below_mask ) >> cmd_z_below_shift;
+        const int32_t bz = ( b.rot_flags & cmd_z_below_mask ) >> cmd_z_below_shift;
+        if( az != bz ) {
+            // Deepest first: it is furthest from the camera.
+            return az > bz;
+        }
         if( a.layer != b.layer ) {
             return a.layer < b.layer;
         }
@@ -1596,6 +2260,86 @@ void MapSnapshot::update_from_game()
         return a.dest_x < b.dest_x;
     } );
 
+    // What the z walk actually produced, counted off the finished list rather
+    // than accumulated as it went: the creature pass emits below-level sprites
+    // too, and a counter maintained in two places is a counter that disagrees
+    // with itself.
+    int32_t below_cmds = 0;
+    int32_t deepest_z_below = 0;
+    for( const map_draw_cmd &cmd : cmds ) {
+        const int32_t z_below = ( cmd.rot_flags & cmd_z_below_mask ) >> cmd_z_below_shift;
+        if( z_below > 0 ) {
+            ++below_cmds;
+            deepest_z_below = std::max( deepest_z_below, z_below );
+        }
+    }
+
+    // The avatar's own light, and every headlight in view (ADR-006 item 3D-2). Both
+    // bypass level_cache's buffered set -- one through apply_light_source, the other
+    // through apply_light_arc -- so both are tapped rather than read.
+    {
+        const float held = u.active_light();
+        if( held > 0.0f ) {
+            const int tx = center.x() - origin_x;
+            const int ty = center.y() - origin_y;
+            if( tx >= 0 && ty >= 0 && tx < view_w && ty < view_h ) {
+                lights.add_light( static_cast<float>( tx * tw ) + tw * 0.5f,
+                                  static_cast<float>( ty * th ) + th * 0.5f,
+                                  static_cast<float>( LIGHT_RANGE( held ) * tw ),
+                                  light_color_rgb{}, held );
+            }
+        }
+    }
+    // Vehicle headlights, as beams rather than as blobs.
+    //
+    // This mirrors the vehicle loop in map::generate_lightmap, including its two passes:
+    // the first sums what the cone lights on one vehicle add up to, with each further
+    // lamp counting for a little less, and the second places them. Mirrored rather than
+    // read because there is nothing to read -- an arc goes straight into the lightmap and
+    // is never buffered -- which makes this the one duplicated rule in the channel. If
+    // headlights ever stop agreeing with what the map says is lit, start here.
+    for( wrapped_vehicle &wrapped : here.get_vehicles() ) {
+        vehicle *veh = wrapped.v;
+        if( veh == nullptr ) {
+            continue;
+        }
+        const std::vector<vehicle_part *> lamps = veh->lights();
+        float cone_luminance = 0.0f;
+        float iteration = 1.0f;
+        for( const vehicle_part *pt : lamps ) {
+            const vpart_info &vp = pt->info();
+            if( vp.has_flag( VPFLAG_CONE_LIGHT ) || vp.has_flag( VPFLAG_WIDE_CONE_LIGHT ) ) {
+                cone_luminance += vp.bonus / iteration;
+                iteration *= 1.1f;
+            }
+        }
+        if( cone_luminance <= static_cast<float>( lit_level::LIT ) ) {
+            continue;
+        }
+        for( const vehicle_part *pt : lamps ) {
+            const vpart_info &vp = pt->info();
+            const bool wide = vp.has_flag( VPFLAG_WIDE_CONE_LIGHT );
+            if( !wide && !vp.has_flag( VPFLAG_CONE_LIGHT ) ) {
+                continue;
+            }
+            const tripoint_bub_ms src = veh->bub_part_pos( here, *pt );
+            const int tx = src.x() - origin_x;
+            const int ty = src.y() - origin_y;
+            if( tx < 0 || ty < 0 || tx >= view_w || ty >= view_h || src.z() != center.z() ) {
+                continue;
+            }
+            if( !u.sees( here, src ) ) {
+                continue;
+            }
+            lights.add_light( static_cast<float>( tx * tw ) + tw * 0.5f,
+                              static_cast<float>( ty * th ) + th * 0.5f,
+                              static_cast<float>( LIGHT_RANGE( cone_luminance ) * tw ),
+                              vp.light_color, cone_luminance,
+                              static_cast<float>( to_degrees( veh->face.dir() + pt->direction ) ),
+                              wide ? 90.0f : 45.0f );
+        }
+    }
+
     lights.blur_fire();
     lights.commit();
 
@@ -1604,8 +2348,16 @@ void MapSnapshot::update_from_game()
     glyphs_ = std::move( glyphs );
     fields_ = std::move( fields );
     avatar_overlays_ = std::move( avatar_overlays );
+    creatures_ = std::move( creatures );
     fallback_counts_ = fb_counts;
     layer_counts_ = layer_counts;
+    retracted_count_ = retracted;
+    transparent_count_ = transparent;
+    faded_count_ = faded;
+    tall_candidates_ = tall_candidates;
+    open_columns_ = open_columns;
+    deepest_z_below_ = deepest_z_below;
+    below_cmds_ = below_cmds;
     // Coverage accumulates across the session rather than per frame: what the
     // report is for is "which missing ids has this player actually looked at",
     // and one frame of a corridor answers that badly.

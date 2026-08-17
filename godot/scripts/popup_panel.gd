@@ -256,6 +256,12 @@ func _cancel() -> void:
 func prompt_open() -> bool:
 	return _prompt_root != null and _prompt_root.visible
 
+## Anything on screen at all, notice included. The caller needs this to know it
+## must keep refreshing on the way *down*: the panel clears itself from the
+## published state, so if it never sees the empty state it never clears.
+func showing() -> bool:
+	return prompt_open() or (_notice_root != null and _notice_root.visible)
+
 func _unhandled_input(event: InputEvent) -> void:
 	if not prompt_open() or not (event is InputEventKey) or not event.pressed or event.echo:
 		return

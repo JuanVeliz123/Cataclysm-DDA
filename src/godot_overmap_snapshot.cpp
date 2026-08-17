@@ -486,6 +486,67 @@ uint64_t OvermapSnapshot::generation() const
     return generation_;
 }
 
+void OvermapSnapshot::publish_sidebar( const std::vector<sidebar_line> &lines )
+{
+    std::lock_guard<std::mutex> lock( mutex_ );
+    // The overmap redraws on every blink; the sidebar text usually has not
+    // changed, and bumping the generation anyway would rebuild a hundred labels
+    // twice a second and lose the panel's scroll position with them.
+    if( lines.size() == sidebar_.size() ) {
+        bool same = true;
+        for( size_t i = 0; i < lines.size(); ++i ) {
+            if( lines[i].text != sidebar_[i].text || lines[i].color != sidebar_[i].color ||
+                lines[i].indent != sidebar_[i].indent || lines[i].join != sidebar_[i].join ||
+                lines[i].header != sidebar_[i].header ) {
+                same = false;
+                break;
+            }
+        }
+        if( same ) {
+            return;
+        }
+    }
+    sidebar_ = lines;
+    ++sidebar_generation_;
+}
+
+void OvermapSnapshot::note_sidebar_attended()
+{
+    sidebar_attended_.store( true, std::memory_order_relaxed );
+}
+
+bool OvermapSnapshot::sidebar_attended() const
+{
+    return sidebar_attended_.load( std::memory_order_relaxed );
+}
+
+godot::Dictionary OvermapSnapshot::copy_sidebar() const
+{
+    const_cast<OvermapSnapshot *>( this )->note_sidebar_attended();
+    std::lock_guard<std::mutex> lock( mutex_ );
+    godot::Dictionary d;
+    d["generation"] = static_cast<int64_t>( sidebar_generation_ );
+    godot::Array lines;
+    lines.resize( static_cast<int64_t>( sidebar_.size() ) );
+    for( size_t i = 0; i < sidebar_.size(); ++i ) {
+        godot::Dictionary l;
+        l["text"] = godot::String::utf8( sidebar_[i].text.c_str() );
+        l["color"] = godot::String::utf8( sidebar_[i].color.c_str() );
+        l["indent"] = sidebar_[i].indent;
+        l["join"] = sidebar_[i].join;
+        l["header"] = sidebar_[i].header;
+        lines[static_cast<int64_t>( i )] = l;
+    }
+    d["lines"] = lines;
+    return d;
+}
+
+uint64_t OvermapSnapshot::sidebar_generation() const
+{
+    std::lock_guard<std::mutex> lock( mutex_ );
+    return sidebar_generation_;
+}
+
 bool OvermapSnapshot::active() const
 {
     std::lock_guard<std::mutex> lock( mutex_ );

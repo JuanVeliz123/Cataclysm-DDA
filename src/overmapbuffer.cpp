@@ -2066,20 +2066,14 @@ std::string overmapbuffer::get_description_at( const tripoint_abs_sm &where, boo
     return string_format( format_string, ter_name, dir_name, closest_city_name );
 }
 
-void overmapbuffer::display_description_at( const tripoint_abs_sm &where, bool draw_origin )
+std::pair<std::string, std::string> overmapbuffer::describe_at( const tripoint_abs_sm &where )
 {
     const oter_id oter = ter( project_to<coords::omt>( where ) );
     om_vision_level vision = seen( project_to<coords::omt>( where ) );
     nc_color ter_color = oter->get_color( vision );
     std::string ter_name = colorize( oter->get_name( vision ), ter_color );
 
-    auto draw_origin_line = [&draw_origin, &oter]() {
-        if( draw_origin ) {
-            ImGui::NewLine();
-            cataimgui::TextColoredParagraph( c_light_gray, get_origin( oter->get_type_id()->src ) );
-            ImGui::NewLine();
-        }
-    };
+    const std::string origin = get_origin( oter->get_type_id()->src );
 
     if( oter->blends_adjacent( vision ) ) {
         oter_vision::blended_omt blended = oter_vision::get_blended_omt_info(
@@ -2089,16 +2083,12 @@ void overmapbuffer::display_description_at( const tripoint_abs_sm &where, bool d
     }
 
     if( where.z() != 0 ) {
-        cataimgui::TextColoredParagraph( ter_color, ter_name );
-        return;
+        return { colorize( ter_name, ter_color ), origin };
     }
 
     const city_reference closest_cref = closest_known_city( where );
-
     if( !closest_cref ) {
-        cataimgui::TextColoredParagraph( ter_color, ter_name );
-        draw_origin_line();
-        return;
+        return { colorize( ter_name, ter_color ), origin };
     }
 
     const struct city &closest_city = *closest_cref.city;
@@ -2136,9 +2126,19 @@ void overmapbuffer::display_description_at( const tripoint_abs_sm &where, bool d
         }
     }
 
-    cataimgui::TextColoredParagraph( ter_color, string_format( format_string, ter_name, dir_name,
-                                     closest_city_name ) );
-    draw_origin_line();
+    return { colorize( string_format( format_string, ter_name, dir_name, closest_city_name ),
+                       ter_color ), origin };
+}
+
+void overmapbuffer::display_description_at( const tripoint_abs_sm &where, bool draw_origin )
+{
+    const std::pair<std::string, std::string> described = describe_at( where );
+    cataimgui::draw_colored_text( described.first );
+    if( draw_origin && !described.second.empty() ) {
+        ImGui::NewLine();
+        cataimgui::TextColoredParagraph( c_light_gray, described.second );
+        ImGui::NewLine();
+    }
 }
 
 void overmapbuffer::spawn_monster( const tripoint_abs_sm &p, bool spawn_nonlocal )

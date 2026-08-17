@@ -10,6 +10,7 @@
 #include <godot_cpp/variant/vector2i.hpp>
 #include <godot_cpp/variant/dictionary.hpp>
 #include <godot_cpp/variant/packed_byte_array.hpp>
+#include <godot_cpp/variant/packed_float32_array.hpp>
 #include <godot_cpp/variant/packed_int32_array.hpp>
 #include <godot_cpp/variant/packed_string_array.hpp>
 #include <godot_cpp/variant/utility_functions.hpp>
@@ -18,6 +19,8 @@
 #include "godot_input_bridge.h"
 #include "godot_backend.h"
 #include "godot_crafting_snapshot.h"
+#include "godot_dialogue_snapshot.h"
+#include "godot_surroundings_snapshot.h"
 #include "godot_keybind_snapshot.h"
 #include "godot_options_snapshot.h"
 #include "godot_popup_snapshot.h"
@@ -133,7 +136,7 @@ class CDDAHost : public godot::Node
             godot::ClassDB::bind_method( godot::D_METHOD( "get_render_stats" ),
                                         &CDDAHost::get_render_stats );
             godot::ClassDB::bind_method(
-                godot::D_METHOD( "describe_sprite", "id", "category" ),
+                godot::D_METHOD( "describe_sprite", "id", "category", "variant" ),
                 &CDDAHost::describe_sprite );
             godot::ClassDB::bind_method( godot::D_METHOD( "get_avatar_overlays" ),
                                         &CDDAHost::get_avatar_overlays );
@@ -146,8 +149,19 @@ class CDDAHost : public godot::Node
             godot::ClassDB::bind_method(
                 godot::D_METHOD( "set_light_pass_enabled", "enabled" ),
                 &CDDAHost::set_light_pass_enabled );
+            godot::ClassDB::bind_method(
+                godot::D_METHOD( "set_depth_fog_enabled", "enabled" ),
+                &CDDAHost::set_depth_fog_enabled );
+            godot::ClassDB::bind_method( godot::D_METHOD( "get_creatures" ),
+                                        &CDDAHost::get_creatures );
+            godot::ClassDB::bind_method( godot::D_METHOD( "get_light_levels" ),
+                                        &CDDAHost::get_light_levels );
+            godot::ClassDB::bind_method( godot::D_METHOD( "get_light_sources" ),
+                                        &CDDAHost::get_light_sources );
             godot::ClassDB::bind_method( godot::D_METHOD( "get_wind_vector" ),
                                         &CDDAHost::get_wind_vector );
+            godot::ClassDB::bind_method( godot::D_METHOD( "get_conditions" ),
+                                        &CDDAHost::get_conditions );
             godot::ClassDB::bind_method( godot::D_METHOD( "get_palette_image" ),
                                         &CDDAHost::get_palette_image );
             godot::ClassDB::bind_method( godot::D_METHOD( "set_minimap_size", "width", "height" ),
@@ -166,6 +180,10 @@ class CDDAHost : public godot::Node
                                         &CDDAHost::get_anim_stats );
             godot::ClassDB::bind_method( godot::D_METHOD( "debug_spawn_monster", "mtype" ),
                                         &CDDAHost::debug_spawn_monster );
+            godot::ClassDB::bind_method( godot::D_METHOD( "debug_spawn_npc" ),
+                                        &CDDAHost::debug_spawn_npc );
+            godot::ClassDB::bind_method( godot::D_METHOD( "commands_ready" ),
+                                        &CDDAHost::commands_ready );
             godot::ClassDB::bind_method( godot::D_METHOD( "get_hit_generation" ),
                                         &CDDAHost::get_hit_generation );
             godot::ClassDB::bind_method( godot::D_METHOD( "get_hit_events" ),
@@ -187,6 +205,10 @@ class CDDAHost : public godot::Node
                                         &CDDAHost::get_overmap_draw_list );
             godot::ClassDB::bind_method( godot::D_METHOD( "get_overmap_generation" ),
                                         &CDDAHost::get_overmap_generation );
+            godot::ClassDB::bind_method( godot::D_METHOD( "get_overmap_sidebar" ),
+                                        &CDDAHost::get_overmap_sidebar );
+            godot::ClassDB::bind_method( godot::D_METHOD( "overmap_sidebar_generation" ),
+                                        &CDDAHost::overmap_sidebar_generation );
             godot::ClassDB::bind_method( godot::D_METHOD( "get_hud_state" ),
                                         &CDDAHost::get_hud_state );
             godot::ClassDB::bind_method( godot::D_METHOD( "get_character_sheet" ),
@@ -285,6 +307,26 @@ class CDDAHost : public godot::Node
                                         &CDDAHost::crafting_select_tab );
             godot::ClassDB::bind_method( godot::D_METHOD( "crafting_select_subtab", "index" ),
                                         &CDDAHost::crafting_select_subtab );
+            godot::ClassDB::bind_method( godot::D_METHOD( "dialogue_active" ),
+                                        &CDDAHost::dialogue_active );
+            godot::ClassDB::bind_method( godot::D_METHOD( "dialogue_generation" ),
+                                        &CDDAHost::dialogue_generation );
+            godot::ClassDB::bind_method( godot::D_METHOD( "get_dialogue_state" ),
+                                        &CDDAHost::get_dialogue_state );
+            godot::ClassDB::bind_method( godot::D_METHOD( "dialogue_action", "action" ),
+                                        &CDDAHost::dialogue_action );
+            godot::ClassDB::bind_method( godot::D_METHOD( "dialogue_select", "index" ),
+                                        &CDDAHost::dialogue_select );
+            godot::ClassDB::bind_method( godot::D_METHOD( "surroundings_active" ),
+                                        &CDDAHost::surroundings_active );
+            godot::ClassDB::bind_method( godot::D_METHOD( "surroundings_generation" ),
+                                        &CDDAHost::surroundings_generation );
+            godot::ClassDB::bind_method( godot::D_METHOD( "get_surroundings_state" ),
+                                        &CDDAHost::get_surroundings_state );
+            godot::ClassDB::bind_method( godot::D_METHOD( "surroundings_action", "action" ),
+                                        &CDDAHost::surroundings_action );
+            godot::ClassDB::bind_method( godot::D_METHOD( "surroundings_select", "index" ),
+                                        &CDDAHost::surroundings_select );
             godot::ClassDB::bind_method( godot::D_METHOD( "push_input_event", "event" ),
                                         &CDDAHost::push_input_event );
             godot::ClassDB::bind_method( godot::D_METHOD( "set_window_size", "width", "height" ),
@@ -552,6 +594,18 @@ class CDDAHost : public godot::Node
             return get_map_snapshot().copy_field_list();
         }
 
+        /// Every creature in view, by identity (ADR-006's mesh amendment, 3D-7c): each
+        /// entry is { id, kind, x, y, z_below, flip }, with x and y the view-relative
+        /// pixels of the creature's feet.
+        ///
+        /// The draw list carries no identity on purpose -- a command is an atlas sub-rect,
+        /// which is all a sprite needs and nothing a mesh can use. This is how a renderer
+        /// gets to know that the thing at those pixels is a zombie.
+        godot::Array get_creatures() const
+        {
+            return get_map_snapshot().copy_creatures();
+        }
+
         /// The session's sprite misses, most-drawn first (SP-2). Each entry is
         /// { id, category, level, level_name, hits }. Pass limit <= 0 for all.
         godot::Array get_sprite_coverage( int limit ) const
@@ -568,11 +622,13 @@ class CDDAHost : public godot::Node
         /// Why one id draws what it draws (SP-9): its resolution level, any
         /// palette redirect, and whether it sways.
         godot::Dictionary describe_sprite( const godot::String &id,
-                                           const godot::String &category ) const
+                                           const godot::String &category,
+                                           const godot::String &variant ) const
         {
             return get_map_snapshot().describe_sprite(
                        std::string( id.utf8().get_data() ),
-                       std::string( category.utf8().get_data() ) );
+                       std::string( category.utf8().get_data() ),
+                       std::string( variant.utf8().get_data() ) );
         }
 
         /// The avatar's character overlays in draw order, each with the sprite
@@ -601,6 +657,29 @@ class CDDAHost : public godot::Node
             return godot_backend::get_light_snapshot().size();
         }
 
+        /// Level blocks in the light image (ADR-006 item 3D-4). The image is one block of
+        /// `get_light_size().y` rows per z-level published, deepest last, so a consumer
+        /// that only wants the avatar's level must scale its V by this rather than
+        /// stretching one block over the whole texture.
+        int get_light_levels() const
+        {
+            return godot_backend::get_light_snapshot().levels();
+        }
+
+        /// The frame's light *sources*, for the 3D backend's real lights (ADR-006
+        /// item 3D-2): seven floats each -- x, y, radius, r, g, b, luminance -- with
+        /// x, y and radius in view-relative pixels and luminance in the game's own
+        /// units. See LightSnapshot::add_light for where they come from and what is
+        /// deliberately missing from them.
+        ///
+        /// The light *texture* remains the authority on how lit a tile is. This says
+        /// where the light comes from, which is what a per-tile value cannot express
+        /// and what a 3D renderer needs to put a light in the world.
+        godot::PackedFloat32Array get_light_sources() const
+        {
+            return godot_backend::get_light_snapshot().copy_lights();
+        }
+
         /// MapView reports whether it is running the light pass. Until it does,
         /// C++ keeps baking light into each sprite's tint, so a host that never
         /// builds the texture still gets a lit map rather than a flat one.
@@ -609,11 +688,35 @@ class CDDAHost : public godot::Node
             godot_backend::get_light_snapshot().set_pass_enabled( enabled );
         }
 
+        /// The renderer reports that it dims lower z-levels itself, so C++ stops baking
+        /// that dimming into the tints (ADR-006 item 3D-4). A host that never calls this
+        /// keeps the baked fog, which is what the 2D backend wants.
+        void set_depth_fog_enabled( bool enabled )
+        {
+            godot_backend::get_light_snapshot().set_depth_fog_enabled( enabled );
+        }
+
         /// Screen-space wind for the sway shader (SP-7): unit direction times
         /// 0..1 strength. Published by the game thread with the light frame.
         godot::Vector2 get_wind_vector() const
         {
             return godot_backend::get_light_snapshot().wind();
+        }
+
+        /// What the presentation pass grades by: daylight, precipitation and
+        /// pain, each 0..1. See LightSnapshot::conditions.
+        godot::Dictionary get_conditions() const
+        {
+            const auto c = godot_backend::get_light_snapshot().get_conditions();
+            godot::Dictionary d;
+            d["daylight"] = c.daylight;
+            d["precipitation"] = c.precipitation;
+            d["pain"] = c.pain;
+            // Compass degrees and degrees above the horizon. Altitude is negative at
+            // night, which is how "no sun" is said without a second flag.
+            d["sun_azimuth"] = c.sun_azimuth;
+            d["sun_altitude"] = c.sun_altitude;
+            return d;
         }
 
         /// The tileset's palette ramps (SP-8), one row per palette. Null when
@@ -696,6 +799,18 @@ class CDDAHost : public godot::Node
             return static_cast<int64_t>( get_overmap_snapshot().generation() );
         }
 
+        /// The sidebar's text, recorded from the functions that used to draw it
+        /// through the overlay. See overmap_sidebar::record.
+        godot::Dictionary get_overmap_sidebar() const
+        {
+            return godot_backend::get_overmap_snapshot().copy_sidebar();
+        }
+        int64_t overmap_sidebar_generation() const
+        {
+            return static_cast<int64_t>(
+                       godot_backend::get_overmap_snapshot().sidebar_generation() );
+        }
+
         /// Bumped by each committed animation frame (explosions, bullets, hit
         /// markers, aim cursor). Poll before copying the commands.
         int64_t get_anim_generation() const
@@ -731,6 +846,26 @@ class CDDAHost : public godot::Node
                                         std::string( mtype.utf8().get_data() ) );
             return godot::String::utf8( err.c_str() );
         }
+
+        /// Put an NPC next to the avatar, so the conversation, faction, mission
+        /// and follower screens can be verified rather than waited for.
+        godot::String debug_spawn_npc()
+        {
+            return godot::String::utf8( godot_backend::request_debug_spawn_npc().c_str() );
+        }
+
+        /// Whether a queued command would actually run if posted now.
+        ///
+        /// Commands are refused while any C++ window is shown, because the input
+        /// wait is then nested inside that window's own loop and running one
+        /// there would re-enter the game from inside a menu. A caller that posts
+        /// without checking gets silence: the command sits in the queue, and the
+        /// screen it would have opened is reported as never opening.
+        bool commands_ready() const
+        {
+            return godot_backend::commands_safe_to_run();
+        }
+
 
         /// Id of the most recent creature hit (SP-5). Poll this rather than the
         /// events themselves: a fight lands several per turn and MapView only
@@ -911,6 +1046,50 @@ class CDDAHost : public godot::Node
             godot_backend::get_crafting_snapshot().request_subtab( index );
         }
 
+        // --- NPC conversation ----------------------------------------------
+        bool dialogue_active() const
+        {
+            return godot_backend::get_dialogue_snapshot().active();
+        }
+        int64_t dialogue_generation() const
+        {
+            return static_cast<int64_t>( godot_backend::get_dialogue_snapshot().generation() );
+        }
+        godot::Dictionary get_dialogue_state() const
+        {
+            return godot_backend::get_dialogue_snapshot().copy_state();
+        }
+        void dialogue_action( const godot::String &action )
+        {
+            godot_backend::get_dialogue_snapshot().request_action( action.utf8().get_data() );
+        }
+        void dialogue_select( int index )
+        {
+            godot_backend::get_dialogue_snapshot().request_select( index );
+        }
+
+        // --- the surroundings list ("look around") -------------------------
+        bool surroundings_active() const
+        {
+            return godot_backend::get_surroundings_snapshot().active();
+        }
+        int64_t surroundings_generation() const
+        {
+            return static_cast<int64_t>( godot_backend::get_surroundings_snapshot().generation() );
+        }
+        godot::Dictionary get_surroundings_state() const
+        {
+            return godot_backend::get_surroundings_snapshot().copy_state();
+        }
+        void surroundings_action( const godot::String &action )
+        {
+            godot_backend::get_surroundings_snapshot().request_action( action.utf8().get_data() );
+        }
+        void surroundings_select( int index )
+        {
+            godot_backend::get_surroundings_snapshot().request_select( index );
+        }
+
         // --- query_popup, rendered as a Godot Control --------------------
         bool popup_active() const
         {
@@ -985,7 +1164,7 @@ class CDDAHost : public godot::Node
         /// host.gd says so instead of leaving the reader to guess.
         int api_version() const
         {
-            return 11;
+            return 22;
         }
 
         /// Whether a C++ screen is currently drawn in the overlay.

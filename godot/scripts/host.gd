@@ -1,8 +1,9 @@
 extends Node
 ## Godot host for Cataclysm-DDA.
 ## Pre-game chrome (splash, main menu, world pick, custom chargen) is native Godot UI.
-## In-session present is MapView (tileset draw-list, ADR-002). TerminalView / GameView
-## remain as optional debug underlays (off by default).
+## In-session present is the world, drawn from the C++ draw list (ADR-002) inside its
+## own viewport (ADR-004) -- MapView by default, or the 3D backend behind
+## USE_3D_MAP (ADR-006). TerminalView remains an optional debug underlay.
 
 @onready var cdda_host: Node = get_node("CDDAHost")
 @onready var session_bg: ColorRect = %SessionBg
@@ -20,6 +21,18 @@ extends Node
 @onready var hud_panel: Control = %HudPanel
 @onready var inventory_panel: Control = %InventoryPanel
 @onready var character_panel: Control = %CharacterPanel
+## The world's own viewport, which the world is moved into at startup (ADR-004).
+## Created in `_setup_world_viewport`; see `world_viewport.gd`.
+var world_viewport: TextureRect
+## The active world: `map_view` (2D) or a MapView3D, per USE_3D_MAP.
+##
+## Untyped, because the two are a `Node2D` and a `Node3D` and everything this
+## script asks of the world -- `visible`, `refresh`, `zoom_step` -- is on both and
+## on neither of their common ancestors. Every backend-agnostic use goes through
+## here; `map_view` is only touched where the 2D node specifically is meant.
+var world
+## The 3D backend, when USE_3D_MAP is on. Null otherwise.
+var map_view_3d: Node3D
 ## Escape menu, created here rather than in the scene so it stays a pure script.
 var game_menu_panel: Control
 ## Generic uilist renderer; shown whenever C++ hands a menu over.
@@ -31,6 +44,26 @@ var textwin_panel: Control
 var options_panel: Control
 var keybind_panel: Control
 var crafting_panel: Control
+var dialogue_panel: Control
+var surroundings_panel: Control
+
+## Draw the world with the 3D backend (ADR-006, `BACKLOG.md` Part 4) instead of MapView.
+##
+## **On, since 2026-08-17.** It draws everything the 2D backend draws, it has been run on
+## a real GPU, and the tilt experiment came back positive -- which is what ADR-006 was
+## written to ask. MapView stays in the tree, hidden, and is still what the headless probe
+## drives and what `--rendering-driver opengl3` would need, so this is a switch rather than
+## a replacement.
+##
+## Two deliberate differences from the 2D backend: sprite edges are alpha-scissored rather
+## than blended (3D-1b), and the fallback glyphs draw over the world rather than in their
+## own layer's depth band.
+##
+## `map_view_3d.gd`'s `TILT_DEGREES` is the other half of this and is **45 degrees**: the
+## world stands up, so the ground lies down, walls and trees are vertical, and the engine's
+## lights and shadows have something with a shape to fall on. Set it to 0 for the flat
+## world, which is pixel-identical to the 2D backend and is what the baseline means.
+const USE_3D_MAP := true
 
 ## Optional debug present (off for product path).
 const USE_TERMINAL_DEBUG := false
@@ -42,7 +75,7 @@ const USE_CURSES_UI_OVERLAY := true
 ## is compiled, so running the two out of step shows the new UI filled with zeros
 ## for every field the old library does not emit -- which is indistinguishable
 ## from a bug unless we say so. Bump both sides together.
-const REQUIRED_API_VERSION := 11
+const REQUIRED_API_VERSION := 22
 
 var last_host_size: Vector2i = Vector2i(0, 0)
 var was_session_active: bool = false
@@ -53,6 +86,7 @@ var _awaiting_session_present: bool = false
 var _status_label: Label
 var _minimap_panel: Control
 var _overmap_view: Node2D
+var _overmap_sidebar: Control
 var _overmap_shown: bool = false
 var _fatal_panel: Control
 ## Render debug overlay (SP-9), built on the first F3 press.
@@ -124,13 +158,23 @@ func _process(_delta: float) -> void:
 	_update_options_panel()
 	_update_keybind_panel()
 	_update_crafting_panel()
+	_update_dialogue_panel()
+	_update_surroundings_panel()
 
-	if session or map_view.visible or _pending_game_start:
+	if session or world.visible or _pending_game_start:
 		_update_overmap_visibility()
-		if map_view.visible and map_view.has_method("refresh"):
-			map_view.refresh()
+		if world.visible and world.has_method("refresh"):
+			world.refresh()
 		if _overmap_view != null and _overmap_view.visible:
 			_overmap_view.refresh()
+		if _overmap_sidebar != null:
+			# Shown with the map and hidden with it: the sidebar has no life of
+			# its own, and one left behind would sit over the game map.
+			var om_up: bool = _overmap_view != null and _overmap_view.visible
+			if om_up:
+				_overmap_sidebar.refresh()
+			if om_up != _overmap_sidebar.visible:
+				_overmap_sidebar.visible = om_up
 		if hud_panel.visible and hud_panel.has_method("refresh"):
 			hud_panel.refresh()
 		if _minimap_panel != null and _minimap_panel.visible:
@@ -178,20 +222,57 @@ func _poll_async_chargen() -> void:
 				_show_main_menu()
 
 func _setup_map_view() -> void:
-	map_view.z_index = 0
-	if map_view.has_method("setup"):
-		map_view.setup(cdda_host)
+	if USE_3D_MAP:
+		map_view_3d = Node3D.new()
+		map_view_3d.name = "MapView3D"
+		map_view_3d.set_script(load("res://scripts/map_view_3d.gd"))
+		map_view_3d.visible = false
+		add_child(map_view_3d)
+		world = map_view_3d
+		# The 2D map stays in the scene, hidden and never refreshed, so switching
+		# backends is one constant and not a scene edit. It is also what the probe
+		# still drives, since MapView has to keep working on an ordinary canvas.
+		map_view.visible = false
+	else:
+		map_view.z_index = 0
+		world = map_view
+	_setup_world_viewport()
+	if world.has_method("setup"):
+		world.setup(cdda_host)
 	_sync_map_reserved_width()
 
-## Keep MapView's idea of the space the sidebar takes in step with the sidebar,
-## so the map fills everything the sidebar is not covering.
+## The world gets its own viewport (ADR-004), composited under the UI.
+##
+## Built here rather than declared in main.tscn for two reasons: the scene stays
+## a flat list of screens, and MapView keeps working when parented to an ordinary
+## canvas -- which is how `headless_probe.gd` drives it, and is the only reason
+## its internal z discipline still matters.
+##
+## Every place that toggles `world.visible` keeps working untouched, because the
+## world viewport mirrors it: left visible over a hidden world it would go on
+## compositing the last frame the world drew, and the main menu would open over a
+## still of the map.
+func _setup_world_viewport() -> void:
+	if world_viewport != null:
+		return
+	world_viewport = TextureRect.new()
+	world_viewport.name = "WorldViewport"
+	world_viewport.set_script(load("res://scripts/world_viewport.gd"))
+	# Where MapView itself sat: over SessionBg at -1, under every panel from 8 up.
+	world_viewport.z_index = 0
+	add_child(world_viewport)
+	world_viewport.set_3d_enabled(USE_3D_MAP)
+	world_viewport.setup(world)
+
+## Keep the world's viewport in step with the sidebar, so the world fills
+## everything the sidebar is not covering and nothing is drawn underneath it.
 func _sync_map_reserved_width() -> void:
-	if not map_view.has_method("set_reserved_right"):
+	if world_viewport == null:
 		return
 	var reserved := 0.0
 	if hud_panel.visible and "WIDTH" in hud_panel:
 		reserved = float(hud_panel.WIDTH)
-	map_view.set_reserved_right(reserved)
+	world_viewport.set_reserved_right(reserved)
 
 func _setup_session_hud() -> void:
 	if hud_panel.has_method("setup"):
@@ -261,6 +342,22 @@ func _setup_session_hud() -> void:
 	crafting_panel.visible = false
 	add_child(crafting_panel)
 	crafting_panel.setup(cdda_host)
+
+	dialogue_panel = Control.new()
+	dialogue_panel.set_script(load("res://scripts/dialogue_panel.gd"))
+	dialogue_panel.name = "DialoguePanel"
+	dialogue_panel.z_index = 17
+	dialogue_panel.visible = false
+	add_child(dialogue_panel)
+	dialogue_panel.setup(cdda_host)
+
+	surroundings_panel = Control.new()
+	surroundings_panel.set_script(load("res://scripts/surroundings_panel.gd"))
+	surroundings_panel.name = "SurroundingsPanel"
+	surroundings_panel.z_index = 17
+	surroundings_panel.visible = false
+	add_child(surroundings_panel)
+	surroundings_panel.setup(cdda_host)
 	if character_panel.has_signal("closed"):
 		character_panel.closed.connect(_close_session_overlays)
 	_setup_minimap_panel()
@@ -279,6 +376,15 @@ func _setup_overmap_view() -> void:
 	_overmap_view.z_index = 2
 	add_child(_overmap_view)
 	_overmap_view.setup(cdda_host)
+
+	_overmap_sidebar = Control.new()
+	_overmap_sidebar.name = "OvermapSidebar"
+	_overmap_sidebar.set_script(load("res://scripts/overmap_sidebar_panel.gd"))
+	_overmap_sidebar.visible = false
+	# Above OvermapView, which it sits beside rather than over.
+	_overmap_sidebar.z_index = 3
+	add_child(_overmap_sidebar)
+	_overmap_sidebar.setup(cdda_host)
 
 ## Built at runtime rather than in main.tscn: it is a self-contained overlay with
 ## no scene-side configuration to edit.
@@ -350,7 +456,7 @@ func _hide_all_chrome() -> void:
 	world_pick.visible = false
 	chargen_panel.visible = false
 	session_bg.visible = false
-	map_view.visible = false
+	world.visible = false
 	hud_panel.visible = false
 	if _minimap_panel != null:
 		_minimap_panel.visible = false
@@ -377,7 +483,7 @@ func _show_main_menu() -> void:
 func _show_session() -> void:
 	_hide_all_chrome()
 	session_bg.visible = true
-	map_view.visible = true
+	world.visible = true
 	hud_panel.visible = true
 	_sync_map_reserved_width()
 	if _minimap_panel != null:
@@ -385,8 +491,8 @@ func _show_session() -> void:
 	inventory_panel.visible = false
 	character_panel.visible = false
 	terminal_view.visible = USE_TERMINAL_DEBUG or USE_CURSES_UI_OVERLAY
-	if map_view.has_method("refresh"):
-		map_view.refresh()
+	if world.has_method("refresh"):
+		world.refresh()
 	if hud_panel.has_method("refresh"):
 		hud_panel.refresh()
 	if terminal_view.visible and terminal_view.has_method("refresh"):
@@ -452,8 +558,8 @@ func _on_viewport_resized() -> void:
 	if next.x > 0 and next.y > 0 and next != last_host_size:
 		last_host_size = next
 		cdda_host.set_window_size(next.x, next.y)
-	if map_view.visible and map_view.has_method("refresh"):
-		map_view.refresh()
+	if world.visible and world.has_method("refresh"):
+		world.refresh()
 
 ## Show what killed the game thread, over whatever was on screen.
 ##
@@ -517,7 +623,7 @@ func _update_overmap_visibility() -> void:
 		return
 	_overmap_shown = active
 	_overmap_view.visible = active
-	map_view.visible = not active
+	world.visible = not active
 	# The sidebar and minimap describe the local view; leaving them up over the
 	# overmap covers the map with information that does not apply to it.
 	hud_panel.visible = not active
@@ -541,10 +647,12 @@ func _update_uilist_panel() -> void:
 func _update_popup_panel() -> void:
 	if popup_panel == null or not cdda_host.has_method("popup_active"):
 		return
-	if cdda_host.popup_active():
-		popup_panel.refresh()
-	elif popup_panel.prompt_open():
-		# Cleared on the C++ side; let the panel see the empty state once.
+	# Refresh while anything is up *and* on the frame it goes away. The panel
+	# clears its own notice and prompt from the published state, so it has to be
+	# given the empty state to see. Testing prompt_open() here missed notices
+	# entirely: "Grab where?" answered correctly, the game moved on, and the
+	# ribbon stayed on screen forever because nothing asked the panel again.
+	if cdda_host.popup_active() or popup_panel.showing():
 		popup_panel.refresh()
 
 func _update_textwin_panel() -> void:
@@ -594,6 +702,30 @@ func _update_crafting_panel() -> void:
 
 func _crafting_open() -> bool:
 	return crafting_panel != null and crafting_panel.visible
+
+func _update_dialogue_panel() -> void:
+	if dialogue_panel == null or not cdda_host.has_method("dialogue_active"):
+		return
+	var want: bool = cdda_host.dialogue_active()
+	if want:
+		dialogue_panel.refresh()
+	if want != dialogue_panel.visible:
+		dialogue_panel.visible = want
+
+func _dialogue_open() -> bool:
+	return dialogue_panel != null and dialogue_panel.visible
+
+func _update_surroundings_panel() -> void:
+	if surroundings_panel == null or not cdda_host.has_method("surroundings_active"):
+		return
+	var want: bool = cdda_host.surroundings_active()
+	if want:
+		surroundings_panel.refresh()
+	if want != surroundings_panel.visible:
+		surroundings_panel.visible = want
+
+func _surroundings_open() -> bool:
+	return surroundings_panel != null and surroundings_panel.visible
 
 func _popup_modal() -> bool:
 	return popup_panel != null and popup_panel.prompt_open()
@@ -653,7 +785,8 @@ func _is_session_hotkey(event: InputEvent) -> bool:
 
 func _handle_session_hotkey(event: InputEvent) -> bool:
 	if (_popup_modal() or _textwin_open() or _uilist_open() or _options_open()
-			or _keybind_open() or _crafting_open()):
+			or _keybind_open() or _crafting_open() or _dialogue_open()
+			or _surroundings_open()):
 		return false
 	# A notice on screen means the game thread is mid-prompt and waiting on a key
 	# -- "grab what?", "examine where?". Those are answered with a direction or
@@ -661,7 +794,7 @@ func _handle_session_hotkey(event: InputEvent) -> bool:
 	# left the prompt on screen with no way to dismiss it.
 	if cdda_host.has_method("popup_active") and cdda_host.popup_active():
 		return false
-	if not (cdda_host.is_session_active() or _pending_game_start) or not map_view.visible:
+	if not (cdda_host.is_session_active() or _pending_game_start) or not world.visible:
 		return false
 	# A C++ screen is drawn: it owns the keyboard until it closes. Without this,
 	# a legacy screen opened from the Godot game menu could never be dismissed --
@@ -695,9 +828,10 @@ func _forward_input(event: InputEvent) -> void:
 	# The uilist panel handles its own keys and answers C++ directly; forwarding
 	# them as well would drive the game underneath the menu.
 	if (_popup_modal() or _textwin_open() or _uilist_open() or _options_open()
-			or _keybind_open() or _crafting_open() or _session_overlay_open()):
+			or _keybind_open() or _crafting_open() or _dialogue_open()
+			or _surroundings_open() or _session_overlay_open()):
 		return
-	if map_view.visible or terminal_view.visible:
+	if world.visible or terminal_view.visible:
 		cdda_host.push_input_event(event)
 
 ## Render debug overlay (SP-9): what the tile renderer just did, and which
@@ -713,10 +847,26 @@ func _toggle_debug_overlay() -> void:
 	_debug_overlay.visible = not _debug_overlay.visible
 	if _debug_overlay.visible:
 		_debug_overlay.refresh()
+	# Said out loud, because the failure this had was silence: the key was being eaten by
+	# the desktop, and an overlay that never appears is indistinguishable from one that
+	# appeared empty, from one whose script died on the way up.
+	print("[host] render overlay ", "shown" if _debug_overlay.visible else "hidden")
+
+## Whether @p event opens the render debug overlay (SP-9).
+##
+## Two bindings, because F3 alone is not reachable on every desktop: macOS takes it for
+## Mission Control before any application sees it, so the overlay simply "did nothing"
+## for whoever was trying to read a number off it. Ctrl+Shift+D is the one no window
+## manager wants, and CDDA binds nothing to it either.
+static func _is_debug_overlay_key(event: InputEvent) -> bool:
+	if not (event is InputEventKey) or not event.pressed or event.echo:
+		return false
+	if event.keycode == KEY_F3:
+		return true
+	return event.keycode == KEY_D and event.ctrl_pressed and event.shift_pressed
 
 func _input(event: InputEvent) -> void:
-	if event is InputEventKey and event.pressed and not event.echo \
-			and event.keycode == KEY_F3:
+	if _is_debug_overlay_key(event):
 		_toggle_debug_overlay()
 		get_viewport().set_input_as_handled()
 		return
@@ -729,6 +879,23 @@ func _input(event: InputEvent) -> void:
 			window.mode = Window.MODE_FULLSCREEN
 		get_viewport().set_input_as_handled()
 		return
+	# Ctrl+wheel zooms the map, without stealing plain wheel from CDDA.
+	#
+	# This was MapView's own `_unhandled_input` until the world moved into a
+	# SubViewport that accepts no input at all, at which point no event could
+	# reach it. Nothing would have reported that: zoom is a convenience, and a
+	# convenience that stops working looks like a feature nobody used.
+	if event is InputEventMouseButton and event.pressed and event.ctrl_pressed \
+			and world.visible and world.has_method("zoom_step"):
+		var zoom_dir := 0
+		if event.button_index == MOUSE_BUTTON_WHEEL_UP:
+			zoom_dir = 1
+		elif event.button_index == MOUSE_BUTTON_WHEEL_DOWN:
+			zoom_dir = -1
+		if zoom_dir != 0:
+			world.zoom_step(zoom_dir)
+			get_viewport().set_input_as_handled()
+			return
 	# Handle session overlays here so they win over MapView, then mark handled
 	# so _unhandled_input does not double-feed the game (which closed menus).
 	if _handle_session_hotkey(event):

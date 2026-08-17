@@ -16,6 +16,9 @@
 #include "enums.h"
 #include "input_context.h"
 #include "map_entity_stack.h"
+#if defined(GODOT)
+#include "godot_surroundings_snapshot.h"
+#endif
 #include "translations.h"
 
 class avatar;
@@ -61,6 +64,21 @@ class tab_data
 
         void filter_popup();
         bool has_filter() const;
+#if defined(GODOT)
+        /**
+         * The rows this tab would show, taken from the entity stacks rather than
+         * from the drawing.
+         *
+         * The draw functions build rows inline with tables, per-row ImGui ids
+         * and width arithmetic, so there is nothing there to intercept cleanly
+         * -- but the name, distance, colour and category all come from
+         * map_entity_stack, which is the same source the drawing reads.
+         *
+         * @param selected out: index of the selected row, or -1.
+         */
+        virtual std::vector<godot_backend::SurroundingsSnapshot::row> godot_rows(
+            int &selected ) = 0;
+#endif
     protected:
         const int radius = 60;
 
@@ -78,6 +96,9 @@ class item_tab_data : public tab_data
         void init( const Character &you, map &m );
         std::vector<map_entity_stack<item>*> item_list;
         std::vector<map_entity_stack<item>*> filtered_list;
+#if defined(GODOT)
+        std::vector<godot_backend::SurroundingsSnapshot::row> godot_rows( int &selected ) override;
+#endif
         map_entity_stack<item> *selected_entry = nullptr;
         int priority_plus_end = -1;
         int priority_minus_start = INT_MAX;
@@ -112,6 +133,9 @@ class monster_tab_data : public tab_data
         void init( const Character &you );
         std::vector<map_entity_stack<Creature>*> monster_list;
         std::vector<map_entity_stack<Creature>*> filtered_list;
+#if defined(GODOT)
+        std::vector<godot_backend::SurroundingsSnapshot::row> godot_rows( int &selected ) override;
+#endif
         map_entity_stack<Creature> *selected_entry = nullptr;
 
         size_t get_filtered_list_size() override {
@@ -146,6 +170,9 @@ class terfurn_tab_data : public tab_data
         void init( const Character &you, map &m );
         std::vector<map_entity_stack<map_data_common_t>*> terfurn_list;
         std::vector<map_entity_stack<map_data_common_t>*> filtered_list;
+#if defined(GODOT)
+        std::vector<godot_backend::SurroundingsSnapshot::row> godot_rows( int &selected ) override;
+#endif
         map_entity_stack<map_data_common_t> *selected_entry = nullptr;
 
         size_t get_filtered_list_size() override {
@@ -189,6 +216,10 @@ class surroundings_menu : public cataimgui::window
         void draw_hotkey_buttons( const tab_data *tab );
         float get_hotkey_buttons_height( const tab_data *tab );
 
+#if defined(GODOT)
+        /// Publish the tabs, the current tab's rows and the selection.
+        void publish_to_godot();
+#endif
         void update_path_end();
         void handle_list_input( const std::string &action );
         std::optional<tripoint_rel_ms> get_selected_pos();

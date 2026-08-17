@@ -35,9 +35,9 @@ var _texts: Array = []
 
 func setup(host: Node) -> void:
 	_host = host
-	# Above every MapView tile layer. map_view.gd uses z_index = layer + 1, and
-	# there are fewer than 16 layers.
-	z_index = 32
+	# z is MapView's to set: it has to be above every tile but still under the UI
+	# panels, and only MapView knows where that window is. Claiming 64 here put
+	# combat text over open menus.
 	_cmds = PackedInt32Array()
 	_generation = -1
 	queue_redraw()

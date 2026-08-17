@@ -205,6 +205,35 @@ class AnimSnapshot
 
 AnimSnapshot &get_anim_snapshot();
 
+/**
+ * Run the game's draw callbacks and publish the frame they produced.
+ *
+ * This is the Godot build's replacement for game::draw, and deliberately not a
+ * repair of it. That function is eight statements, six of which are curses --
+ * werase and draw_ter on w_terrain, the async and blink curses passes,
+ * wnoutrefresh, and draw_panels for the sidebar. MapView owns the map and a
+ * Godot panel owns the sidebar, so all six are things this port is deleting.
+ * Calling game::draw to reach the other two would resurrect the curses draw
+ * path to get at callback iteration, and would leave the animation overlay's
+ * frame boundary hostage to a curses window's refresh.
+ *
+ * The two statements that matter are here instead, with no curses in reach:
+ * run the callbacks, commit what they published. Callbacks are how the game
+ * declares transient visual state -- an explosion, an aim line, a targeting
+ * cursor, combat text -- which is engine-agnostic; only the windows they used
+ * to write into were not.
+ *
+ * Game thread only. Cheap when nothing is animating: with no callbacks
+ * registered and nothing published, commit_frame returns without bumping the
+ * generation and the Godot side keeps skipping the overlay.
+ *
+ * Note for whoever removes the curses overlay (MENU-9): this must not be built
+ * on ui_manager. The animation loops currently reach game::draw through
+ * invalidate_main_ui_adaptor plus redraw_invalidated, and that stack goes away
+ * with the overlay. A direct call from the game thread survives it.
+ */
+void publish_transient_visuals();
+
 } // namespace godot_backend
 
 #endif // GODOT

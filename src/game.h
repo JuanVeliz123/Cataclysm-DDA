@@ -300,6 +300,12 @@ class game
          * due to resizing or other menus closing. The callback is disabled once all
          * shared pointers to the callback are deconstructed, and is removed afterwards. */
         void add_draw_callback( const shared_ptr_fast<draw_callback_t> &cb );
+        /* Run every live draw callback, pruning expired ones. Split out of
+         * game::draw so a backend that does not use the curses draw path can
+         * still pump the callbacks: they are how the game declares transient
+         * visual state, and that is engine-agnostic. Only the windows they
+         * write into are curses. */
+        void run_draw_callbacks();
     private:
         bool is_looking = false; // NOLINT(cata-serialize)
         std::vector<weak_ptr_fast<draw_callback_t>> draw_callbacks; // NOLINT(cata-serialize)

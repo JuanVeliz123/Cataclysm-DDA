@@ -2,7 +2,7 @@
 
 **Cataclysm: Dark Days Ahead** is a C++17 roguelike survival game (~half a million lines). Rendering is built on a layered design.
 
-**Migration Status (2026-08-14):** Architecture is **ADR-002 — native Godot present**, with the draw layer refined by **ADR-003** (Forward+, batched MultiMesh, GPU lighting tint). In-session map uses **tileset MapView** (C++ draw-list + UltimateCataclysm). TerminalView renders the curses overlay for un-migrated screens; the CPU framebuffer → `TextureRect` path is debug-only.
+**Migration Status (2026-08-17):** Architecture is **ADR-002 — native Godot present**, with the draw layer refined by **ADR-003** (Forward+, batched MultiMesh, GPU lighting) and replaced by **ADR-006 — the world as 3D geometry**, which is now the product path: the same C++ draw list, drawn as quads in a 3D scene inside the world's own viewport (**ADR-004**), with real lights, cast shadows and z-levels at real elevations. `MapView` (2D) stays as the fallback and as what the headless probe drives. TerminalView renders the curses overlay for un-migrated screens.
 
 ## 1. The curses abstraction (`catacurses`)
 
@@ -96,14 +96,23 @@ contains a platform `#ifdef`.
 | In-session command channel | **DONE** | `godot_game_commands.*`: Godot panels queue work that runs on the game thread at its input wait |
 | Inventory actions | **DONE (v1)** | wield / wear / drop by item uid. Eat/use/reload still open |
 | Remaining curses screens | **NEXT** | ~87 files open a blocking `uilist`; each needs a Godot Control to retire the overlay |
-| 2.5D / 3D MapView backend | LATER | Swap draw layer only |
+| Depth cues within the fixed angle (ADR-005) | **DONE** | Retraction fallback, contact shadows, depth ordering, z-levels below the avatar. Only parallax is left, and it waits on ADR-004 |
+| World in its own viewport (ADR-004) | **DONE** | 2026-08-17; `godot/scripts/world_viewport.gd`. Prerequisite for the 3D backend, and the boundary between world and UI |
+| 3D map backend (ADR-006) | **DONE — product path** | 2026-08-17; `map_view_3d.gd` + `map_tiles_3d.gdshader`, `USE_3D_MAP` on. Depth per sprite, ~12 batches against the 2D path's hundreds, real lights and cast shadows, levels below at real elevations. MapView stays as the fallback. `TILT_DEGREES` defaults to 0 until the glyphs and the animation overlay work under a tilted camera |
 | SDL shim cleanup (T5.1) | **DONE** | Dead SDL C stubs and the CPU raster modules removed |
 
 ## 5. Next Steps
 
 See [`docs/godot_migration/AGENT_HANDOFF.md`](godot_migration/AGENT_HANDOFF.md) and [`docs/GODOT_MIGRATION_TASKS.md`](GODOT_MIGRATION_TASKS.md).
 
-1. Inventory actions (wear/drop/use) + remaining overlays.
-2. MapView: character overlays, z-levels, smooth light texture.
-3. Weather / smoke as `GPUParticles2D`, and glow via `WorldEnvironment`.
-4. Optional: iso/mesh MapView backend.
+1. **Make the tilt defaultable** (`BACKLOG.md` 3D-1d): the fallback glyphs and the
+   animation overlay need to work under a tilted camera. Until then the stood-up world
+   costs combat text, which is why `TILT_DEGREES` is 0 while everything behind it is on.
+2. Inventory actions (wear/drop/use) + the remaining ImGui/curses screens (Part 2), which
+   is the migration's real critical path — the renderer is ahead of it now.
+3. Move the presentation grade out of the tile shader and onto the world viewport, now
+   that there is one — which is also what finally grades the smoke.
+4. VER-1: the tuning pass. The 3D backend added a dozen constants that no one has looked
+   at (`engine_light_gain`, `SUN_ENERGY`, `level_fade`, `LEVEL_DROP_TILES`, `ALPHA_SCISSOR`).
+5. Weather as 3D particles, volumetric light shafts (the objection to them was a flat
+   world's; walls cast shadows now), and the real vehicle-headlight tuning.

@@ -31,6 +31,49 @@ var _shot_craft := false
 var _craft_dispatched := false
 var _craft_found_at := 0
 var _craft_tries := 0
+var _talked := false
+var _dialogue_seen := 0
+var _shot_dialogue := false
+var _om_lines := 0
+var _surr_rows := 0
+
+## VER-0. Three features shipped computed-and-discarded, and two fixtures ran
+## against nothing, and every one of those runs exited 0. A harness that cannot
+## tell "verified" from "never ran" reports the same green for both, and green is
+## the answer nobody looks at twice.
+##
+## Two checks, both cheap. A stage that never executed proved nothing, and a
+## generation counter that never moved means the producer's output reached no
+## consumer -- the signature of the dead frame boundary. See
+## docs/godot_migration/AGENT_HANDOFF.md.
+var _stages := {}
+
+## Stages that must run in any session. A miss here is a failure, not a note:
+## it means the rest of the log is describing less than it appears to.
+const REQUIRED_STAGES := ["session", "panels", "map_view", "world_viewport",
+	"map_view_3d", "grab", "dialogue", "overmap_sidebar", "surroundings", "options",
+	"keybind", "crafting"]
+
+## Counters that must move in any session, because this fixture drives every one
+## of them itself.
+const REQUIRED_GENERATIONS := ["get_map_generation", "get_light_generation",
+	"popup_generation", "options_layout_generation", "keybind_generation",
+	"crafting_list_generation", "dialogue_generation", "surroundings_generation"]
+
+## Counters that depend on the world rolling the right way -- a uilist only
+## appears if the game decides to open one, and no NPC turned up. Reported so a
+## quiet run is legible, never failed on: a check that cries wolf gets ignored,
+## and then it is worth nothing when it is right.
+const OPTIONAL_GENERATIONS := ["uilist_generation", "textwin_generation",
+	"get_anim_generation", "get_overmap_generation"]
+
+## Stages that need the world to cooperate. Reported at shutdown so a run that
+## skipped one is legible, but never failed on -- this fixture cannot conjure an
+## NPC to talk to.
+const OPPORTUNISTIC_STAGES: Array[String] = []
+
+func _stage(name: String) -> void:
+	_stages[name] = true
 var _textwin_seen := 0
 var _picked_save := false
 ## Every distinct run of scrolling combat text seen at any point in the run.
@@ -111,7 +154,8 @@ func _ready() -> void:
 			"res://scripts/character_panel.gd", "res://scripts/game_menu_panel.gd",
 			"res://scripts/uilist_panel.gd", "res://scripts/popup_panel.gd",
 			"res://scripts/textwin_panel.gd", "res://scripts/options_panel.gd",
-			"res://scripts/keybind_panel.gd", "res://scripts/crafting_panel.gd"]:
+			"res://scripts/keybind_panel.gd", "res://scripts/crafting_panel.gd",
+			"res://scripts/dialogue_panel.gd", "res://scripts/surroundings_panel.gd"]:
 		var panel := Control.new()
 		panel.set_script(load(path))
 		add_child(panel)
@@ -137,6 +181,7 @@ func _exercise_panels() -> void:
 		if panel.has_method("refresh"):
 			panel.refresh()
 			panel.refresh()
+	_stage("panels")
 	print("[probe] panels refreshed: %d" % _panels.size())
 	await _shoot_solo(0, "sidebar")
 	await _shoot_solo(1, "inventory")
@@ -144,12 +189,27 @@ func _exercise_panels() -> void:
 	await _shoot_solo(3, "gamemenu")
 	# MapView asks for the tiles its viewport covers; check the request lands and
 	# the published extent follows it, rather than staying at the curses grid.
+	# Ordered by how much the world has to cooperate, quietest first. Each stage
+	# leaves the avatar somewhere less pristine than it found it -- the NPC walk
+	# wakes safe mode, a hostile conversation leaves prompts behind -- so a stage
+	# that needs a calm game goes before the ones that disturb it. Running the
+	# surroundings list last is how it came to be reported broken twice while
+	# being fine.
+	await _probe_surroundings()
+	await _probe_overmap_sidebar()
+	await _probe_grab_prompt()
+	_stage("grab")
+	await _summon_someone_to_talk_to()
 	_dump_sidebar_layout()
 	print("[map] extent before request = %s" % str(host.get_map_view_size()))
 	host.set_map_view_tiles(101, 61)
 	await get_tree().create_timer(0.6).timeout
 	print("[map] extent after request  = %s (want 101x61)" % str(host.get_map_view_size()))
+	await _probe_world_viewport()
 	_exercise_map_view()
+	# After the 2D backend, and against the same draw list: the two are meant to
+	# agree, and the comparison only means anything if both saw the same frame.
+	_probe_map_view_3d()
 	_dump_render_stats()
 	_dump_effects()
 	if _debug_overlay != null:
@@ -213,6 +273,7 @@ func _process(_delta: float) -> void:
 		_options_seen += 1
 		if _options_seen == 20 and not _shot_options:
 			_shot_options = true
+			_stage("options")
 			_dump_options()
 			await _shoot_solo(7, "options")
 		# The point of the round trip: ask for a step, then read the value the
@@ -241,6 +302,7 @@ func _process(_delta: float) -> void:
 		_keybind_seen += 1
 		if _keybind_seen == 20 and not _shot_keybind:
 			_shot_keybind = true
+			_stage("keybind")
 			_dump_keybinds()
 			await _shoot_solo(8, "keybinds")
 		# The add path is the one worth proving: the key has to travel out as a raw
@@ -278,6 +340,10 @@ func _process(_delta: float) -> void:
 		# it walks into an NPC the turn is spent on "What to do with X?" and the
 		# '&' is never acted on. Retry until the screen actually opens.
 		_craft_tries += 1
+		# Every fortieth try, clear anything blocking first -- same reason as the
+		# overmap: a prompt eats the key and the screen is blamed for not opening.
+		if _craft_tries % 40 == 20 and host.has_method("popup_active") and host.popup_active():
+			_press(KEY_ESCAPE)
 		if _craft_tries % 40 == 1:
 			print("[menu] crafting: pressing & (attempt %d)" % (1 + _craft_tries / 40))
 			_press_shifted(KEY_7, "&")
@@ -300,6 +366,7 @@ func _process(_delta: float) -> void:
 			else:
 				_shot_craft = true
 				_craft_found_at = _craft_seen
+				_stage("crafting")
 				_dump_crafting("populated category")
 				await _shoot_solo(9, "crafting")
 		# Move the cursor and confirm the detail pane follows it: the pane is
@@ -355,7 +422,18 @@ func _process(_delta: float) -> void:
 		# alone the game thread parks on it forever, every later stage silently
 		# does not run, and the probe still exits 0. Counted per menu rather than
 		# globally, so a long-lived menu the fixture *is* driving is not cut short.
-		var title := str((host.get_uilist_state() as Dictionary).get("title", ""))
+		var u: Dictionary = host.get_uilist_state()
+		var title := str(u.get("title", ""))
+		# An NPC menu is the only way this fixture can reach a conversation --
+		# nothing here can conjure an NPC, so dialogue coverage is opportunistic
+		# and reported rather than required.
+		if not _talked and title.findn("what to do with") >= 0:
+			for e in (u.get("entries", []) as Array):
+				if str(e.get("text", "")).findn("talk") >= 0:
+					_talked = true
+					print("[dlg] taking '%s' from '%s'" % [str(e.get("text", "")), title])
+					host.uilist_confirm(int(e.get("index", -1)))
+					break
 		if title != _uilist_title:
 			_uilist_title = title
 			_uilist_frames = 0
@@ -363,6 +441,25 @@ func _process(_delta: float) -> void:
 		if _uilist_frames == 120:
 			print("[uilist] cancelling unattended '%s'" % title)
 			host.uilist_cancel()
+	if host != null and host.has_method("dialogue_active") and host.dialogue_active():
+		if _panels.size() > 10:
+			_panels[10].refresh()
+		_dialogue_seen += 1
+		if _dialogue_seen == 15 and not _shot_dialogue:
+			_shot_dialogue = true
+			_stage("dialogue")
+			_dump_dialogue()
+			await _shoot_solo(10, "dialogue")
+		# Move the cursor, then leave. Confirming a real response would take the
+		# conversation somewhere unpredictable and could start a trade or a
+		# fight, which the rest of the run then has to survive.
+		if _dialogue_seen == 30:
+			host.dialogue_action("DOWN")
+		if _dialogue_seen == 45:
+			print("[dlg] after DOWN: selected=%d" % int(
+				(host.get_dialogue_state() as Dictionary).get("selected", -1)))
+		if _dialogue_seen == 60:
+			host.dialogue_action("QUIT")
 	if host != null and host.has_method("get_anim_generation"):
 		var ag: int = host.get_anim_generation()
 		if ag > _anim_gen_max:
@@ -389,6 +486,7 @@ func _process(_delta: float) -> void:
 			_waited += 1
 			var hud: Dictionary = host.get_hud_state()
 			if host.is_session_active() and str(hud.get("name", "")) != "":
+				_stage("session")
 				print("[probe] session active after %d frames, name=%s"
 					% [_waited, str(hud.get("name", ""))])
 				_exercise_panels()
@@ -470,6 +568,227 @@ func _dump_options() -> void:
 					str(r.get("text", "")), id, str(_options_probe["before"])])
 				return
 
+## Open the surroundings list and read it back. 'v' is the binding; the list is
+## whatever happens to be nearby, so the check is that it opened and published
+## tabs, not that it found any particular thing.
+## Press a key that opens a screen, then *wait* for it rather than pressing
+## again. These keys toggle: pressing six times in a row opens and closes the
+## screen three times, and whether the check lands on an open one is luck. Both
+## the overmap and the surroundings list were reported as never opening for
+## exactly this reason -- they had opened, and been closed again by the retry.
+func _open_screen(key: int, active_probe: String, label: String) -> bool:
+	for attempt in 3:
+		_press(key)
+		# Generous: the game thread can be seconds behind under load, and being
+		# slow to notice costs nothing next to pressing the key again.
+		for tick in 24:
+			await get_tree().create_timer(0.5).timeout
+			if host.has_method(active_probe) and host.call(active_probe):
+				return true
+		await _clear_blocking_popup()
+	print("[probe] %s did not open after 3 presses" % label)
+	return false
+
+func _probe_surroundings() -> void:
+	# Entry and exit are traced because this chain runs detached: _process calls
+	# _exercise_panels() without awaiting it, so a stage that stalls inside an
+	# await produces no output at all and is indistinguishable from one that was
+	# never reached. Four runs were spent not knowing which.
+	print("[surr] stage entered")
+	if not host.has_method("get_surroundings_state"):
+		print("[surr] SKIPPED: no get_surroundings_state binding")
+		return
+	await _wait_until_idle()
+	print("[surr] screen stack clear")
+	await _clear_blocking_popup()
+	print("[surr] popups clear; commands_ready=%s" % (
+		str(host.commands_ready()) if host.has_method("commands_ready") else "?"))
+	# Opened by keypress, and only by keypress. There was a debug command that
+	# invoked list_surroundings() directly, and it wedged the game: a posted
+	# command runs inside the input wait, so opening a modal screen from one
+	# parks the game thread in that screen's loop, and nothing in a fixture run
+	# ever dismisses it. The clock stops and every later stage fails.
+	if not await _open_screen(KEY_V, "surroundings_active", "the surroundings list"):
+		print("[surr] FAILED: the surroundings list never opened")
+		return
+	if _panels.size() > 11:
+		_panels[11].refresh()
+	var d: Dictionary = host.get_surroundings_state()
+	var tabs: Array = d.get("tabs", [])
+	var rows: Array = d.get("rows", [])
+	_surr_rows = rows.size()
+	print("[surr] tabs=%d rows=%d selected=%d generation=%d" % [
+		tabs.size(), rows.size(), int(d.get("selected", -1)),
+		int(host.surroundings_generation())])
+	for t in tabs:
+		print("[surr]   tab '%s' (%d)" % [str(t.get("title", "")), int(t.get("count", 0))])
+	for i in mini(4, rows.size()):
+		print("[surr]   %-40s %s" % [str(rows[i].get("text", "")).substr(0, 40),
+			str(rows[i].get("distance", ""))])
+	# Switching tab is the round trip worth proving: the panel sends NEXT_TAB and
+	# the published tab index has to come back changed.
+	var before := int(d.get("tab", -1))
+	host.surroundings_action("NEXT_TAB")
+	await get_tree().create_timer(1.0).timeout
+	var after := int((host.get_surroundings_state() as Dictionary).get("tab", -1))
+	print("[surr] NEXT_TAB: tab %d -> %d (%s)" % [before, after,
+		"changed" if after != before else "UNCHANGED"])
+	if tabs.size() > 0:
+		_stage("surroundings")
+	host.surroundings_action("QUIT")
+	await get_tree().create_timer(1.0).timeout
+
+## Open the overmap and read the sidebar the panel is now responsible for.
+##
+## The map itself has been a Godot node for a while; the sidebar beside it was
+## still an ImGui window over the top. Reading it back proves the recording pass
+## produced the same text the terminal drew, rather than an empty panel next to a
+## working map -- which is exactly what "renders fine" looked like last time.
+func _probe_overmap_sidebar() -> void:
+	if not host.has_method("get_overmap_sidebar"):
+		return
+	# Two ways the m gets eaten, and both were mistaken for the sidebar failing.
+	# The conversation started by the previous stage is still up and owns the
+	# keyboard, and stepping around wakes safe mode, whose prompt swallows the
+	# next key. Wait out the first, clear the second.
+	await _wait_until_idle()
+	await _clear_blocking_popup()
+	if not await _open_screen(KEY_M, "overmap_active", "the overmap"):
+		print("[omap] FAILED: the overmap never opened")
+		return
+	var d: Dictionary = host.get_overmap_sidebar()
+	var lines: Array = d.get("lines", [])
+	_om_lines = lines.size()
+	var headers := 0
+	for l in lines:
+		if bool(l.get("header", false)):
+			headers += 1
+	print("[omap] sidebar lines=%d headers=%d generation=%d" % [
+		lines.size(), headers, int(host.overmap_sidebar_generation())])
+	for i in mini(6, lines.size()):
+		print("[omap]   %s%s%s" % [
+			"# " if bool(lines[i].get("header", false)) else "  ",
+			"+ " if bool(lines[i].get("join", false)) else "",
+			str(lines[i].get("text", "")).substr(0, 80)])
+	if lines.is_empty():
+		print("[omap] FAILED: the overmap is open but the sidebar published nothing")
+	else:
+		_stage("overmap_sidebar")
+	# Confirm it actually closed rather than assuming one Escape did it. The next
+	# stage presses a key that means something different on this screen.
+	for attempt in 6:
+		_press(KEY_ESCAPE)
+		await get_tree().create_timer(0.8).timeout
+		if not (host.has_method("overmap_active") and host.overmap_active()):
+			return
+	print("[omap] the overmap would not close; later stages will see its keymap")
+
+## Put an NPC next to the avatar and step into them, which opens the interaction
+## menu; the uilist fixture then takes its Talk entry. Without this, dialogue
+## coverage depends on the world happening to offer somebody, which is a coin
+## flip rather than a check -- and MENU-10 shipped unverified because of it.
+func _summon_someone_to_talk_to() -> void:
+	if not host.has_method("debug_spawn_npc"):
+		return
+	var err := str(host.debug_spawn_npc())
+	print("[dlg] spawn npc = %s" % ("<accepted>" if err == "" else err))
+	await get_tree().create_timer(1.5).timeout
+	# Step into each neighbour in turn; whichever one they are standing on opens
+	# the menu, and the others are just a step and a step back.
+	# Stepping into them may open the interaction menu, or go straight into
+	# conversation -- both count, and only one of them is a uilist. Checking for
+	# the menu alone reported failure on a run where the conversation had already
+	# started, which is a fixture crying wolf: the thing VER-0 exists to avoid.
+	# Three passes, not one: the spawn prefers an adjacent tile but widens when
+	# the avatar is walled in, and one step in each direction only reaches the
+	# adjacent case. A sweep that gives up too early reports "met nobody" for a
+	# spawn that worked.
+	for pass_no in 3:
+		for key in [KEY_KP_6, KEY_KP_4, KEY_KP_8, KEY_KP_2, KEY_KP_9, KEY_KP_7,
+				KEY_KP_3, KEY_KP_1]:
+			if _reached_an_npc():
+				return
+			_press(key)
+			await get_tree().create_timer(0.4).timeout
+	if not _reached_an_npc():
+		# The spawn reported success, so somebody exists; the walk did not get to
+		# them. Say that, rather than blaming the spawn for a failure upstream of
+		# where it actually happened.
+		print("[dlg] spawned, but 24 steps did not reach them")
+
+## Wait for the screens other stages opened to close before pressing anything.
+## A key sent while a Godot panel owns the keyboard goes to the panel, and the
+## screen that never opened gets the blame.
+func _wait_until_idle() -> void:
+	for i in 60:
+		var busy := false
+		# The overmap belongs on this list as much as the panels do: it is a
+		# screen with its own input context, and a key sent while it is up is
+		# interpreted by it. Leaving it out is why the surroundings list appeared
+		# not to open -- the v went to the map.
+		for probe in ["dialogue_active", "uilist_active", "crafting_active",
+				"options_active", "keybind_active", "overmap_active",
+				"surroundings_active"]:
+			if host.has_method(probe) and host.call(probe):
+				busy = true
+				break
+		if not busy:
+			return
+		await get_tree().create_timer(0.5).timeout
+	print("[probe] gave up waiting for the screen stack to clear")
+
+## Escape whatever is on screen so the next keypress reaches the game. Used
+## before opening a screen: a pending prompt silently eats the key, and the
+## screen is then blamed for never appearing.
+func _clear_blocking_popup() -> void:
+	for i in 4:
+		if not (host.has_method("popup_active") and host.popup_active()):
+			return
+		_press(KEY_ESCAPE)
+		await get_tree().create_timer(0.4).timeout
+
+func _reached_an_npc() -> bool:
+	if host.has_method("dialogue_active") and host.dialogue_active():
+		return true
+	return host.has_method("uilist_active") and host.uilist_active()
+
+## The reported bug: "Grab where?" renders correctly but never goes away.
+##
+## The first version of this checked host.popup_active() and reported DISMISSED,
+## because the *game* does dismiss correctly -- it was the panel that never
+## cleared. Checking the producer and calling it proof is the mistake this
+## migration keeps making, so this drives the panel exactly as host.gd does and
+## asserts on what is actually on screen.
+func _probe_grab_prompt() -> void:
+	var panel: Control = _panels[5] if _panels.size() > 5 else null
+	if panel == null:
+		return
+	_press_shifted(KEY_G, "G")
+	await get_tree().create_timer(1.0).timeout
+	_pump_popup_panel(panel)
+	print("[grab] after G: game=%s panel=%s notice='%s'" % [
+		str(host.popup_active()), str(panel.showing()),
+		str((host.get_popup_state() as Dictionary).get("notice", ""))])
+	if not panel.showing():
+		print("[grab] INCONCLUSIVE: the prompt never reached the panel")
+		return
+	_press(KEY_ESCAPE)
+	await get_tree().create_timer(1.0).timeout
+	_pump_popup_panel(panel)
+	var game_clear := not bool(host.popup_active())
+	var panel_clear := not bool(panel.showing())
+	print("[grab] after ESC: game=%s panel=%s -> %s" % [
+		"clear" if game_clear else "STUCK", "clear" if panel_clear else "STUCK",
+		"DISMISSED" if (game_clear and panel_clear)
+		else ("PANEL STUCK (game moved on, ribbon left behind)" if game_clear
+			else "GAME STUCK (key never arrived)")])
+
+## Mirror host.gd's _update_popup_panel, including the refresh on the way down.
+## Refreshing only while active is exactly the bug this catches.
+func _pump_popup_panel(panel: Control) -> void:
+	if host.popup_active() or panel.showing():
+		panel.refresh()
+
 func _dump_crafting(tag: String = "") -> void:
 	var d: Dictionary = host.get_crafting_list()
 	var rows: Array = d.get("rows", [])
@@ -494,6 +813,19 @@ func _dump_crafting_detail(tag: String) -> void:
 	for i in mini(5, lines.size()):
 		print("[craft]   %s%s" % ["# " if bool(lines[i].get("header", false)) else "  ",
 			str(lines[i].get("text", "")).substr(0, 90)])
+
+func _dump_dialogue() -> void:
+	var d: Dictionary = host.get_dialogue_state()
+	var history: Array = d.get("history", [])
+	var responses: Array = d.get("responses", [])
+	print("[dlg] header='%s' history=%d responses=%d selected=%d" % [
+		str(d.get("header", "")), history.size(), responses.size(),
+		int(d.get("selected", -1))])
+	for i in mini(3, history.size()):
+		print("[dlg]   said: %s" % str(history[i].get("text", "")).substr(0, 90))
+	for i in mini(4, responses.size()):
+		print("[dlg]   [%s] %s" % [str(responses[i].get("hotkey", "")),
+			str(responses[i].get("text", "")).substr(0, 80)])
 
 func _dump_keybinds() -> void:
 	var d: Dictionary = host.get_keybind_state()
@@ -620,6 +952,7 @@ func _shoot_solo(index: int, tag: String) -> void:
 func _exercise_map_view() -> void:
 	if _map_view == null:
 		return
+	_stage("map_view")
 	_map_view.setup(host)
 	_map_view.refresh()
 	_map_view.refresh()
@@ -633,6 +966,11 @@ func _exercise_map_view() -> void:
 		elif str(child.name).begins_with("GlyphLayer"):
 			glyph_layers += 1
 	print("[map] batches=%d instances=%d glyph_layers=%d" % [batches, instances, glyph_layers])
+	_check_z_budget()
+	var shadows = _map_view.get_node_or_null("ShadowLayer")
+	print("[map] contact shadows = %s (strength %.2f)" % [
+		str(shadows._blobs.size()) if shadows != null else "no layer",
+		float(shadows._strength) if shadows != null else 0.0])
 	await _maybe_screenshot("map")
 	# A second frame a beat later. Nothing in the game advances in between, so
 	# every pixel that differs between the two is something the renderer moved
@@ -641,6 +979,319 @@ func _exercise_map_view() -> void:
 	await get_tree().create_timer(0.45).timeout
 	await _maybe_screenshot("map2")
 	_dump_light_pass()
+	if host.has_method("get_conditions"):
+		print("[grade] conditions = %s" % str(host.get_conditions()))
+	if _map_view != null:
+		var env = _map_view.get_node_or_null("WorldEnvironment")
+		# Reports the *attached* environment, which is the thing that decides
+		# whether the glow is running -- WorldEnvironment has no `visible`.
+		print("[grade] world environment: %s glow=%s threshold=%s" % [
+			"attached" if (env != null and env.environment != null) else "detached",
+			str(env.environment.glow_enabled) if env != null else "-",
+			str(env.environment.glow_hdr_threshold) if env != null else "-"])
+
+## The world's own viewport (3D-0 / ADR-004): is the boundary actually there, is
+## it the size of the drawable area, and does it disappear with the world?
+##
+## Run against a throwaway world rather than against the probe's MapView. What is
+## being checked is the container -- its sizing, its visibility mirror, and that
+## it takes no input -- and reparenting the live MapView mid-run would change the
+## viewport every later stage measures itself against.
+##
+## The visibility mirror is the part worth a check. Half a dozen places in
+## host.gd set `map_view.visible`, none of them know this container exists, and a
+## container left visible over a hidden world composites the last frame the world
+## drew: the main menu would open over a still of the map.
+func _probe_world_viewport() -> void:
+	var rect := TextureRect.new()
+	rect.name = "WorldViewportProbe"
+	rect.set_script(load("res://scripts/world_viewport.gd"))
+	add_child(rect)
+	var world := Node2D.new()
+	world.name = "ProbeWorld"
+	add_child(world)
+	rect.setup(world)
+	var sub: SubViewport = rect.world_viewport()
+	var logical := get_viewport().get_visible_rect().size
+	const RESERVE := 200.0
+	rect.set_reserved_right(RESERVE)
+	await get_tree().process_frame
+	var want := Vector2(logical.x - RESERVE, logical.y)
+	print("[world] inside the viewport = %s" % str(sub != null and world.get_parent() == sub))
+	print("[world] rect %s, want %s (viewport %s less %d reserved)" % [
+		str(rect.size), str(want), str(logical), int(RESERVE)])
+	if not rect.size.is_equal_approx(want):
+		push_error("world viewport is %s, drawable area is %s" % [str(rect.size), str(want)])
+	# The two sizes that must differ when the canvas is stretched, and the reason
+	# this check exists: the render target is in device pixels and the 2D override
+	# is in logical units. Getting that backwards renders the world at the
+	# stretch's base resolution and lets it be upscaled -- which looks like
+	# nothing in the log and like a softer game on screen.
+	if sub != null:
+		var win := get_window()
+		var expect := Vector2(want.x * float(win.size.x) / logical.x,
+			want.y * float(win.size.y) / logical.y)
+		print("[world] render target %s (device, expect ~%s), 2d override %s (logical)" % [
+			str(sub.size), str(expect), str(sub.size_2d_override)])
+		if Vector2(sub.size).distance_to(expect) > 2.0:
+			push_error("world render target %s is not the drawable area in device pixels (%s)"
+				% [str(sub.size), str(expect)])
+		if sub.size_2d_override != Vector2i(want):
+			push_error("world 2d override %s is not the drawable area in logical units (%s)"
+				% [str(sub.size_2d_override), str(Vector2i(want))])
+	# Takes no input, which is what keeps the host's existing mouse routing -- and
+	# the cell conversion that depends on window coordinates -- untouched.
+	print("[world] mouse_filter = %d (ignore=%d), hdr=%s, transparent=%s" % [
+		rect.mouse_filter, Control.MOUSE_FILTER_IGNORE,
+		str(sub.use_hdr_2d) if sub != null and "use_hdr_2d" in sub else "n/a",
+		str(sub.transparent_bg) if sub != null else "-"])
+	world.visible = false
+	await get_tree().process_frame
+	print("[world] hidden world hides the composite = %s" % str(not rect.visible))
+	if rect.visible:
+		push_error("world viewport still composited with the world hidden")
+	_stage("world_viewport")
+	world.queue_free()
+	rect.queue_free()
+
+## The 3D backend (3D-1), built and refreshed against the same draw list.
+##
+## What can be checked without a GPU is narrow but it is the part most likely to be
+## silently wrong: that the batches exist at all, that they hold as many instances
+## as the draw list has commands, that they are stacked along z in the order
+## `depth_rank` computes -- the flat world's whole depth model -- and that the camera
+## is orthographic and pointing straight down, which is what makes the projection
+## pixel-faithful.
+##
+## What it cannot answer is whether it *looks* the same. That is the milestone, and
+## it needs `host.gd`'s USE_3D_MAP on, a real driver, and two screenshots.
+func _probe_map_view_3d() -> void:
+	# What C++ is publishing right now, to be put back at the end: this stage drives a
+	# view of its own and the view asks for the extent that fits it, which would leave
+	# the game publishing a different map to every stage that runs after this one.
+	var extent_before: Vector2i = host.get_map_view_size()
+
+	var sub := SubViewport.new()
+	sub.name = "World3DProbe"
+	sub.size = Vector2i(640, 480)
+	sub.own_world_3d = true
+	add_child(sub)
+	var view := Node3D.new()
+	view.name = "MapView3D"
+	view.set_script(load("res://scripts/map_view_3d.gd"))
+	# Hidden first, shown after setup, because that is the order host.gd uses -- the
+	# world is built before a session exists and revealed when one starts. It matters:
+	# `Camera3D.make_current()` does nothing while its subtree is outside a World3D,
+	# and a Node3D subtree is only inside one while visible. Getting this wrong renders
+	# the default clear colour and nothing else, which is what a flat grey map was.
+	view.visible = false
+	sub.add_child(view)
+	# Synchronous from here on, deliberately. This stage used to `await` a frame in
+	# the middle, and a GDScript runtime error inside a coroutine never resolves the
+	# await -- so one bad line in here silently killed every fixture that
+	# _exercise_panels dispatches after it, options and crafting included. A stage
+	# that can fail must not be able to take its caller with it.
+	print("[map3d] building (hidden, as host.gd does)")
+	view.setup(host)
+	print("[map3d] setup returned")
+	view.refresh()
+	view.visible = true
+	view.refresh()
+	print("[map3d] two refreshes returned")
+
+	var stats: Dictionary = view.debug_stats()
+	print("[map3d] batches=%d instances=%d depths=%d span=%.2f scissor=%.2f zoom=%.2f" % [
+		int(stats.get("batches", 0)), int(stats.get("instances", 0)),
+		int(stats.get("depths", 0)), float(stats.get("depth_span", 0.0)),
+		float(stats.get("scissor", 0.0)), float(stats.get("zoom", 0.0))])
+	# The light channel (3D-2). Reported, never failed on: whether the game is casting
+	# any light at all depends on the time of day and on there being a lamp in view,
+	# and a check that reddens at noon gets ignored. What it does catch is the shape --
+	# a stride that does not divide, or a channel the library does not have.
+	if host.has_method("get_light_sources"):
+		var lights: PackedFloat32Array = host.get_light_sources()
+		var stride: int = view.LIGHT_STRIDE
+		print("[map3d] light sources published = %d (%d floats, stride %d)" % [
+			int(lights.size() / stride), lights.size(), stride])
+		if lights.size() % stride != 0:
+			push_error("light channel is %d floats, which is not a multiple of the "
+				% lights.size() + "stride %d" % stride)
+	else:
+		push_error("the library has no get_light_sources; rebuild the GDExtension")
+	print("[map3d] camera size=%.1f at %s, light pass=%s" % [
+		float(stats.get("camera_size", 0.0)), str(stats.get("camera_position", "-")),
+		str(stats.get("light_pass", false))])
+
+	# Every command the draw list carries has to become an instance somewhere. A
+	# batch count on its own proves only that the loop ran.
+	var cmds: PackedInt32Array = host.get_map_draw_list()
+	var want_instances := int(cmds.size() / 10)
+	var got_instances := int(stats.get("instances", 0))
+	print("[map3d] draw list holds %d commands, batches hold %d instances" % [
+		want_instances, got_instances])
+	if want_instances > 0 and got_instances != want_instances:
+		push_error("3D backend built %d instances for %d commands" % [
+			got_instances, want_instances])
+
+	# The batching claim, which is the point of 3D-1b and is a number rather than an
+	# opinion: with the depth on each sprite instead of on each batch, the key is
+	# down to the shader uniforms and the count should be about a dozen against the
+	# 2D backend's hundreds. Reported both ways round, because "few batches" is only
+	# good news if the depths are still there.
+	var batches := int(stats.get("batches", 0))
+	var depths := int(stats.get("depths", 0))
+	print("[map3d] %d batches carrying %d distinct depths (2D backend needs one batch "
+		% [batches, depths] + "per depth; this needs none)")
+	if batches > 0 and depths < batches:
+		push_error("3D backend has %d batches but only %d depths, so sprites that "
+			% [batches, depths] + "should interleave cannot")
+	# The four layers of 3D-1c, each of which exists for a different reason and any
+	# of which could be silently missing: the shadows are geometry, the particles are
+	# a ported node, and the glyphs and the overlay live on a canvas whose transform
+	# has to track the camera.
+	var shadows: MultiMeshInstance3D = view.get_node_or_null("ContactShadows")
+	var fields := view.get_node_or_null("FieldParticles")
+	var canvas: CanvasLayer = view.get_node_or_null("WorldCanvas")
+	var overlay := canvas.get_node_or_null("AnimOverlay") if canvas != null else null
+	print("[map3d] shadows=%s blobs=%d, particles=%s emitting=%d, canvas=%s overlay=%s" % [
+		str(shadows != null), shadows.multimesh.instance_count if shadows != null else -1,
+		str(fields != null), fields.active_emitters() if fields != null else -1,
+		str(canvas != null), str(overlay != null)])
+	if shadows == null or fields == null or canvas == null or overlay == null:
+		push_error("3D backend is missing one of the 3D-1c layers")
+	else:
+		# The canvas has to be scaled by the same zoom the camera is showing, or the
+		# glyphs and the overlay are drawn at a different size from the world they
+		# annotate. Zoomed first, deliberately: at the default zoom of 1.0 an identity
+		# transform passes this check while proving nothing, which is the shape of
+		# test that reports green for code that never ran.
+		view.zoom_step(1)
+		var zoomed: Dictionary = view.debug_stats()
+		var canvas_zoom := canvas.transform.get_scale().x
+		var camera_zoom := float(zoomed.get("zoom", 0.0))
+		print("[map3d] after one zoom step: canvas scale=%.3f, camera zoom=%.3f" % [
+			canvas_zoom, camera_zoom])
+		if absf(canvas_zoom - camera_zoom) > 0.01:
+			push_error("3D backend's canvas is scaled %.3f against a camera zoom of "
+				% canvas_zoom + "%.3f" % camera_zoom)
+	var cam: Camera3D = view.get_node_or_null("MapCamera")
+	if cam != null:
+		var ortho := cam.projection == Camera3D.PROJECTION_ORTHOGONAL
+		var flat := cam.rotation.is_equal_approx(Vector3.ZERO)
+		print("[map3d] camera orthogonal=%s, unrotated=%s (tilt is 3D-3, not now)" % [
+			str(ortho), str(flat)])
+		if not ortho or not flat:
+			push_error("3D backend camera is not a flat orthographic view")
+		# The whole of what a viewport needs to render 3D at all, checked after the
+		# hide-then-show above because that is the sequence that breaks it.
+		#
+		# Asked of the viewport, not of the camera: `make_current()` sets the camera's
+		# own flag before it early-returns for being outside a World3D, so
+		# `cam.is_current()` answers true for a camera the viewport never heard of.
+		# The flag is printed beside it precisely so the two can be seen to disagree.
+		var active := sub.get_camera_3d() == cam
+		print("[map3d] viewport's camera is ours=%s (camera's own flag=%s, world 3d=%s)"
+			% [str(active), str(cam.is_current()), str(sub.world_3d != null)])
+		if not active:
+			push_error("3D backend's camera is not the viewport's, so it renders the "
+				+ "clear colour and nothing else -- this is the grey map")
+	else:
+		push_error("3D backend built no camera")
+	# The tilt's geometry is not checked here. It has a gate of its own --
+	# res://scenes/geometry_check.tscn -- which needs neither this fixture nor the
+	# GDExtension, and an inline copy would need the camera and the placement driven
+	# together to mean anything. The first attempt at one here injected the
+	# trigonometry without moving the camera and would have compared a stood-up sprite
+	# against a flat view.
+	print("[map3d] tilt = %.1f degrees (geometry_check.tscn is what verifies it)"
+		% float(stats.get("tilt", 0.0)))
+	_stage("map_view_3d")
+	sub.queue_free()
+	# Put the extent back, so the fixtures after this one measure the map the probe
+	# asked for rather than the one this stage's viewport happened to fit. Requested
+	# without waiting for it to land: the key-drive fixtures run concurrently in
+	# _process, and every second this stage spends waiting is a second of theirs spent
+	# somewhere the world moved on.
+	if extent_before.x > 0 and extent_before.y > 0:
+		host.set_map_view_tiles(extent_before.x, extent_before.y)
+		print("[map3d] extent %s requested back (this stage fits a 640x480 view)"
+			% str(extent_before))
+
+## Nothing MapView owns may reach the z the host's UI panels start at, or the
+## map draws over open menus -- which it did, with tile batches on 43, particles
+## on 19 and the animation overlay on 64 against a minimap panel on 8.
+##
+## Still asserted with the world in its own viewport, where a stray z can no
+## longer reach a panel: MapView must keep working parented to an ordinary
+## canvas, which is exactly how this probe drives it.
+##
+## Worth asserting rather than remembering because the failure is invisible from
+## inside the map: every screenshot of the world looks right, and the damage only
+## shows when something else is on screen. A count of children is no use here --
+## the number that decides the behaviour is the maximum, so report that.
+func _check_z_budget() -> void:
+	if _map_view == null:
+		return
+	var worst := -9999
+	var worst_name := "-"
+	for child in _map_view.get_children():
+		if not (child is CanvasItem):
+			continue
+		# z_as_relative is the default, so a child's effective z is MapView's plus
+		# its own. Reading the effective value is the point: a child that looks
+		# safe on its own is not safe if the parent is lifted.
+		var eff: int = child.z_index + (_map_view.z_index if child.z_as_relative else 0)
+		if eff > worst:
+			worst = eff
+			worst_name = str(child.name)
+	var floor_z: int = _map_view.Z_UI_FLOOR
+	var ok := worst < floor_z
+	print("[map] z budget: max=%d (%s) ui_floor=%d -> %s" % [
+		worst, worst_name, floor_z, "ok" if ok else "OVERLAPS UI"])
+	if not ok:
+		push_error("map z %d on %s reaches the UI band at %d" % [
+			worst, worst_name, floor_z])
+	_check_depth_order()
+
+## The standing content must be seated in row order, because that ordering is
+## the whole of the 2.5D depth cue (ADR-005 item 3): it is what makes a tree one
+## row in front of a zombie cover it and the same tree one row behind it not.
+##
+## Checked against the child order actually in the tree rather than against the
+## rank function, because the rank function being right is not the claim -- the
+## claim is that the nodes ended up in that order, and the seating pass is what
+## can drop one. A batch left out of the pass sorts nowhere in particular and
+## the map still looks plausible in a screenshot.
+func _check_depth_order() -> void:
+	if _map_view == null:
+		return
+	var rows: Array[int] = []
+	var flat_after_tall := 0
+	var seen_tall := false
+	for child in _map_view.get_children():
+		var parts := str(child.name).split("_")
+		# TileBatch_layer_atlas_sway_palette_tall_row
+		if parts.size() != 7 or parts[0] != "TileBatch":
+			continue
+		if int(parts[5]) == 0:
+			if seen_tall:
+				flat_after_tall += 1
+			continue
+		seen_tall = true
+		rows.append(int(parts[6]))
+	var monotonic := true
+	for i in range(1, rows.size()):
+		if rows[i] < rows[i - 1]:
+			monotonic = false
+	print("[map] depth order: %d standing batches, rows %s..%s, monotonic=%s, flat_after_tall=%d" % [
+		rows.size(),
+		str(rows[0]) if not rows.is_empty() else "-",
+		str(rows[-1]) if not rows.is_empty() else "-",
+		"yes" if monotonic else "NO", flat_after_tall])
+	if not monotonic:
+		push_error("standing batches are not seated in row order: %s" % str(rows))
+	if flat_after_tall > 0:
+		push_error("%d flat batches seated above standing content" % flat_after_tall)
 
 ## The light pass (SP-3, SP-4). Two things can go wrong silently here: the
 ## texture never gets built, or it gets built uniform -- and a uniform light
@@ -893,16 +1544,32 @@ func _dump_effects() -> void:
 	if host.has_method("describe_sprite"):
 		# The grass pair is the regression check for the tearing bug: t_grass is
 		# a 32x32 ground cell and must not shear, t_grass_tall is 32x64 and may.
-		for probe in [["t_grass", "terrain"], ["t_grass_tall", "terrain"],
+		# The vehicle rows are the regression check for the grey-box bug: a part
+		# with a variant must resolve exactly, not fall back. vp_frame with
+		# "horizontal_2_front" should walk down to the longest sprite Ultica has.
+		# Ultica's 44 "_transparent" sprites turn out to all be shell casings,
+		# so the occlusion-transparency swap has no targets in this tileset and
+		# "transparent: 0" above is the correct reading, not a failure. Kept as a
+		# probe so that a tileset which *does* ship them shows up as a change.
+		for probe in [["t_tree", "terrain"],
+				["vp_frame", "vehicle_part", "horizontal_2_front"],
+				["vp_frame", "vehicle_part", "cover"],
+				["vp_aisle", "vehicle_part", "horizontal"],
+				["vp_frame", "vehicle_part", "no_such_variant"],
+				["t_grass", "terrain"], ["t_grass_tall", "terrain"],
 				["t_shrub", "terrain"], ["t_tree_young", "terrain"],
 				["t_tree", "terrain"], ["t_wall", "terrain"],
 				["mon_zombie_dusted", "monster"], ["mon_zombie_fungalize", "monster"],
 				["mon_zombie", "monster"], ["mon_totally_made_up", "monster"]]:
-			var d: Dictionary = host.describe_sprite(probe[0], probe[1])
-			print("[fx] %-18s -> %-18s %-11s palette=%s veg=%-5s overhangs=%-5s sway=%s" % [
-				probe[0], str(d.get("resolved", "")), str(d.get("level_name", "")),
-				str(d.get("palette_row", 0)), str(d.get("vegetation", false)),
-				str(d.get("overhangs_cell", false)), str(d.get("sways", false))])
+			var d: Dictionary = host.describe_sprite(probe[0], probe[1],
+				probe[2] if probe.size() > 2 else "")
+			var matched := str(d.get("matched", ""))
+			print("[fx] %-14s%-22s -> %-30s %-11s palette=%s sway=%s" % [
+				probe[0],
+				("+" + str(probe[2])) if probe.size() > 2 else "",
+				matched if matched != "" else "<none>",
+				str(d.get("level_name", "")),
+				str(d.get("palette_row", 0)), str(d.get("sways", false))])
 
 ## Shader source is not GDScript: nothing else in this harness would notice a
 ## typo in it. Loading the resource parses the source, and a shader that failed
@@ -931,6 +1598,20 @@ func _dump_render_stats() -> void:
 		str(st.get("tileset", "")), str(st.get("atlases", 0)), str(st.get("tile_size", "")),
 		str(st.get("view_size", "")), str(st.get("commands", 0)), str(st.get("glyphs", 0)),
 		str(st.get("missing_ids", 0))])
+	# Three mechanisms, and which one is carrying the load says what the tileset
+	# can do: retracted/transparent need art that declares itself, faded is the
+	# renderer-side fallback for the tilesets that do not. All zero in an
+	# interior with nothing tall standing between the avatar and the camera.
+	print("[render] occlusion: %s retracted, %s swapped to _transparent, %s faded of %s tall"
+		% [str(st.get("retracted", 0)), str(st.get("transparent", 0)),
+			str(st.get("faded", 0)), str(st.get("tall_candidates", 0))])
+	# ADR-005 item 1. The ADR asked for this number before budgeting for
+	# z-levels and it is cheaper to keep printing it than to measure it
+	# again: open_columns is how many view columns had no floor, so a run
+	# that reports zero has not exercised the multi-level path at all.
+	print("[render] z-levels: %s open columns, %s deep, %s commands below"
+		% [str(st.get("open_columns", 0)), str(st.get("deepest_z_below", 0)),
+			str(st.get("below_commands", 0))])
 	print("[render] by_fallback=%s" % str(st.get("by_fallback", {})))
 	print("[render] by_layer=%s" % str(st.get("by_layer", [])))
 	var cov: Array = host.get_sprite_coverage(10)
@@ -940,7 +1621,49 @@ func _dump_render_stats() -> void:
 			str(row.get("category", "")), str(row.get("level_name", "")),
 			str(row.get("hits", 0))])
 
+## VER-0. Report what this run actually proved, and fail if it proved less than
+## it looks like it did.
+func _report_coverage() -> int:
+	var missing: Array[String] = []
+	for name in REQUIRED_STAGES:
+		if not _stages.has(name):
+			missing.append(name)
+	var dead: Array[String] = []
+	for getter in REQUIRED_GENERATIONS:
+		if host.has_method(getter) and int(host.call(getter)) == 0:
+			dead.append(getter)
+
+	print("[ver] stages run: %d/%d" % [
+		REQUIRED_STAGES.size() - missing.size(), REQUIRED_STAGES.size()])
+	if not missing.is_empty():
+		print("[ver] FAILED: stage(s) never ran: %s" % ", ".join(missing))
+		print("[ver]   everything after them in the log describes a run that did "
+			+ "not happen")
+	if not dead.is_empty():
+		print("[ver] FAILED: generation(s) still at zero: %s" % ", ".join(dead))
+		print("[ver]   a counter that never moved means nothing consumed that "
+			+ "snapshot -- see 'the dead frame boundary' in AGENT_HANDOFF.md")
+	var quiet: Array[String] = []
+	for getter in OPTIONAL_GENERATIONS:
+		if host.has_method(getter) and int(host.call(getter)) == 0:
+			quiet.append(getter)
+	if not quiet.is_empty():
+		print("[ver] note: optional generation(s) at zero this run: %s" % ", ".join(quiet))
+	var skipped: Array[String] = []
+	for name in OPPORTUNISTIC_STAGES:
+		if not _stages.has(name):
+			skipped.append(name)
+	if not skipped.is_empty():
+		print("[ver] note: opportunistic stage(s) the world did not offer: %s"
+			% ", ".join(skipped))
+
+	if missing.is_empty() and dead.is_empty():
+		print("[ver] OK: every required stage ran and every required generation moved")
+		return 0
+	return 1
+
 func _shutdown() -> void:
+	var coverage := _report_coverage()
 	if host.has_method("get_anim_stats"):
 		print("[sct] anim chain: %s" % str(host.get_anim_stats()))
 	print("[sct] %d combat text run(s) observed over the whole run" % _sct_seen.size())
@@ -953,7 +1676,7 @@ func _shutdown() -> void:
 	host.request_quit()
 	if host.has_method("uilist_cancel"):
 		host.uilist_cancel()
-	get_tree().quit(0)
+	get_tree().quit(coverage)
 
 ## Press a shifted key the way a real one arrives: keycode is the unshifted key,
 ## unicode is the produced character, and shift is reported held. This is the

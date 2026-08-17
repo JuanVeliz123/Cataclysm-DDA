@@ -420,10 +420,13 @@ input_context game::get_player_input( std::string &action )
             //
             // This loop does run: it is the input wait, and it is already where
             // SCT is stepped. Called unconditionally so that the frame after the
-            // last text expires publishes an empty list and clears the overlay;
+            // last thing expires publishes an empty list and clears the overlay;
             // commit_frame is a no-op once there is nothing left on either side.
-            draw_sct();
-            godot_backend::get_anim_snapshot().commit_frame();
+            //
+            // This runs every draw callback, not just combat text -- the aim
+            // line, the targeting cursor and anything else a menu registered all
+            // publish from here now.
+            godot_backend::publish_transient_visuals();
 #endif
 
             if( pixel_minimap_option && g->w_pixel_minimap ) {

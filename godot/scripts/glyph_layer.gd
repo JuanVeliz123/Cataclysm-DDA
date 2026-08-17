@@ -6,10 +6,14 @@ extends Node2D
 ## publishes the symbol the type's JSON declares instead of dropping the tile.
 ## Those arrive in MapSnapshot::copy_glyph_list and are painted here with a font.
 ##
-## One of these exists per map_layer that has glyphs, at the same z_index as that
-## layer's tile batch, so a fallback floor still draws under a monster that did
-## find a sprite. Positions are map-local pixels, exactly like the draw list, so
-## MapView's zoom and camera transform apply for free.
+## One of these exists per map_layer that has glyphs, seated in that layer's flat
+## band by MapView's ordering pass, so a fallback floor still draws under a
+## monster that did find a sprite. Not depth-sorted -- one node holds a whole
+## layer, so it can only sit at one depth -- which is an approximation a tileset
+## with full sprite coverage never sees, because it emits no glyphs at all.
+##
+## Positions are map-local pixels, exactly like the draw list, so MapView's zoom
+## and camera transform apply for free.
 
 ## Ints per packed glyph: dest_x, dest_y, layer, codepoint, fg, bg.
 ## Must match MapSnapshot::glyph_stride in src/godot_map_snapshot.h.

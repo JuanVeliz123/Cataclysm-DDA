@@ -109,6 +109,10 @@
 #include "npc_class.h"
 #include "npc_opinion.h"
 #include "npctalk.h"
+
+#if defined(GODOT)
+#include "godot_dialogue_snapshot.h"
+#endif
 #include "npctalk_rules.h"
 #include "npctrade.h"
 #include "options.h"
@@ -2934,12 +2938,48 @@ talk_topic dialogue::opt_imgui( dialogue_imgui_impl &d_img, const talk_topic &to
                 d_img.set_responses_debug( build_debug_info( d_img, topic, d_img.sel_response ) );
                 d_img.debug_topic_name = topic.id;
             }
-            // For reasons unclear to me, we must manually invalidate and redraw the windows here, or else they will stack up.
-            ui_manager::invalidate_all_ui_adaptors();
-            ui_manager::redraw();
-            action = ctxt.handle_input();
+            input_event evt;
+#if defined(GODOT)
+            // Only the source of the action changes. Everything this loop does
+            // with one -- re-verifying that a shown response is actually
+            // selectable, the hostile/helpless confirmations below, hiding the
+            // UI for the trade window -- is worth not having a second copy of.
+            //
+            // A row index from the panel means "this one, confirmed", and is
+            // applied as a selection plus CONFIRM so it goes through that same
+            // re-verification rather than around it.
+            int godot_pick = -1;
+            const std::string godot_header = d_img.is_remote
+                                             ? d_img.remote_name
+                                             : ( actor( true )->get_npc()
+                                                 ? actor( true )->disp_name()
+                                                 : std::string() );
+            d_img.publish_to_godot( godot_header );
+            action = godot_backend::get_dialogue_snapshot().next_action( godot_pick );
+            if( godot_pick >= 0 ) {
+                d_img.sel_response = godot_pick;
+            }
+            // A default-constructed input_event reports type `error`, and the
+            // check below skips the frame on one. Left as-is the panel's actions
+            // would all be dropped and the conversation would take no input at
+            // all. Nothing here reads the event except that check and the
+            // ANY_INPUT hotkey match, which the panel never asks for.
+            evt.type = input_event_t::keyboard_char;
+            if( action.empty() ) {
+                evt.type = input_event_t::error;
+                // No panel attended; fall back to the overlay for this frame.
+#endif
+                // For reasons unclear to me, we must manually invalidate and redraw the windows here, or else they will stack up.
+                ui_manager::invalidate_all_ui_adaptors();
+                ui_manager::redraw();
+                action = ctxt.handle_input();
+                evt = ctxt.get_raw_input();
+#if defined(GODOT)
+            }
+#endif
 
             // Mouse click is an input type that would result in a continue, so we need to set our action before that.
+            // A CONFIRM from the Godot panel goes through the same re-verification.
             if( action == "CONFIRM" || d_img.user_clicked_response_button ) {
                 action = "CONFIRM"; // If we actually did click, harmless otherwise.
                 d_img.user_clicked_response_button = false;
@@ -2950,8 +2990,6 @@ talk_topic dialogue::opt_imgui( dialogue_imgui_impl &d_img, const talk_topic &to
                     action = "NONE";
                 }
             }
-
-            input_event evt = ctxt.get_raw_input();
             if( evt.type == input_event_t::error || evt.type == input_event_t::timeout ) {
                 continue;
             }

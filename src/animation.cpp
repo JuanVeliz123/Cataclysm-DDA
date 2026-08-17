@@ -69,6 +69,14 @@ class basic_animation
             .wait_message( "%s", _( "Hang on a bit…" ) )
             .on_top( true );
 
+#if defined(GODOT)
+            // game::draw does not run in this build, so the callbacks that
+            // produce this animation's frame have to be pumped directly. The
+            // ui_manager route below is what fails silently here: with the main
+            // ui_adaptor never redrawn, every explosion and bullet was computed
+            // and discarded.
+            godot_backend::publish_transient_visuals();
+#endif
             g->invalidate_main_ui_adaptor();
             ui_manager::redraw_invalidated();
             refresh_display();
@@ -729,6 +737,9 @@ void hit_animation_godot( const tripoint_bub_ms &center, const nc_color &color,
     } );
     g->add_draw_callback( hit_cb );
 
+    // Same reason as basic_animation::draw -- ui_manager::redraw cannot reach
+    // game::draw here, so the marker would never be published.
+    godot_backend::publish_transient_visuals();
     ui_manager::redraw();
     inp_mngr.set_timeout( get_option<int>( "ANIMATION_DELAY" ) );
     // Skip input (if any), because holding down a key with sleep_for can get yourself killed

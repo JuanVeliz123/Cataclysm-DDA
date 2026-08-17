@@ -27,6 +27,10 @@ const KIND_SMOKE := 1
 const MAX_EMITTERS := 48
 
 var _pool: Array[GPUParticles2D] = []
+## Each emitter's own colour, before the conditions grade is folded in. Kept
+## separately so the grade can be re-applied without compounding.
+var _base_modulate: Array[Color] = []
+var _grade: Color = Color.WHITE
 var _fire_material: ParticleProcessMaterial
 var _smoke_material: ParticleProcessMaterial
 var _dot: GradientTexture2D
@@ -34,10 +38,39 @@ var _wind: Vector2 = Vector2.ZERO
 var _tile_size: Vector2i = Vector2i(32, 32)
 
 func setup() -> void:
-	# Above the field sprites, below monsters: smoke should drift over the fire
-	# it comes from but not hide the zombie walking through it.
-	z_index = 5
+	# Position in the map's draw order -- above the field sprites, below monsters,
+	# so smoke drifts over the fire it comes from but does not hide the zombie
+	# walking through it -- is MapView's to decide, and it does so by child order
+	# rather than z_index. Setting a z here is what put smoke over open menus.
 	_build_materials()
+
+## Apply the presentation grade to the particles.
+##
+## The grade lives in the tile shader rather than in a full-screen pass, because
+## a CanvasLayer over the viewport would tint the sidebar and menus too (see
+## ADR-004). The cost is that these nodes have their own materials and are not
+## reached by it, so without this smoke keeps its daylight colour at midnight in
+## a downpour while the ground it sits on does not.
+##
+## Approximated with modulate rather than duplicating the shader: particles are
+## soft, additive and already semi-transparent, so the difference between a
+## correct grade and a tinted one is not visible on them.
+func set_conditions(daylight: float, precipitation: float, pain: float) -> void:
+	var night := 1.0 - clampf(daylight, 0.0, 1.0)
+	var wet := clampf(precipitation, 0.0, 1.0)
+	var grade := Color.WHITE
+	grade = grade.lerp(Color(0.62, 0.72, 1.0), night * 0.8)
+	grade = grade.lerp(Color(0.82, 0.88, 1.0), wet * 0.5)
+	# Rain also thins smoke: a plume does not stand up in a downpour.
+	grade.a = 1.0 - wet * 0.35
+	if grade != _grade:
+		_grade = grade
+		_apply_grade()
+
+func _apply_grade() -> void:
+	for i in _pool.size():
+		var base: Color = _base_modulate[i] if i < _base_modulate.size() else Color.WHITE
+		_pool[i].modulate = base * _grade
 
 ## Called by MapView after it rebuilds, with the frame's field list.
 func refresh(cmds: PackedInt32Array, tile_size: Vector2i, wind: Vector2) -> void:
@@ -82,16 +115,25 @@ func _emitter(index: int) -> GPUParticles2D:
 func _configure(p: GPUParticles2D, kind: int, intensity: int, at: Vector2) -> void:
 	p.position = at
 	p.emitting = true
+	var base: Color
 	if kind == KIND_FIRE:
 		p.process_material = _fire_material
 		p.lifetime = 0.7
 		p.amount = clampi(6 * intensity, 6, 24)
-		p.modulate = Color(1.0, 0.75, 0.35, 0.9)
+		base = Color(1.0, 0.75, 0.35, 0.9)
 	else:
 		p.process_material = _smoke_material
 		p.lifetime = 2.2
 		p.amount = clampi(3 * intensity, 3, 12)
-		p.modulate = Color(0.72, 0.72, 0.75, 0.32)
+		base = Color(0.72, 0.72, 0.75, 0.32)
+	var index := _pool.find(p)
+	while _base_modulate.size() <= index:
+		_base_modulate.append(Color.WHITE)
+	if index >= 0:
+		_base_modulate[index] = base
+	# Fire is a light source, so it is graded far less than smoke is: a campfire
+	# does not go blue at night, the air around it does.
+	p.modulate = base * (Color.WHITE.lerp(_grade, 0.25) if kind == KIND_FIRE else _grade)
 	# Particles are sized against the tile, so they stay right at any zoom and
 	# for a tileset whose tiles are not 32 pixels.
 	var scale_to := float(_tile_size.y) / 32.0

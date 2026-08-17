@@ -25,6 +25,8 @@
 #include "safemode_ui.h"
 #include "ui_manager.h"
 #include "translations.h"
+#include "npc.h"
+#include "overmapbuffer.h"
 
 #include <deque>
 #include <mutex>
@@ -223,6 +225,53 @@ std::string request_debug_spawn( const std::string &mtype )
             }
         }
         add_msg( m_debug, "no free tile next to the avatar for %s", id.str() );
+    } );
+    return std::string();
+}
+
+std::string request_debug_spawn_npc()
+{
+    post_game_command( []() {
+        if( !g ) {
+            return;
+        }
+        map &here = get_map();
+        avatar &u = get_avatar();
+        shared_ptr_fast<npc> temp = make_shared_fast<npc>();
+        temp->normalize();
+        temp->randomize();
+
+        // Adjacent, unlike the debug menu's -4,-4: the point is that a fixture
+        // can walk into them and get the interaction menu on the next step.
+        tripoint_bub_ms where = u.pos_bub( here );
+        bool placed = false;
+        // Adjacent is preferred -- the caller wants to reach them in one step --
+        // but a character standing in a shelter can be walled in on all eight
+        // sides, and a spawn that quietly fails is a fixture that silently tests
+        // nothing. Widen until somewhere works.
+        for( int radius = 1; radius <= 4 && !placed; ++radius ) {
+            for( const tripoint_bub_ms &p : here.points_in_radius( u.pos_bub( here ), radius ) ) {
+                if( p == u.pos_bub( here ) || !here.inbounds( p ) ) {
+                    continue;
+                }
+                if( here.impassable( p ) || get_creature_tracker().creature_at( p ) ) {
+                    continue;
+                }
+                where = p;
+                placed = true;
+                break;
+            }
+        }
+        if( !placed ) {
+            add_msg( m_debug, "no free tile next to the avatar for an NPC" );
+            return;
+        }
+        temp->spawn_at_precise( here.get_abs( where ) );
+        overmap_buffer.insert_npc( temp );
+        temp->form_opinion( u );
+        temp->mission = NPC_MISSION_NULL;
+        g->load_npcs();
+        add_msg( m_debug, "spawned npc %s", temp->name );
     } );
     return std::string();
 }

@@ -24,7 +24,7 @@ and no `godot::Ref` is ever held by game-side code (see *Teardown* below for why
 that second rule exists).
 
 **An API version handshake.** `CDDAHost::api_version()` must equal `host.gd`'s
-`REQUIRED_API_VERSION`, currently **11**. The GDExtension is compiled but the
+`REQUIRED_API_VERSION`, currently **22**. The GDExtension is compiled but the
 scripts are read from disk every run, so a stale library against new scripts
 otherwise *looks* like it works — the layout appears and every field the old
 library does not emit reads back as zero or empty. Bump it whenever the
@@ -55,6 +55,115 @@ Decisions and their alternatives: [`architecture_adr.md`](architecture_adr.md).
 - **Fields as particles.** Fire and smoke are pooled `GPUParticles2D`, wind-driven.
 - **Sway** shears only sprites that overhang their tile. An earlier version
   sheared everything and tore grass apart at the tile seams.
+- **More than one z-level** (ADR-005 item 1). Each column of the view is walked
+  downward from the avatar's level and stops at the first tile with a floor, as
+  SDL's does, so a hole shows what is at the bottom of it. Levels below ride in
+  four spare bits of `rot_flags`, rank under everything on the avatar's level,
+  sit out the light pass (the light texture has one texel per column, and that
+  texel belongs to the tile you can see) and are dimmed once per level crossed.
+  The walk's cost is published as `open_columns` in the render stats: outdoors it
+  is zero.
+- **The world renders in its own viewport** (ADR-004, 2026-08-17).
+  `world_viewport.gd` holds a `SubViewport` that MapView is reparented into, and
+  the result is composited as one texture under the UI. The world and the
+  interface used to share a canvas and be separated only by `z_index`, which is
+  why the animation overlay could draw over the sidebar and why the presentation
+  grade had to live inside the tile shader. It is a `TextureRect` with a
+  device-pixel render target and a `size_2d_override`, not a
+  `SubViewportContainer`: the container sizes its viewport in logical units and
+  the project stretches the canvas, so the obvious wiring would have dropped the
+  world to 80% resolution without saying anything.
+- **A 3D draw backend, off by default** (ADR-006 item 3D-1a, 2026-08-17).
+  `map_view_3d.gd` draws the same draw list as quads in a 3D scene under an
+  orthographic, unrotated camera, with `map_tiles_3d.gdshader` as a line-for-line
+  spatial port of the canvas tile shader. No C++ change: the tile, its height,
+  whether it stands and which level it is on are all already in the ten ints
+  `map_draw_cmd` carries. `host.gd`'s `USE_3D_MAP` selects it. It draws everything
+  the 2D backend draws and has never been looked at on a real GPU.
+
+  Sprites are alpha-scissored into the opaque pass and each carries its own z, so
+  the depth buffer interleaves them per pixel and the batch key is down to the
+  shader uniforms: about a dozen batches where the 2D backend needs one per row per
+  atlas -- a few hundred in a forest. The depth ordering is still `depth_rank`'s,
+  compacted from a range of a million to consecutive steps so float32 can resolve
+  it at camera distance.
+
+  The four non-tile layers split by whether depth matters. Contact shadows are a
+  MultiMesh of blob quads *in* the world, because on the canvas they would land on
+  top of the creature casting them -- and being depth-tested makes them better than
+  the 2D pass: a tree in front hides a blob, and a blob can sit on the floor of a
+  level below the avatar's. Fire and smoke are `field_particles_3d.gd`. The fallback
+  glyphs and the animation overlay stay canvas items on a `CanvasLayer` inside the
+  world viewport, whose transform works out to exactly the position and scale the 2D
+  backend puts on MapView -- and which stops being exact the moment the camera
+  tilts.
+- **The game's light sources, published** (ADR-006 item 3D-2, 2026-08-17).
+  `LightSnapshot` gained a light channel: seven floats per source -- position, reach,
+  colour, luminance -- walked out of `level_cache::light_source_buffer`, which
+  `generate_lightmap` already fills every turn from terrain, furniture and field
+  `light_emitted`. Read, not derived. The 3D backend turns each into an
+  `OmniLight3D`; the light *texture* remains the authority on how lit a tile is,
+  because CDDA casts rays and a renderer's falloff does not. Counted in the render
+  overlay as "light sources", which is the signal that the buffer -- documented as
+  valid only inside `generate_lightmap` -- still holds what this reads.
+- **The world can stand up** (ADR-006 item 3D-3, 2026-08-17). `TILT_DEGREES` in
+  `map_view_3d.gd`, off by default: above zero the ground lies down, standing sprites
+  stand, the camera pitches, and each axis is pre-divided by its own trigonometric
+  factor so the tilt cancels and the artist's pixels come back. Verified by
+  `res://scenes/geometry_check.tscn`, which projects placements back through the camera
+  -- thirty cases across six tilts, all 0.00 px from where the 2D backend draws them,
+  and no GPU involved. Contact shadows lose both their fudges when the ground is real.
+- **The 3D world is lit** (ADR-006 item 3D-5, 2026-08-17). The tile shader stops being
+  `unshaded`: what it already computed -- sprite, tint, CDDA's per-tile light, memory,
+  the grade -- goes to `EMISSION`, and engine lights *add* a directional term in
+  `light()` masked by that same per-tile light. CDDA keeps deciding which tiles are lit;
+  the renderer decides what that looks like from a direction, so a lamp behind a wall
+  cannot brighten the room it is not in. Standing sprites cast double-sided shadows
+  while tilted. Engine light is off in the flat world on purpose -- every normal there
+  faces the camera, so it could only add a wash. The sun's elevation follows `daylight`
+  and its bearing is a marked placeholder until `sun_azimuth_altitude()` is published.
+- **Levels below get a floor of their own** (ADR-006 item 3D-4, 2026-08-17). While the
+  world is tilted, each level under the avatar sits two tiles of height below the one
+  above -- two because Ultica draws a wall as 64 px in a 32 px cell, and ADR-005 found
+  the tileset declares no height of its own. Coplanar when flat, which is what the 2D
+  backend does. The drop is verified rather than eyeballed: it must be exactly
+  `LEVEL_DROP_TILES * tile_height` pixels down-screen, identical at every tilt, and zero
+  sideways.
+- **Four things the light channel was missing** (2026-08-17, API 21). The sun's real
+  bearing, from `sun_azimuth_altitude()` -- the 3D backend was aiming a directional light
+  with a constant, which is the sort of invention ADR-006 argued against. The sources that
+  bypass `level_cache`'s buffered set: what the avatar is carrying, what an NPC is
+  carrying, what a glowing monster emits, and vehicle headlights, which travel as beams
+  because `apply_light_arc` has a bearing and a width -- the light channel is nine floats
+  now and a cone of zero means a lamp. `fog_for_depth` moved out of C++ into the shader on
+  the same handshake shape as the light pass, so the per-level dimming is tunable without
+  a rebuild and cannot be applied twice. And the light texture holds **one block of rows
+  per z-level** instead of one texel per column, which is what lets a basement be lit by
+  its own lamp rather than sitting out the light pass. The 2D backend scales its V into
+  block 0 and is otherwise untouched.
+- **The 3D backend is the product path** (ADR-006, 2026-08-17): `USE_3D_MAP` on,
+  `TILT_DEGREES` 45. The ground lies down, walls and trees stand, engine lights and cast
+  shadows have something with a shape to fall on, and levels below sit at real elevations.
+  MapView stays as the fallback and as what the headless probe drives. The fallback glyphs
+  and the animation overlay stay on their canvas at any tilt -- a ground point's screen
+  position is unchanged by the tilt by construction, and `geometry_check.tscn` holds the
+  canvas transform against the camera's projection to keep it that way.
+- **Creatures cast their shadow from geometry, not from their sprite** (ADR-006's mesh
+  amendment, 3D-7a/b, 2026-08-17). One invisible capsule per creature, `SHADOWS_ONLY`, sized
+  from the sprite; the billboards stop casting so there is one shadow rather than two, while
+  standing terrain keeps its own silhouette. A billboard's outline never changes, so a figure
+  lit from the side used to cast a front view of itself -- saying nothing about where the
+  light was. `SHOW_SHADOW_PROXIES` draws the capsules instead of the sprites, which is the
+  first time this renderer draws a creature as a thing rather than as a picture of one, and
+  the first step of moving creatures to meshes.
+- **Creatures can be meshes** (ADR-006's mesh amendment, 3D-7c, 2026-08-17, API 22).
+  `CDDAHost::get_creatures()` publishes what the draw list deliberately does not: identity.
+  A `map_draw_cmd` is an atlas sub-rect and a destination -- everything a sprite needs and
+  nothing a mesh can use -- so id, kind, feet, level and facing travel on their own channel.
+  `creature_meshes.gd` draws any creature with art under `res://meshes/creatures/<id>.*` and
+  leaves the rest as sprites, mixed by construction. Sprites are suppressed by *tile*, since
+  the draw list still cannot say which creature a command belongs to and CDDA allows one
+  creature per tile.
 - **Overmap and pixel minimap** are Godot nodes drawing from their own snapshots.
 - **Tileset is a build artifact.** `gfx/UltimateCataclysm/` is composed from
   upstream source art by `build-scripts/compose-tileset.sh`, not committed.

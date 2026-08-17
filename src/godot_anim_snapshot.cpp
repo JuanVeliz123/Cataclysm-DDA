@@ -3,6 +3,7 @@
 #if defined(GODOT)
 
 #include "color.h"
+#include "game.h"
 #include "godot_backend.h"
 
 #include <godot_cpp/variant/vector3i.hpp>
@@ -202,6 +203,15 @@ uint64_t AnimSnapshot::generation() const
 {
     std::lock_guard<std::mutex> lock( mutex_ );
     return generation_;
+}
+
+void publish_transient_visuals()
+{
+    if( !g ) {
+        return;
+    }
+    g->run_draw_callbacks();
+    get_anim_snapshot().commit_frame();
 }
 
 AnimSnapshot &get_anim_snapshot()
