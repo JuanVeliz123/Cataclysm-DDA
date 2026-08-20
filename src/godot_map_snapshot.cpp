@@ -97,6 +97,20 @@ godot_tileset g_tileset;
 // Texture pointer → exported atlas index (filled at load).
 std::unordered_map<const void *, int> g_atlas_ptr_index;
 
+/// Minted monster identities for @ref creature_uid: pointer → (uid, last frame
+/// the pointer was handed out). Game thread only, unlocked on purpose -- every
+/// reader and writer is inside the game thread's rebuild or its draw callbacks.
+std::unordered_map<const Creature *, std::pair<int32_t, uint64_t>> g_creature_uids;
+/// Rebuilds update_from_game has run, for aging g_creature_uids entries.
+uint64_t g_creature_uid_frame = 0;
+/// Next monster serial to mint. Negative and falling, so a minted uid can never
+/// collide with a character_id, which is positive.
+int32_t g_next_creature_uid = -1;
+
+/// The absolute centre the last published frame was built around, for
+/// @ref view_center_moved. Game thread only, like the uid map above.
+tripoint_abs_ms g_published_center = tripoint_abs_ms::invalid;
+
 /// Look @p id up without following looks_like or any fallback.
 ///
 /// Needed to test whether an optional id (a multitile subtile, a field
@@ -430,6 +444,27 @@ bool is_vegetation( const std::string &id, const map_data_common_t &data )
         }
     }
     return false;
+}
+
+/// The @ref cmd_shape bits for this terrain or furniture, from flags the game
+/// already maintains -- a mod's new door is thin for free (3D-8c).
+///
+/// Windows and doors are tested before walls because they commonly carry the
+/// WALL flag too, standing in wall runs as they do, and the more specific
+/// claim is the one the renderer can use.
+int32_t shape_bits( const map_data_common_t &data )
+{
+    cmd_shape shape = cmd_shape::none;
+    if( data.has_flag( ter_furn_flag::TFLAG_WINDOW ) ) {
+        shape = cmd_shape::window;
+    } else if( data.has_flag( ter_furn_flag::TFLAG_DOOR ) ) {
+        shape = cmd_shape::door;
+    } else if( data.has_flag( ter_furn_flag::TFLAG_WALL ) ) {
+        shape = cmd_shape::wall;
+    } else if( data.has_flag( ter_furn_flag::TFLAG_THIN_OBSTACLE ) ) {
+        shape = cmd_shape::thin;
+    }
+    return static_cast<int32_t>( shape ) << cmd_shape_shift;
 }
 
 /**
@@ -868,6 +903,16 @@ void update_map_snapshot()
     get_map_snapshot().update_from_game();
 }
 
+bool view_center_moved()
+{
+    if( g == nullptr ) {
+        return false;
+    }
+    map &here = get_map();
+    const avatar &u = get_avatar();
+    return g_published_center != here.get_abs( u.pos_bub( here ) + u.view_offset );
+}
+
 bool MapSnapshot::ensure_tileset_loaded( const std::string &tileset_id )
 {
     {
@@ -1273,6 +1318,26 @@ godot::Dictionary MapSnapshot::describe_sprite( const std::string &id,
     return out;
 }
 
+int32_t creature_uid( const Creature &critter )
+{
+    // The avatar and NPCs alike: character_id is the identity the game already
+    // maintains for them, and it is positive, which is what keeps the two ranges
+    // from ever meeting.
+    if( const Character *ch = critter.as_character() ) {
+        return ch->getID().get_value();
+    }
+    auto it = g_creature_uids.find( &critter );
+    if( it == g_creature_uids.end() ) {
+        it = g_creature_uids.emplace( &critter,
+                                      std::make_pair( g_next_creature_uid--,
+                                              g_creature_uid_frame ) ).first;
+    } else {
+        // Still alive as far as this channel can tell; keep it out of the prune.
+        it->second.second = g_creature_uid_frame;
+    }
+    return it->second.first;
+}
+
 godot::Array MapSnapshot::copy_creatures() const
 {
     std::lock_guard<std::mutex> lock( mutex_ );
@@ -1281,6 +1346,8 @@ godot::Array MapSnapshot::copy_creatures() const
         godot::Dictionary d;
         d["id"] = godot::String::utf8( rec.id.c_str() );
         d["kind"] = rec.kind;
+        d["uid"] = rec.uid;
+        d["move_mode"] = rec.move_mode;
         d["x"] = rec.x;
         d["y"] = rec.y;
         d["z_below"] = rec.z_below;
@@ -1319,7 +1386,29 @@ void MapSnapshot::update_from_game()
 
     map &here = get_map();
     avatar &u = get_avatar();
-    const tripoint_bub_ms center = u.pos_bub( here );
+    // Plus the view offset, which is what look-around (and anything else that
+    // pans) moves: SDL centres on pos + view_offset, and this centred on pos
+    // alone -- so the look cursor walked off across a map that never followed,
+    // which read as the game freezing the moment 'x' was pressed.
+    const tripoint_bub_ms center = u.pos_bub( here ) + u.view_offset;
+    g_published_center = here.get_abs( center );
+
+    // Age the minted monster identities (see creature_uid). Monsters have no
+    // stable identity in the game -- they are found by position, and the only
+    // per-instance handle is the object's address, which the allocator gives to
+    // a brand-new monster as soon as an old one is destroyed. Keying serials by
+    // pointer is therefore only safe while the pointer keeps turning up: pruning
+    // everything not seen for 3 rebuilds bounds that ABA confusion to a 3-frame
+    // window -- a recycled address has to sit out the window and so comes back
+    // as a new uid -- and is also what keeps the map from growing forever.
+    ++g_creature_uid_frame;
+    for( auto it = g_creature_uids.begin(); it != g_creature_uids.end(); ) {
+        if( g_creature_uid_frame - it->second.second > 3 ) {
+            it = g_creature_uids.erase( it );
+        } else {
+            ++it;
+        }
+    }
 
     // How much map to publish.
     //
@@ -1343,6 +1432,19 @@ void MapSnapshot::update_from_game()
 
     const int origin_x = center.x() - view_w / 2;
     const int origin_y = center.y() - view_h / 2;
+
+    // Map memory can neither be read nor written outside the region the avatar
+    // has prepared: map_memory::get_submap answers an invalid submap there, and
+    // set_tile_terrain returns without a word against one. The only callers of
+    // prepare_map_memory_region were the SDL and curses draw paths, so under
+    // GODOT the region was never prepared -- every memorize was a silent no-op
+    // and every recall came back empty, which is why "remembered" tiles never
+    // existed rather than merely never being observed. Same call cata_tiles
+    // makes, over the extent this walk is about to publish.
+    u.prepare_map_memory_region(
+        here.get_abs( tripoint_bub_ms( origin_x, origin_y, center.z() ) ),
+        here.get_abs( tripoint_bub_ms( origin_x + view_w, origin_y + view_h, center.z() ) ) );
+
     const int tw = std::max( 1, g_tileset.get_tile_width() );
     const int th = std::max( 1, g_tileset.get_tile_height() );
 
@@ -1509,10 +1611,31 @@ void MapSnapshot::update_from_game()
         glyphs.push_back( gc );
     };
 
+    // The interned-id half of a command's tile_bits (3D-8d): one plus this id's
+    // index in ident_table_, shifted into place, or zero once the table is full
+    // -- which at 32k entries is not a size a tileset reaches. The index map is
+    // game-thread-private and needs no lock; the table append takes the mutex
+    // because the Godot thread copies the table whenever it grows.
+    auto ident_bits_for = [&]( const std::string &id ) -> int32_t {
+        auto it = ident_index_.find( id );
+        if( it == ident_index_.end() ) {
+            const int32_t index = static_cast<int32_t>( ident_table_.size() );
+            if( index >= 0x7FFF ) {
+                return 0;
+            }
+            {
+                std::lock_guard<std::mutex> lock( mutex_ );
+                ident_table_.push_back( id );
+            }
+            it = ident_index_.emplace( id, index ).first;
+        }
+        return ( it->second + 1 ) << cmd_ident_shift;
+    };
+
     auto emit_tile_id = [&]( std::vector<map_draw_cmd> &out, const std::string &id,
     sprite_category cat, int dest_tx, int dest_ty, map_layer fg_layer, bool with_bg,
     const light_tints &tint, unsigned int seed, int rotation = 0, bool sway = false,
-    bool flip_x = false, const std::string &variant = {} ) {
+    int32_t tile_bits = 0, bool flip_x = false, const std::string &variant = {} ) {
         const resolved_sprite res = resolve_sprite( id, cat, variant );
         ++fb_counts[static_cast<size_t>( res.level )];
         if( res.level != sprite_fallback::exact ) {
@@ -1546,7 +1669,8 @@ void MapSnapshot::update_from_game()
         const int32_t palette_bits =
             ( ( res.palette_row & 0xF ) << cmd_palette_shift ) |
             ( flip_x ? cmd_flag_flip_x : 0 ) |
-            ( overhangs ? cmd_flag_tall : 0 );
+            ( overhangs ? cmd_flag_tall : 0 ) |
+            ( tile_bits & ( cmd_shape_mask | cmd_ident_mask ) );
 
         // Occlusion handling. Only sprites that overhang their cell can hide
         // anything, so only they are considered -- the same test the sway flag
@@ -1731,6 +1855,19 @@ void MapSnapshot::update_from_game()
             case precip_class::last:
             default:                       cond.precipitation = 0.0f;  break;
         }
+        // What is falling, not only how much: the particle pass draws rain, snow
+        // and acid differently, and the weather type's own animation key is the
+        // most honest source -- it is what the SDL renderer keyed on.
+        if( cond.precipitation > 0.0f ) {
+            const weather_type &wt = *get_weather().weather_id;
+            if( wt.tiles_animation.find( "acid" ) != std::string::npos ) {
+                cond.weather_kind = 3;
+            } else if( wt.rains ) {
+                cond.weather_kind = 1;
+            } else {
+                cond.weather_kind = 2;
+            }
+        }
         // Saturating: the point is that being hurt is visible, not that the
         // effect keeps growing until the screen is unreadable.
         // Where the sun is, rather than where a renderer guessed. The 3D backend aims a
@@ -1788,12 +1925,18 @@ void MapSnapshot::update_from_game()
             if( !mem.get_ter_id().empty() ) {
                 emit_tile_id( cmds, mem.get_ter_id(), sprite_category::terrain, tx, ty,
                               map_layer::terrain_fg, true,
-                              mem_tint, seed );
+                              mem_tint, seed, mem.get_ter_rotation() );
             }
             if( !mem.get_dec_id().empty() ) {
+                // The ident travels with the memory too: a remembered fridge is
+                // still a fridge, and a renderer with a mesh for it draws that
+                // mesh in the memory tint rather than falling back to a sprite
+                // the moment the room goes dark. No shape bits -- memory stores
+                // sprite strings, not terrain, so there is no object to ask.
                 emit_tile_id( cmds, mem.get_dec_id(), sprite_category::furniture, tx, ty,
                               map_layer::furniture, false,
-                              mem_tint, seed );
+                              mem_tint, seed, mem.get_dec_rotation(), false,
+                              ident_bits_for( mem.get_dec_id() ) );
             }
             // A tile with no memory and no sight is the one case worth stopping
             // for: there is no way to have learned what is under a square you
@@ -1862,7 +2005,23 @@ void MapSnapshot::update_from_game()
             }
             emit_tile_id( cmds, ter_sprite, sprite_category::terrain, tx, ty,
                           map_layer::terrain_fg, true, tint, seed,
-                          ter_rotation, is_vegetation( tid.id().str(), tid.obj() ) );
+                          ter_rotation, is_vegetation( tid.id().str(), tid.obj() ),
+                          shape_bits( tid.obj() ) | ident_bits_for( tid.id().str() ) );
+            // What is seen is what is remembered. The write half of map memory
+            // lived only in the two draw paths this port removed -- cata_tiles
+            // and drawsq -- so under GODOT nothing ever memorized a tile: the
+            // R channel's "remembered" state, the memory tint and the memory
+            // pass were all consumers of a store no producer fed. The eighth
+            // instance of the dead frame boundary, and the reason BACKLOG.md
+            // could say map memory had never been observed: it did not exist.
+            // Mirrors cata_tiles: connected terrain re-memorizes because a new
+            // neighbour changes which sprite this tile remembers as.
+            if( ter_connect.any() ) {
+                here.memory_cache_ter_set_dirty( p, true );
+            }
+            if( here.memory_cache_ter_is_dirty( p ) ) {
+                u.memorize_terrain( here.get_abs( p ), ter_sprite, 0, ter_rotation );
+            }
         }
 
         const furn_id fid = here.furn( p );
@@ -1883,13 +2042,23 @@ void MapSnapshot::update_from_game()
             emit_tile_id( cmds, furn_sprite, sprite_category::furniture, tx, ty,
                           map_layer::furniture, false, tint,
                           furn_seed, furn_rotation,
-                          is_vegetation( fid.id().str(), fid.obj() ) );
+                          is_vegetation( fid.id().str(), fid.obj() ),
+                          shape_bits( fid.obj() ) | ident_bits_for( fid.id().str() ) );
+            // The decoration slot of map memory, exactly as cata_tiles fills it:
+            // one decoration per tile, furniture first. memorize_decoration
+            // stores what the memory pass will later draw.
+            if( here.memory_cache_dec_is_dirty( p ) ) {
+                u.memorize_decoration( here.get_abs( p ), furn_sprite, 0, furn_rotation );
+            }
         }
 
         const trap &tr = here.tr_at( p );
         if( !tr.is_null() && here.can_see_trap_at( p, u ) ) {
             emit_tile_id( cmds, tr.id.str(), sprite_category::trap, tx, ty, map_layer::trap,
                           false, tint, seed );
+            if( !fid && here.memory_cache_dec_is_dirty( p ) ) {
+                u.memorize_decoration( here.get_abs( p ), tr.id.str(), 0, 0 );
+            }
         }
 
         // Fields: fire, smoke, gas clouds. Intensity picks a distinct sprite
@@ -1944,7 +2113,14 @@ void MapSnapshot::update_from_game()
         // the visible one, including its tileset id.
         if( const optional_vpart_position ovp = here.veh_at( p ) ) {
             const vehicle &veh = ovp->vehicle();
-            const vpart_display vd = veh.get_display_of_tile( ovp->mount_pos() );
+            // Asked first, because get_display_of_tile debugmsg's when the mount
+            // holds nothing displayable -- a state a burnt or half-destroyed
+            // vehicle legitimately reaches -- and this walk visits every vehicle
+            // tile every turn: the same anomaly repeating is how the probe found
+            // the debug screen's nesting assert. A tile with no displayable part
+            // simply draws no vehicle sprite, which is also what it looks like.
+            const vpart_display vd = veh.part_displayed_at( ovp->mount_pos(), true, true, true )
+                                     == -1 ? vpart_display() : veh.get_display_of_tile( ovp->mount_pos() );
             if( !vd.id.is_null() ) {
                 // NOT get_tileset_id(). That joins the part and its variant
                 // with vehicles::variant_separator, which is '#', and no
@@ -1978,7 +2154,14 @@ void MapSnapshot::update_from_game()
                 emit_tile_id( cmds, vp_id, sprite_category::vehicle_part, tx, ty,
                               map_layer::vehicle, false,
                               tint, simple_point_hash( ovp->mount_pos().raw() ),
-                              rot, false, false, vd.variant.id );
+                              rot, false, 0, false, vd.variant.id );
+                // The resolved id, not get_tileset_id(): its '#' variant join
+                // resolves against no tileset, and the memory pass draws this
+                // string back verbatim. A remembered part loses its variant,
+                // which beats losing the whole part.
+                if( here.memory_cache_dec_is_dirty( p ) ) {
+                    u.memorize_decoration( here.get_abs( p ), vp_id, 0, rot );
+                }
             }
         }
 
@@ -2075,7 +2258,7 @@ void MapSnapshot::update_from_game()
                 continue;
             }
             emit_tile_id( cmds, draw_id, sprite_category::character, tx, ty, layer, false,
-                          tint, 0, 0, false, flip );
+                          tint, 0, 0, false, 0, flip );
         }
     };
 
@@ -2090,7 +2273,7 @@ void MapSnapshot::update_from_game()
         const char *body = ch.is_npc() ? ( ch.male ? "npc_male" : "npc_female" )
                            : ( ch.male ? "player_male" : "player_female" );
         emit_tile_id( cmds, body, sprite_category::character, tx, ty, body_layer, false,
-                      tint, 0, 0, false, flip );
+                      tint, 0, 0, false, 0, flip );
         emit_overlays( ch.get_overlay_ids(), ch.male, tx, ty, overlay_layer, tint, flip,
                        record );
     };
@@ -2160,6 +2343,7 @@ void MapSnapshot::update_from_game()
         // falls back to its sprite, which is the current behaviour exactly.
         {
             creature_record rec;
+            rec.uid = creature_uid( critter );
             rec.x = tx * tw + tw / 2;
             rec.y = ( ty + 1 ) * th;
             rec.z_below = z_below;
@@ -2175,6 +2359,8 @@ void MapSnapshot::update_from_game()
                 // keys on, so it is what a mesh registry should key on too.
                 rec.id = ch->male ? "npc_male" : "npc_female";
                 rec.kind = 1;
+                rec.move_mode = ch->is_running() ? 1 : ch->is_crouching() ? 2 :
+                                ch->is_prone() ? 3 : 0;
             }
             if( !rec.id.empty() ) {
                 creatures.push_back( rec );
@@ -2184,7 +2370,7 @@ void MapSnapshot::update_from_game()
             // cata_tiles leaves the seed at 0 for creatures (its switch has no
             // MONSTER case), so a position hash here would disagree with SDL.
             emit_tile_id( cmds, mon->type->id.str(), sprite_category::monster, tx, ty,
-                          map_layer::monster, false, critter_tint, 0, 0, false,
+                          map_layer::monster, false, critter_tint, 0, 0, false, 0,
                           mon->facing == FacingDirection::LEFT );
             // Monsters carry overlays too: effects, and the body-type variants
             // a rideable animal uses for its saddle.
@@ -2215,6 +2401,9 @@ void MapSnapshot::update_from_game()
             creature_record rec;
             rec.id = u.male ? "player_male" : "player_female";
             rec.kind = 2;
+            rec.uid = creature_uid( u );
+            rec.move_mode = u.is_running() ? 1 : u.is_crouching() ? 2 :
+                            u.is_prone() ? 3 : 0;
             rec.x = tx * tw + tw / 2;
             rec.y = ( ty + 1 ) * th;
             rec.flip = u.facing == FacingDirection::LEFT;
@@ -2380,6 +2569,17 @@ uint64_t MapSnapshot::generation() const
 {
     std::lock_guard<std::mutex> lock( mutex_ );
     return generation_;
+}
+
+godot::PackedStringArray MapSnapshot::copy_ident_table() const
+{
+    std::lock_guard<std::mutex> lock( mutex_ );
+    godot::PackedStringArray out;
+    out.resize( static_cast<int64_t>( ident_table_.size() ) );
+    for( size_t i = 0; i < ident_table_.size(); ++i ) {
+        out[static_cast<int64_t>( i )] = godot::String( ident_table_[i].c_str() );
+    }
+    return out;
 }
 
 } // namespace godot_backend

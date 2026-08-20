@@ -116,6 +116,8 @@ class CDDAHost : public godot::Node
                                         &CDDAHost::get_tileset_atlas_image );
             godot::ClassDB::bind_method( godot::D_METHOD( "get_map_draw_list" ),
                                         &CDDAHost::get_map_draw_list );
+            godot::ClassDB::bind_method( godot::D_METHOD( "get_map_ident_table" ),
+                                        &CDDAHost::get_map_ident_table );
             godot::ClassDB::bind_method( godot::D_METHOD( "get_map_view_origin" ),
                                         &CDDAHost::get_map_view_origin );
             godot::ClassDB::bind_method( godot::D_METHOD( "get_map_view_size" ),
@@ -182,6 +184,36 @@ class CDDAHost : public godot::Node
                                         &CDDAHost::debug_spawn_monster );
             godot::ClassDB::bind_method( godot::D_METHOD( "debug_spawn_npc" ),
                                         &CDDAHost::debug_spawn_npc );
+            // Scenario harness (VER-2 item 1)
+            godot::ClassDB::bind_method( godot::D_METHOD( "scenario_teleport_omt", "omt_type",
+                                         "search_range" ),
+                                        &CDDAHost::scenario_teleport_omt );
+            godot::ClassDB::bind_method( godot::D_METHOD( "scenario_teleport_rel", "dx", "dy", "dz" ),
+                                        &CDDAHost::scenario_teleport_rel );
+            godot::ClassDB::bind_method( godot::D_METHOD( "scenario_stand_on", "flag", "radius" ),
+                                        &CDDAHost::scenario_stand_on );
+            godot::ClassDB::bind_method( godot::D_METHOD( "scenario_set_time", "hour", "minute" ),
+                                        &CDDAHost::scenario_set_time );
+            godot::ClassDB::bind_method( godot::D_METHOD( "scenario_set_weather", "weather_id" ),
+                                        &CDDAHost::scenario_set_weather );
+            godot::ClassDB::bind_method( godot::D_METHOD( "scenario_spawn_field", "field_id",
+                                         "intensity", "dx", "dy" ),
+                                        &CDDAHost::scenario_spawn_field );
+            godot::ClassDB::bind_method( godot::D_METHOD( "scenario_spawn_vehicle", "vproto",
+                                         "dx", "dy" ),
+                                        &CDDAHost::scenario_spawn_vehicle );
+            godot::ClassDB::bind_method( godot::D_METHOD( "scenario_spawn_item", "itype",
+                                         "dx", "dy" ),
+                                        &CDDAHost::scenario_spawn_item );
+            godot::ClassDB::bind_method( godot::D_METHOD( "scenario_spawn_furniture", "furn",
+                                         "dx", "dy" ),
+                                        &CDDAHost::scenario_spawn_furniture );
+            godot::ClassDB::bind_method( godot::D_METHOD( "scenario_set_avatar_sex", "male" ),
+                                        &CDDAHost::scenario_set_avatar_sex );
+            godot::ClassDB::bind_method( godot::D_METHOD( "get_scenario_status" ),
+                                        &CDDAHost::get_scenario_status );
+            godot::ClassDB::bind_method( godot::D_METHOD( "note_exit_code", "code" ),
+                                        &CDDAHost::note_exit_code );
             godot::ClassDB::bind_method( godot::D_METHOD( "commands_ready" ),
                                         &CDDAHost::commands_ready );
             godot::ClassDB::bind_method( godot::D_METHOD( "get_hit_generation" ),
@@ -492,7 +524,11 @@ class CDDAHost : public godot::Node
             if( game_thread_.joinable() ) {
                 game_thread_.detach();
             }
-            std::_Exit( 0 );
+            // The code the host registered, not 0: _Exit from here used to
+            // overwrite the exit code Godot was about to return, so a failing
+            // probe run reported success. (It also skips stdio flushing, which
+            // is why the printerr above was never seen doing it.)
+            std::_Exit( godot_backend::host_exit_code() );
         }
 
         int get_view_cols() const
@@ -579,6 +615,15 @@ class CDDAHost : public godot::Node
             return get_map_snapshot().copy_draw_list();
         }
 
+        /// The interned id table for the draw list's ident bits (3D-8d):
+        /// element N is the base terrain/furniture id whose commands carry
+        /// N + 1 in rot_flags bits 16-30. Append-only, so the caller can cache
+        /// and re-copy only when the size grows.
+        godot::PackedStringArray get_map_ident_table() const
+        {
+            return get_map_snapshot().copy_ident_table();
+        }
+
         /// Tiles that resolved to no sprite at all and are drawn as their JSON
         /// symbol instead (SP-1). Same frame as the draw list; see
         /// MapSnapshot::glyph_stride.
@@ -595,8 +640,8 @@ class CDDAHost : public godot::Node
         }
 
         /// Every creature in view, by identity (ADR-006's mesh amendment, 3D-7c): each
-        /// entry is { id, kind, x, y, z_below, flip }, with x and y the view-relative
-        /// pixels of the creature's feet.
+        /// entry is { id, kind, uid, move_mode, x, y, z_below, flip }, with x and y the
+        /// view-relative pixels of the creature's feet.
         ///
         /// The draw list carries no identity on purpose -- a command is an atlas sub-rect,
         /// which is all a sprite needs and nothing a mesh can use. This is how a renderer
@@ -667,9 +712,10 @@ class CDDAHost : public godot::Node
         }
 
         /// The frame's light *sources*, for the 3D backend's real lights (ADR-006
-        /// item 3D-2): seven floats each -- x, y, radius, r, g, b, luminance -- with
-        /// x, y and radius in view-relative pixels and luminance in the game's own
-        /// units. See LightSnapshot::add_light for where they come from and what is
+        /// item 3D-2): nine floats each -- x, y, radius, r, g, b, luminance, bearing,
+        /// cone -- with x, y and radius in view-relative pixels, luminance in the
+        /// game's own units, and a cone of zero meaning a lamp rather than a beam.
+        /// See LightSnapshot::add_light for where they come from and what is
         /// deliberately missing from them.
         ///
         /// The light *texture* remains the authority on how lit a tile is. This says
@@ -716,6 +762,9 @@ class CDDAHost : public godot::Node
             // night, which is how "no sun" is said without a second flag.
             d["sun_azimuth"] = c.sun_azimuth;
             d["sun_altitude"] = c.sun_altitude;
+            // What is falling: 0 nothing, 1 rain, 2 snow, 3 acid. Precipitation
+            // says how much; this says what the particle pass should draw.
+            d["weather_kind"] = c.weather_kind;
             return d;
         }
 
@@ -852,6 +901,104 @@ class CDDAHost : public godot::Node
         godot::String debug_spawn_npc()
         {
             return godot::String::utf8( godot_backend::request_debug_spawn_npc().c_str() );
+        }
+
+        // --- Scenario harness (BACKLOG.md VER-2 item 1) ---
+        // Dress the world for verification: night, a lamp, a fire, a forest, a
+        // staircase. Thin wrappers; the rules live in godot_game_commands.cpp,
+        // including the one that matters most -- none of these may open a
+        // blocking screen. "" back means queued, not done: poll
+        // get_scenario_status() for the outcome.
+
+        godot::String scenario_teleport_omt( const godot::String &omt_type, int search_range )
+        {
+            return godot::String::utf8( godot_backend::request_scenario_teleport_omt(
+                                            std::string( omt_type.utf8().get_data() ),
+                                            search_range ).c_str() );
+        }
+
+        godot::String scenario_teleport_rel( int dx, int dy, int dz )
+        {
+            return godot::String::utf8(
+                       godot_backend::request_scenario_teleport_rel( dx, dy, dz ).c_str() );
+        }
+
+        godot::String scenario_stand_on( const godot::String &flag, int radius )
+        {
+            return godot::String::utf8( godot_backend::request_scenario_stand_on(
+                                            std::string( flag.utf8().get_data() ),
+                                            radius ).c_str() );
+        }
+
+        godot::String scenario_set_time( int hour, int minute )
+        {
+            return godot::String::utf8(
+                       godot_backend::request_scenario_set_time( hour, minute ).c_str() );
+        }
+
+        godot::String scenario_set_weather( const godot::String &weather_id )
+        {
+            return godot::String::utf8( godot_backend::request_scenario_set_weather(
+                                            std::string( weather_id.utf8().get_data() ) ).c_str() );
+        }
+
+        godot::String scenario_spawn_field( const godot::String &field_id, int intensity,
+                                            int dx, int dy )
+        {
+            return godot::String::utf8( godot_backend::request_scenario_spawn_field(
+                                            std::string( field_id.utf8().get_data() ),
+                                            intensity, dx, dy ).c_str() );
+        }
+
+        godot::String scenario_spawn_vehicle( const godot::String &vproto, int dx, int dy )
+        {
+            return godot::String::utf8( godot_backend::request_scenario_spawn_vehicle(
+                                            std::string( vproto.utf8().get_data() ),
+                                            dx, dy ).c_str() );
+        }
+
+        godot::String scenario_spawn_item( const godot::String &itype, int dx, int dy )
+        {
+            return godot::String::utf8( godot_backend::request_scenario_spawn_item(
+                                            std::string( itype.utf8().get_data() ),
+                                            dx, dy ).c_str() );
+        }
+
+        godot::String scenario_spawn_furniture( const godot::String &furn, int dx, int dy )
+        {
+            return godot::String::utf8( godot_backend::request_scenario_spawn_furniture(
+                                            std::string( furn.utf8().get_data() ),
+                                            dx, dy ).c_str() );
+        }
+
+        godot::String scenario_set_avatar_sex( bool male )
+        {
+            return godot::String::utf8(
+                       godot_backend::request_scenario_set_avatar_sex( male ).c_str() );
+        }
+
+        /// Outcome of the last scenario command that finished on the game thread.
+        /// `generation` increments per completion; poll it, then read `ok`.
+        godot::Dictionary get_scenario_status() const
+        {
+            const godot_backend::scenario_status s = godot_backend::get_scenario_status();
+            godot::Dictionary d;
+            d["generation"] = s.generation;
+            d["ok"] = s.ok;
+            d["last"] = godot::String::utf8( s.last.c_str() );
+            d["detail"] = godot::String::utf8( s.detail.c_str() );
+            return d;
+        }
+
+        /// Register the exit code the process should carry.
+        ///
+        /// Shutdown with a live session ends in std::_Exit from the game
+        /// thread's input wait, which cannot read the code SceneTree.quit was
+        /// given -- so a fixture that means to exit non-zero must say so here
+        /// *before* quitting, or its failure exits 0 and reads as a pass.
+        void note_exit_code( int code )
+        {
+            godot_backend::set_host_exit_code( code );
         }
 
         /// Whether a queued command would actually run if posted now.
@@ -1164,7 +1311,13 @@ class CDDAHost : public godot::Node
         /// host.gd says so instead of leaving the reader to guess.
         int api_version() const
         {
-            return 22;
+            // 27: rot_flags bits 16-30 carry the interned tile id and
+            // get_map_ident_table() resolves them (3D-8d); 26 added cmd_shape
+            // in bits 13-15 (3D-8c). An old library leaves both zero, which
+            // reads as "no claim" and quietly costs shapes and meshes alike --
+            // exactly the mixed state the handshake turns into a loud boot
+            // error.
+            return 27;
         }
 
         /// Whether a C++ screen is currently drawn in the overlay.

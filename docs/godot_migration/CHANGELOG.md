@@ -24,7 +24,7 @@ and no `godot::Ref` is ever held by game-side code (see *Teardown* below for why
 that second rule exists).
 
 **An API version handshake.** `CDDAHost::api_version()` must equal `host.gd`'s
-`REQUIRED_API_VERSION`, currently **22**. The GDExtension is compiled but the
+`REQUIRED_API_VERSION`, currently **24**. The GDExtension is compiled but the
 scripts are read from disk every run, so a stale library against new scripts
 otherwise *looks* like it works — the layout appears and every field the old
 library does not emit reads back as zero or empty. Bump it whenever the
@@ -172,6 +172,37 @@ Decisions and their alternatives: [`architecture_adr.md`](architecture_adr.md).
 
 ---
 
+- **Creatures animate** (2026-08-18, **API 24**). `creature_record` carries a `uid`
+  (characters `getID()`, monsters session-scoped serials with a three-frame prune --
+  the game gives a monster no identity beyond a reusable pointer) and a `move_mode`
+  hint; hit events carry attacker/target uids and a kind, with death taps in
+  `monster::die` / `Character::die`. `creature_meshes.gd` manufactures presentation
+  time over the turn-based simulation: each one-tile step tweens over a fraction of a
+  second with `walk`/`run` playing, live tweens retarget instead of queueing, jumps
+  past 2.5 tiles snap, meshes yaw toward their movement, and `attack`/`hit`/`die`
+  clips play off the event uids (the corpse holds its last pose for the clip, then
+  goes). Movement is detected in **world** space -- view-relative feet shift for every
+  creature whenever the avatar recentres the published origin, and a naive delta
+  walks the whole map in sync. Animated assets are `<id>.scn` scenes (Skeleton3D +
+  AnimationPlayer, clips idle/walk/run looping and attack/hit/die one-shot, in-place,
+  +Z, feet on origin, 48 tall), preferred over static meshes for the same id; the
+  converter preserves rigs instead of flattening them, and
+  `make_example_animated_creature.tscn` writes a rigged mannequin (`mon_zombie.scn`)
+  that is both the fixture and the modeller's executable spec. One GDScript lesson
+  paid for on the way: a typed function that returns null raises a script error and
+  hands the caller a default-constructed value, so "null means no art" corrupted
+  every instance after the first artless creature -- the registry speaks
+  empty-Dictionary now.
+
+- **Real humans** (2026-08-19). The four character ids are the Quaternius Animated
+  Man/Woman packs (CC0), tone-baked per id (player = light skin, npc = dark) by
+  `import_quaternius_humans.gd`, which uprights each figure from its own named
+  bones and records where the art came from. The converter gained a clip-name
+  alias table ("Armature|Walking" -> walk; Mixamo strings covered) and
+  bones-union-mesh normalisation, because a pack's mesh rest box and its clip
+  space can disagree by 85x. Derived assets now build themselves at boot: a
+  fresh checkout converts its .glbs behind the splash and plays with meshes.
+
 ## Screens migrated off the overlay
 
 The ImGui/curses overlay still exists, but these no longer use it. Each is a
@@ -318,6 +349,37 @@ instances at exit" warning came from.
 
 ## Verification
 
+- **The scenario probe fights now** (2026-08-18): safe mode off, arrow keys at the
+  spawned zombie until a blow lands *on it* -- its first version exited on any hit
+  event and the zombie's own attack on the avatar satisfied it, "proving" combat
+  while the animated rig had been struck zero times. Numpad keys translate to
+  `kp_*` keycodes no default binding matches (the headless probe's numpad NPC walk
+  has failed in every logged run for the same reason); arrows are what work. The
+  probe also carries a watchdog for the **legacy soliloquy window** -- the ambient
+  snippet monologue still opens as a C++ ImGui screen with no Godot channel, parks
+  the game thread, and starves the command queue; it is the previously-unattributed
+  window that took the baseline headless run's late stages down. The watchdog names
+  it from the cell overlay once and Escapes past it; migrating it is Part 2 work.
+- **The scenario harness** (VER-2 item 1, 2026-08-18, API 23). Nine `scenario_*`
+  commands on the game-command channel dress the world from a fixture --
+  teleport by OMT prefix, relative teleport, stand-on-flag, set time, force
+  weather, spawn field / vehicle (lights on) / item, set avatar sex -- each
+  republishing the world, none opening a screen. `scenario_probe.tscn` drives
+  the sequence with REQUIRED/WARN checks and per-scene PNGs under the xvfb
+  recipe. Its first runs produced the first look down a hole (`open_columns=1`),
+  the first headlight beams, the first rain, the first remembered tile, the
+  first light gradient in true darkness (a basement fire: lit texels 0 → 48) --
+  and one negative worth as much: at 1am under a bright moon, 1072 of 1075
+  texels are already `LIT`, so no lamp's pool can show outdoors and night-ness
+  is carried entirely by the grade. The game is the authority on that; fixtures
+  asking gradient questions must ask them somewhere dark.
+- **Weather falls** (3D-6, 2026-08-18): `weather_particles_3d.gd`, rain / snow /
+  acid over the visible map, kind and amount from the new `weather_kind` /
+  `precipitation` conditions, tilted-only. Volumetric fog became a runtime
+  toggle (`set_volumetric_fog`) gated on the tilt, its length tracking
+  `camera.far`; headlight beams gained the downward pitch a level beam turned
+  out to need.
+
 No CI by design. Four things to run:
 
 | What | Command | Catches |
@@ -339,7 +401,7 @@ cleanup.
 
 ## The recurring bug of this migration
 
-Worth reading before adding anything that draws, because it cost seven separate
+Worth reading before adding anything that draws, because it cost nine separate
 bugs and every one of them reported success.
 
 The migration moved *present* to Godot, but several producers stayed wired to the
@@ -368,7 +430,27 @@ And the crafting takeover had it twice more: pending tab intents are consumed by
 `recalc` flag was never acted on because an event-driven loop has no next frame
 to do it in.
 
-Seven instances, one shape: **the half that does not run looks identical to the
+Two more arrived on 2026-08-18, and they are the biggest of the lot:
+
+- **Map memory was never written under GODOT.** The write half lives in the two
+  draw paths this port removed -- `cata_tiles::draw` memorizes what it draws,
+  `map::drawsq` likewise -- so nothing ever memorized a tile, and everything
+  downstream (the R channel's "remembered" state, the memory tint, the memory
+  pass, SP-3) was a consumer of a store no producer fed. It could not be caught
+  by watching the consumer: remembered tiles rendering as nothing and remembered
+  tiles not existing look identical. Found by the scenario probe's histogram
+  reading `remembered: 0` after walking out of a house. The snapshot's seen path
+  now memorizes what it publishes, mirroring cata_tiles.
+- **The probes' exit codes never survived a session.** Shutdown with a live
+  session ends in `std::_Exit( 0 )` from the game thread's input wait (and from
+  `~CDDAHost` when the thread will not stop) -- which *overwrites the exit code
+  Godot was about to return*, so every failing probe run exited green, and VER-0's
+  "exit code, not a printed note" was a printed note after all. `_Exit` also skips
+  stdio flushing, which is why the diagnostic that would have said so never
+  appeared. Fixed by `note_exit_code()`: the fixture registers its intended code
+  with the backend before quitting, and both `_Exit` sites carry it.
+
+Nine instances, one shape: **the half that does not run looks identical to the
 half that does.** Two rules follow.
 
 1. A producer is not done until something has *drawn* it. Not "the snapshot is

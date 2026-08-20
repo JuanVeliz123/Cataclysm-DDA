@@ -59,6 +59,12 @@ func _ready() -> void:
 	view._tile_size = Vector2i(32, 32)
 	view._view_size = Vector2i(41, 23)
 	view._ensure_camera()
+	# The orthographic baseline is the claim under test: the pre-stretch cancels the
+	# tilt *under an orthographic projection*, so the perspective default is forced
+	# off before anything is measured. The telephoto's drift off this baseline is a
+	# chosen trade (see PERSPECTIVE in map_view_3d.gd), not a defect to catch -- it
+	# is reported with numbers further down instead of asserted about.
+	view.set_perspective(false)
 
 	for tilt in TILTS:
 		# Through the setter, so the camera and the placement agree about the angle.
@@ -118,6 +124,24 @@ func _ready() -> void:
 		if not ok:
 			failures.append("the world canvas and the camera disagree by %.2f px at %.1f deg"
 				% [gap, tilt])
+
+	# The telephoto's cost, in numbers rather than adjectives: how far a ground tile's
+	# screen position moves when the perspective default switches on, at the centre of
+	# the map and at its corners -- the worst case for the affine canvas. Reported, not
+	# asserted: the drift is the documented trade at PERSPECTIVE, and this line is what
+	# a FOV change gets judged against.
+	view.set_tilt_degrees(MAP_VIEW_3D.TILT_DEGREES)
+	view._update_camera()
+	for probe_xy in [Vector2(656.0, 368.0), Vector2(0.0, 0.0), Vector2(1280.0, 704.0)]:
+		var flat_rect: Rect2 = view.debug_projected_rect(probe_xy.x, probe_xy.y,
+			32.0, 32.0, false)
+		view.set_perspective(true)
+		var tele_rect: Rect2 = view.debug_projected_rect(probe_xy.x, probe_xy.y,
+			32.0, 32.0, false)
+		view.set_perspective(false)
+		print("[geom] telephoto fov %.0f: ground (%4.0f,%3.0f) drifts %5.1f px off the canvas"
+			% [MAP_VIEW_3D.PERSPECTIVE_FOV_DEGREES, probe_xy.x, probe_xy.y,
+				(tele_rect.position - flat_rect.position).length()])
 
 	# Contact shadows (ADR-005 item 4, under a tilted camera). A blob must land on the
 	# creature's own feet: directly under its sprite's base horizontally, and exactly
@@ -209,15 +233,45 @@ func _ready() -> void:
 	# they are the two a modeller actually makes: an origin at the body's centre, which
 	# plants the creature half underground, and a scale in metres rather than in tile
 	# pixels, which makes a person the size of a doorframe or of a mouse.
+	#
+	# An id with a `.scn` beside (or instead of) its mesh is an *animated* asset and is
+	# checked as a scene in `_check_animated` below -- same box conventions, plus the
+	# failures only a scene can have.
 	var loader := Node3D.new()
 	loader.set_script(preload("res://scripts/creature_meshes.gd"))
 	add_child(loader)
 	loader.setup(null)
 	var dir := DirAccess.open(loader.MESH_DIR)
 	if dir != null:
+		var seen: Dictionary = {}
 		for file in dir.get_files():
 			var id := file.get_basename()
-			if file.get_extension() == "md" or id.is_empty():
+			# Only the extensions the loader itself resolves, plus `.scn` -- the
+			# animated scene, which the loader prefers over all of them. The
+			# directory also holds a README and, after any editor run, `.import`
+			# sidecars -- whose basename still ends in .glb and reads as a
+			# brand-new id that then "fails to load".
+			var ext := "." + file.get_extension()
+			if id.is_empty() or (ext != ".scn" and not loader.MESH_EXTENSIONS.has(ext)):
+				continue
+			# Underscore-prefixed files are libraries, not creatures: _shared_clips
+			# is typically a skeleton and its clips with no mesh at all (a Mixamo
+			# animation pack), and judging it as a body would fail it for being
+			# exactly what it is meant to be.
+			if id.begins_with("_"):
+				continue
+			# One check per id, not per file: a creature usually has a source beside its
+			# converted mesh -- .glb and .res and sometimes .obj all named for the same
+			# thing -- and the loader resolves all of them to whichever it prefers. An id
+			# with a `.scn` is checked as that scene and nothing else, because the scene
+			# is what the game will be handed.
+			if seen.has(id):
+				continue
+			seen[id] = true
+			var scn_path := "%s/%s.scn" % [loader.MESH_DIR, id]
+			if ResourceLoader.exists(scn_path):
+				checked += 1
+				_check_animated(id, scn_path, failures)
 				continue
 			var mesh: Mesh = loader._mesh_for(id)
 			if mesh == null:
@@ -241,6 +295,27 @@ func _ready() -> void:
 	else:
 		print("[geom] no %s yet -- nothing to check" % loader.MESH_DIR)
 
+	# The terrain mesh library (3D-8d), against terrain_meshes.gd's convention:
+	# one unit is one tile, footprint inside the tile, height capped, feet on the
+	# origin and centred. The importer normalizes to exactly this, so a failure
+	# here is a hand-added asset that skipped the importer -- the mistake worth
+	# catching before it renders as a wardrobe the size of a house.
+	var tlib: Dictionary = preload("res://scripts/terrain_meshes.gd").library()
+	for id in tlib:
+		checked += 1
+		var tbox: AABB = (tlib[id] as Dictionary)["box"]
+		var grounded := absf(tbox.position.y) <= 0.05
+		var fits := tbox.size.x <= 1.05 and tbox.size.z <= 1.05 and tbox.size.y <= 1.55
+		var tcentred := absf(tbox.position.x + tbox.size.x * 0.5) <= 0.05 \
+			and absf(tbox.position.z + tbox.size.z * 0.5) <= 0.05
+		var tok := grounded and fits and tcentred
+		print("[geom] furn %-16s %.2f x %.2f x %.2f tiles, base y %+.2f  %s" % [
+			id, tbox.size.x, tbox.size.y, tbox.size.z, tbox.position.y,
+			"ok" if tok else "FAIL"])
+		if not tok:
+			failures.append("%s: %.2f x %.2f x %.2f tiles at base y %+.2f breaks the library convention"
+				% [id, tbox.size.x, tbox.size.y, tbox.size.z, tbox.position.y])
+
 	if failures.is_empty():
 		print("[geom] %d placements round-tripped through the camera" % checked)
 		get_tree().quit(0)
@@ -249,6 +324,111 @@ func _ready() -> void:
 			push_error("[geom] " + f)
 			print("[geom] FAIL " + f)
 		get_tree().quit(1)
+
+## An animated creature scene, against the conventions in the meshes README (3D-7c's
+## animation amendment). Same box checks as a bare mesh -- an origin at the body's centre
+## and a scale in metres are still the mistakes that get made -- plus the ones only a
+## scene can get wrong: no Skeleton3D (an unrigged asset should have been a `.res`),
+## no `idle` or `walk` (the two the renderer plays constantly, so their absence is a hole
+## on screen rather than a missing flourish), and a repeating clip left LOOP_NONE, which
+## plays once and freezes -- read elsewhere as a T-pose bug, not as the export slip it is.
+## Missing `attack`/`hit`/`die` are WARN lines only, the same two-tier policy as the
+## scenario probe: a creature that cannot act yet is still worth standing up.
+func _check_animated(id: String, path: String, failures: Array[String]) -> void:
+	var packed := ResourceLoader.load(path) as PackedScene
+	if packed == null:
+		failures.append("%s did not load as a PackedScene" % path)
+		return
+	var inst := packed.instantiate()
+	# In the tree before anything reads a global_transform, same as everywhere else in
+	# this branch: outside it they come back identity and the box measures the wrong pose.
+	add_child(inst)
+
+	# The posed BONE box, exactly as the converter now measures: a skinned mesh's
+	# AABB stays rest-shaped whatever plays, and rest and clip space can disagree
+	# wholesale -- the Quaternius woman's mesh rest box is ~85x smaller than her
+	# skeleton, so a mesh-box check failed her as "0 x 0 x 0 at y +1.7" while she
+	# stood on screen at a perfect 33. Judging by the mesh here while the
+	# converter judges by the bones would fail every asset the converter got
+	# right. Falls back to the mesh box only when there is nothing to pose.
+	var box := AABB()
+	var boxed := false
+	for node in inst.find_children("*", "AnimationPlayer", true, false):
+		var ap := node as AnimationPlayer
+		if ap.has_animation("idle"):
+			ap.play("idle")
+			ap.advance(0.0)
+		break
+	for node in inst.find_children("*", "Skeleton3D", true, false):
+		var sk := node as Skeleton3D
+		for i in sk.get_bone_count():
+			var p: Vector3 = (sk.global_transform * sk.get_bone_global_pose(i)).origin
+			box = AABB(p, Vector3.ZERO) if not boxed else box.expand(p)
+			boxed = true
+	if boxed:
+		box = box.grow(box.size.y * 0.03)
+	# UNION with the mesh box, not either alone: bone origins alone shave a rig
+	# whose joints stop above the ankles (the 7-bone mannequin has no foot bones
+	# and measured as floating at +13), and the mesh alone is the degenerate box
+	# the comment above is about. The union stands wherever either is honest,
+	# and a mesh box that is nonsense is tiny, so it cannot drag the union far.
+	for node in inst.find_children("*", "MeshInstance3D", true, false):
+		var mi := node as MeshInstance3D
+		if mi.mesh == null:
+			continue
+		var part: AABB = mi.global_transform * mi.mesh.get_aabb()
+		box = part if not boxed else box.merge(part)
+		boxed = true
+
+	var stands := boxed and absf(box.position.y) <= 1.0
+	var centred := boxed and absf(box.position.x + box.size.x * 0.5) <= 4.0 \
+		and absf(box.position.z + box.size.z * 0.5) <= 6.0
+	var sized := boxed and box.size.y >= 8.0 and box.size.y <= 160.0
+	if not (stands and centred and sized):
+		failures.append(("%s: base y %+.1f (wants 0, the feet), %.0f x %.0f x %.0f "
+			+ "in tile pixels") % [id, box.position.y, box.size.x, box.size.y,
+			box.size.z])
+
+	var rigged := inst.find_children("*", "Skeleton3D", true, false).size() > 0
+	if not rigged:
+		failures.append("%s.scn has no Skeleton3D -- an unrigged asset should be a .res" % id)
+
+	var players := inst.find_children("*", "AnimationPlayer", true, false)
+	var clips := PackedStringArray()
+	if players.is_empty():
+		failures.append("%s.scn has no AnimationPlayer" % id)
+	else:
+		clips = (players[0] as AnimationPlayer).get_animation_list()
+	var animated := true
+	for wanted in ["idle", "walk"]:
+		if not clips.has(wanted):
+			animated = false
+			if not players.is_empty():
+				failures.append("%s.scn has no '%s' clip, and the renderer always plays one"
+					% [id, wanted])
+	var loops := true
+	for clip_name in ["idle", "walk", "run"]:
+		if not clips.has(clip_name):
+			continue
+		var anim: Animation = (players[0] as AnimationPlayer).get_animation(clip_name)
+		if anim.loop_mode == Animation.LOOP_NONE:
+			loops = false
+			failures.append("%s: '%s' does not loop -- it plays once and the figure freezes"
+				% [id, clip_name])
+
+	var ok := stands and centred and sized and rigged and not players.is_empty() \
+		and animated and loops
+	print("[geom] anim %-16s %.0f x %.0f x %.0f, base y %+.1f  stands=%s centred=%s sized=%s rig=%s clips=[%s] loops=%s  %s"
+		% [id, box.size.x, box.size.y, box.size.z, box.position.y, str(stands),
+			str(centred), str(sized), str(rigged), ", ".join(clips), str(loops),
+			"ok" if ok else "FAIL"])
+	for wanted in ["attack", "hit", "die"]:
+		if not clips.has(wanted):
+			print("[geom] anim %-16s WARN no '%s' clip -- optional, the runtime falls back"
+				% [id, wanted])
+
+	remove_child(inst)
+	inst.queue_free()
 
 func _point(p: Vector2) -> String:
 	return "(%.0f,%.0f)" % [p.x, p.y]

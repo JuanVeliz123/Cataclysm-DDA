@@ -88,6 +88,23 @@ void request_shutdown();
 bool is_shutdown_requested();
 
 /**
+ * The exit code the process should carry if the backend has to hard-exit it.
+ *
+ * Shutdown with a live session ends in std::_Exit -- from the game thread's
+ * input wait, or from ~CDDAHost when the thread will not stop -- because
+ * joining a thread parked in game UI hangs and unwinding through game code
+ * mid-teardown crashes. But _Exit( 0 ) also *overwrites the exit code Godot
+ * was about to return*, which silently turned every failing probe run green:
+ * VER-0's "exit code, not a printed note" never survived a session. (And
+ * _Exit skips stdio flushing, so the diagnostic that would have said so was
+ * lost with it.) A fixture that intends to exit non-zero must say so here
+ * before it calls SceneTree.quit; the game side cannot read Godot's pending
+ * code.
+ */
+void set_host_exit_code( int code );
+int host_exit_code();
+
+/**
  * Drop every godot::Ref the backend holds in a file-static.
  *
  * Must be called from the Godot main thread while the engine is still up.

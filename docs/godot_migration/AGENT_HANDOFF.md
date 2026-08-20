@@ -38,6 +38,34 @@
   until a mesh exists.** `godot/meshes/creatures/README.md` is what a modeller needs; the
   first-frame log prints the creature ids it has seen, which is how to learn the name of the
   thing you are looking at.
+
+  Two meshes exist now: the committed blocky `player_male.tres` example, and
+  `player_female.glb`, which `res://scenes/convert_creature_meshes.tscn` converts to the
+  gitignored `player_female.res` (run it once per checkout, or `check-godot-scripts.sh`'s
+  geometry gate reports the unconverted .glb as failing to load). **A meshed creature's
+  sprite is suppressed by tile, overlays included** -- which is why a meshed avatar draws
+  naked, was reported as a regression, and is now counted and said out loud in the
+  first-frame report rather than looking like lost content (see ADR-006's attribution
+  note, 2026-08-18).
+
+  **And the meshes animate** (2026-08-18, **API 24** -- `make GODOT=1` after pulling).
+  Creatures carry a session-stable `uid` and hit/death events name their attacker and
+  target; `creature_meshes.gd` tweens steps, yaws toward movement and plays
+  idle/walk/run/attack/hit/die; animated assets are `<id>.scn` scenes (see the mesh
+  README's animated section -- clip names, loop rules, in-place, +Z, 48 tall);
+  `res://scenes/make_example_animated_creature.tscn` generates the rigged mannequin
+  (`mon_zombie.scn`, gitignored) that is both the test fixture and the modeller's
+  executable spec. Run it once per checkout alongside the converter. ADR-006's
+  amendment has the full record, including the two traps this paid for (GDScript
+  typed-null returns; view-relative movement deltas).
+- **The scenario harness exists** (VER-2 item 1, 2026-08-18, **API 23**): `scenario_*`
+  commands on CDDAHost dress the world from a fixture -- teleport by OMT prefix, relative
+  teleport, stand-on-flag, set time, force weather, spawn field/vehicle/item, set avatar
+  sex -- each republishing the world so the change is visible without a player action.
+  `scenario_probe.tscn` drives them; see the verification list below. First harvest: the
+  first look down a hole, the first headlight beams, the first rain particles, and two
+  silent-success bugs (map memory never written; probe exit codes never surviving a
+  session) -- see `CHANGELOG.md`.
 - What is otherwise left: VER-1's tuning pass over the dozen constants the 3D work added,
   and Part 2, which is the migration's actual critical path. The API is **20**: the light channel needs a `make GODOT=1`. What
   nobody has done is *look* at the stood-up world -- `set_tilt_degrees(45)` or
@@ -247,6 +275,23 @@ make GODOT=1 CROSS=x86_64-w64-mingw32- BACKTRACE=0 -j$(nproc)   # Windows x86_64
   refreshes the real panels, so a Control that only fails at runtime is caught --
   parsing alone will not catch it. Use this before claiming any UI change works;
   the load check above only proves the library loads.
+- **Scenario check** (VER-2 item 1, API 23):
+  `godot --headless --path godot res://scenes/scenario_probe.tscn`.
+  Dresses the world -- night, a lantern, a fire, a car with its lights on,
+  volumetric fog, rain, a house entered and left, a staircase stood on, a
+  zombie -- through the `scenario_*` commands on CDDAHost, verifying each step
+  against published state with REQUIRED/WARN tiers and an honest exit code.
+  Under the xvfb recipe with `-- --screenshot /tmp/scn.png` it writes one PNG
+  per dressed scene from the 3D world's own viewport. Opens no menus and
+  presses no keys except Escape on a popup, which is what keeps the command
+  queue alive. Runs in ~4 minutes headless.
+- **Exit codes need registering before quitting.** Shutdown with a live session
+  ends in `std::_Exit` on the game thread (the input wait's shutdown check, or
+  `~CDDAHost` when the thread will not stop), which cannot see the code
+  `SceneTree.quit()` was given and used to hard-code 0 -- every failing probe
+  run exited green until 2026-08-18. Any fixture that means to exit non-zero
+  must call `host.note_exit_code(code)` before `get_tree().quit(code)`; both
+  probes do.
 - No CI job by design: the maintainer builds on their own platforms.
 
 ## What works enough to build

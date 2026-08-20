@@ -256,6 +256,11 @@ VERSION.txt
 
 # Godot migration files
 /godot/bin/
+# Converted creature meshes are derived from the .glb beside them by
+# res://scenes/convert_creature_meshes.tscn, the same way gfx/ is composed by a script.
+# The source is the thing worth committing; regenerate the rest.
+/godot/meshes/creatures/*.res
+/godot/meshes/creatures/*.scn
 /godot/.godot/
 # Runtime dirs created when the host runs with cwd=godot/ (PATH_INFO user dir ".")
 /godot/cache/

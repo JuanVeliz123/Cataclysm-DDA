@@ -55,6 +55,10 @@ extends Node3D
 ## Everything else here is genuinely different, node for node.
 const MV := preload("res://scripts/map_view.gd")
 const TILE_SHADER_3D := preload("res://shaders/map_tiles_3d.gdshader")
+## The mesh library and its shader (3D-8d): furniture ids with a real model
+## draw that instead of their sprite. See terrain_meshes.gd for the convention.
+const TERRAIN_MESHES := preload("res://scripts/terrain_meshes.gd")
+const MESH_SHADER_3D := preload("res://shaders/mesh_tiles_3d.gdshader")
 ## The 2D contact shadows, for their constants. The blob's proportions and the lift
 ## that puts it under a character's feet were tuned by eye; a second set of numbers
 ## would be a second thing to tune.
@@ -62,6 +66,8 @@ const SHADOW := preload("res://scripts/shadow_layer.gd")
 const GLYPH_LAYER := preload("res://scripts/glyph_layer.gd")
 const ANIM_OVERLAY := preload("res://scripts/anim_overlay.gd")
 const FIELD_PARTICLES_3D := preload("res://scripts/field_particles_3d.gd")
+## Rain, snow and acid falling through the scene (3D-6).
+const WEATHER_PARTICLES_3D := preload("res://scripts/weather_particles_3d.gd")
 ## For its layer names only, so the first-frame report can spell out what the draw list
 ## contained without a second copy of the map_layer order.
 const DEBUG_OVERLAY := preload("res://scripts/debug_overlay.gd")
@@ -123,6 +129,15 @@ const LIGHT_ENERGY_SCALE := 1.0 / 40.0
 ## How hard the sun shines at noon. A guess (VER-1); the direction is not one any more.
 const SUN_ENERGY := 0.8
 
+## How far a beam noses down toward the road, in degrees (VER-1).
+##
+## The channel gives a beam its bearing and nothing else, and a level beam from
+## half a tile up lights nothing: the ground faces up, so a horizontal cone
+## grazes it at ndl ~ 0. Fifteen degrees puts the pool's near edge about a tile
+## and a half ahead of the lamp, which reads as a headlight; the game publishes
+## no elevation for the cone, so this is the renderer's number, marked as such.
+const BEAM_PITCH_DEGREES := 15.0
+
 ## Draw the shadow proxies, and draw them *instead of* the creature sprites (3D-7b).
 ##
 ## **Off, and ugly on purpose.** This is the cheapest possible answer to the question that
@@ -167,15 +182,29 @@ const LEVEL_DROP_TILES := 2.0
 
 ## Fill the world with fog the lights can glow through.
 ##
-## **Off, and an experiment rather than a feature.** It is the one thing that makes
-## real lights visible while the tiles are `unshaded`, and it is also the one thing
-## that can disagree with the simulation: a light pool is bounded by CDDA's rays, but
-## a fog volume is bounded by shadow casters, and in a flat world every sprite is a
-## camera-facing plane rather than a wall. So a lamp behind a wall glows through it,
-## which is exactly the class of lie ADR-003 refused for field of view. The
-## stood-up world (3D-3) is what makes it honest, because then walls are walls.
-const VOLUMETRIC_FOG := false
-const FOG_DENSITY := 0.02
+## On by default now, because the two things that made it a lie and a smear are both
+## fixed. The lie: a light pool is bounded by CDDA's rays but a fog volume is bounded
+## by shadow casters, and in a flat world every sprite was a camera-facing plane a
+## lamp could glow straight through. The stood-up world made walls walls, and 3D-8
+## made them boxes -- a shadow caster with actual depth. (Tilt-gated still, for
+## exactly that reason: the flat world keeps the honest no-fog baseline.) The smear:
+## the first density was read as "dims the whole frame" (VER-1), and it did -- see
+## FOG_DENSITY.
+##
+## The density lives in a FogVolume box fitted over the map, not in the Environment's
+## global density: the telephoto camera (PERSPECTIVE) stands kilometres back, and
+## global fog fills the whole approach -- the map would be seen through
+## e^-(density * distance) of it, which at any density worth having is not seen at
+## all. The box also keeps the sky above the roofline clear instead of hazing the
+## letterbox.
+const VOLUMETRIC_FOG := true
+## Fog density per world unit -- and a world unit is an artist's *pixel*, not a
+## metre, which is what the first guess (0.02) got wrong: a 45-degree ray crosses
+## about 210 units of fogged air on its way to the ground, so 0.02 meant
+## e^-4.2 = 98% of every EMISSION-lit sprite eaten -- "dims the whole frame", as
+## VER-1 put it. 0.0015 keeps extinction near 25%: enough for lamps and headlights
+## to carve visible cones, faint enough that a moonless field still reads.
+const FOG_DENSITY := 0.0015
 
 ## How far the camera is tilted off looking straight along the depth axis, in degrees
 ## (ADR-006 item 3D-3 -- the tilt experiment, and the decision point the whole ADR was
@@ -203,6 +232,28 @@ const FOG_DENSITY := 0.02
 ## holds the canvas against the camera at six tilts to keep that true (3D-1d).
 const TILT_DEGREES := 45.0
 
+## Whether the stood-up world is looked at with perspective rather than orthographic
+## projection (3D-9), and the vertical field of view when it is.
+##
+## Telephoto on purpose: the camera stands back far enough that this FOV spans
+## exactly the extent the orthographic camera showed, so the centre of the frame
+## keeps its scale -- one world unit is one pixel there, as ever -- and the
+## projection arrives only as parallax: walls near the top of the frame show a
+## little more of their tops, walls near the bottom a little more of their fronts.
+## The narrower the angle, the further back the camera and the gentler the effect;
+## at zero it would *be* the orthographic camera.
+##
+## What the telephoto deliberately trades away: the 2D canvas (glyphs, the animation
+## overlay) maps map pixels to the screen affinely, which under perspective is only
+## exact at the centre of the frame. Content drifts off its tile toward the edges --
+## proportionally to FOV -- which is tolerable because everything interactive there
+## hugs the centre (combat text rings the avatar, look mode recentres on its cursor)
+## and fallback glyphs are rare under a full tileset. The geometry gate still asserts
+## exact round-trips by forcing this off; a canvas that cannot drift needs its content
+## homed in the world proper, which is where the animation overlay is headed anyway.
+const PERSPECTIVE := true
+const PERSPECTIVE_FOV_DEGREES := 12.0
+
 ## Depth separation between one rank and the next while tilted, along the camera's
 ## own axis.
 ##
@@ -213,6 +264,18 @@ const TILT_DEGREES := 45.0
 ## in a frame put together is a few units.
 const TILT_DEPTH_STEP := 0.02
 
+## Glide the camera on the avatar's own tween instead of snapping with the turn.
+##
+## The simulation moves a whole tile at a time and the published block recentres
+## with it, so the world content jumps a tile per step while the avatar's mesh
+## glides -- which reads exactly as wrong as it sounds, and was reported so the
+## first time anyone walked with it. The camera (and the world canvas, which must
+## stay glued to the ground it annotates) rides `avatar_visual_offset()`: while
+## the avatar's body is still en route to where the game says it stands, the view
+## trails it by the same amount, and both arrive together. Costs nothing when
+## nothing is tweening, and a fixture with no avatar mesh gets a zero offset.
+const SMOOTH_CAMERA := true
+
 ## The dark the map is drawn against, matching the rect `map_view.gd` paints under
 ## its tiles and the SessionBg behind it. An opaque background rather than a
 ## transparent one: the colour is the same either way, and this way there is one
@@ -221,6 +284,12 @@ const BG_COLOR := Color(0.02, 0.02, 0.04)
 
 var _host: Node
 var _atlases: Array[Texture2D] = []
+## The same atlases as CPU-side images, kept because the box pass reads pixels the
+## GPU never hands back: `_painted_rect` measures where a sprite's paint actually is.
+var _atlas_images: Array[Image] = []
+## "atlas:x:y:w:h" -> Rect2i of the sprite's opaque pixels, sprite-local. Lazy, one
+## scan per distinct sub-rect ever seen; cleared with the atlases it was read from.
+var _painted: Dictionary = {}
 var _cmds: PackedInt32Array = PackedInt32Array()
 var _tile_size: Vector2i = Vector2i(32, 32)
 var _view_size: Vector2i = Vector2i.ZERO
@@ -233,6 +302,12 @@ var _requested_tiles: Vector2i = Vector2i.ZERO
 ## Unit quad in the XY plane, (0,0)..(1,1) with matching UVs -- the same quad the
 ## 2D backend uses, given a third coordinate of zero.
 var _quad: ArrayMesh
+## The quad grown depth for standing terrain (3D-8): front face identical to
+## `_quad`, sides and top sampling the sprite's edge pixels. Unit-deep, like the
+## quad is unit-square: each instance's transform carries its own depth in the
+## basis z column, which is what lets a wall be a tile deep and a chair only as
+## deep as the chair (see `_rebuild_batches`), all in one batch of one mesh.
+var _box: ArrayMesh
 ## "atlas:sway:palette:lit" -> MultiMeshInstance3D. One entry per distinct set of
 ## shader uniforms, which after 3D-1b is all a batch has to be uniform in.
 var _batches: Dictionary = {}
@@ -259,7 +334,16 @@ var _cos_tilt: float = 1.0
 var _tilted: bool = false
 
 var _camera: Camera3D
+## Where _update_camera put the camera, before the smooth-follow offset -- the
+## per-frame glide must compose with the per-turn placement, not fight it.
+## INF until the camera has been placed once, so a frame that ticks before any
+## refresh cannot park the camera at a zero it was never given.
+var _camera_base: Vector3 = Vector3.INF
+var _canvas_base_origin: Vector2 = Vector2.INF
 var _world_env: WorldEnvironment
+## The box of fogged air over the map; see VOLUMETRIC_FOG for why a volume and not
+## the Environment's global density.
+var _fog_volume: FogVolume
 ## Contact shadows (ADR-005 item 4): one MultiMesh of blob quads.
 var _shadow_batch: MultiMeshInstance3D
 var _shadow_material: StandardMaterial3D
@@ -286,6 +370,30 @@ var _lights_used: int = 0
 var _lights_published: int = 0
 ## map_layer -> commands this frame that named an atlas we could not draw from.
 var _skipped: Dictionary = {}
+## Creature-layer commands this frame left undrawn because their creature is drawn
+## as a mesh (3D-7c). Counted so "left to a mesh" and "lost" stay distinguishable:
+## a suppressed body takes its overlays with it, which from outside looks exactly
+## like the draw list losing content -- and was reported as that.
+var _mesh_suppressed: int = 0
+## The interned id table from get_map_ident_table (3D-8d), re-copied only when a
+## command names an index past its end -- the table is append-only in C++.
+var _ident_table: PackedStringArray = PackedStringArray()
+## id -> MultiMeshInstance3D for the mesh library's batches; one per furniture
+## id on screen, reused across rebuilds like the sprite batches.
+var _ident_batches: Dictionary = {}
+## Furniture commands drawn as library meshes this frame, for diagnostics --
+## the same "left to a mesh" vs "lost" distinction _mesh_suppressed makes.
+var _ident_routed: int = 0
+## Runtime state of VOLUMETRIC_FOG, same pattern as the tilt: the const is the
+## default, the var is what a running game (or a fixture) can drive.
+var _volumetric_fog: bool = VOLUMETRIC_FOG
+## Runtime state of PERSPECTIVE and its FOV, same pattern again -- and the geometry
+## gate *depends* on being able to drive these: its round-trip claim is about the
+## orthographic pre-stretch, so it forces perspective off before measuring.
+var _perspective: bool = PERSPECTIVE
+var _fov_degrees: float = PERSPECTIVE_FOV_DEGREES
+## Weather as particles falling through the scene (3D-6): rain, snow, acid.
+var _weather_particles: Node3D
 ## Everything about the world that is still drawn in 2D: the fallback glyphs and the
 ## animation overlay. A CanvasLayer rather than child nodes, because a Node3D cannot
 ## parent a canvas item usefully -- and because a viewport composites its canvas over
@@ -335,6 +443,7 @@ func setup(host: Node) -> void:
 	_ensure_shadow_proxy()
 	_ensure_creature_meshes()
 	_ensure_field_particles()
+	_ensure_weather_particles()
 	_ensure_lights()
 	_ensure_canvas()
 
@@ -536,7 +645,12 @@ func _refresh_creature_meshes() -> void:
 	# Heights are pre-stretched in the stood-up world, so a mesh has to be stretched with
 	# them or it will be the only thing in the scene that is not.
 	var height_scale := 1.0 / maxf(_cos_tilt, 0.0001) if _tilted else 1.0
-	_creature_meshes.refresh(_host.get_creatures(), _tile_size, feet_to_world, height_scale)
+	_creature_meshes.set_tilted(_tilted, _sin_tilt)
+	# The origin in map pixels is what lets the mesh layer tell a creature that
+	# moved from a view that recentred -- movement is detected in world space or
+	# every stationary creature takes a little walk whenever the avatar does.
+	_creature_meshes.refresh(_host.get_creatures(), _tile_size, feet_to_world, height_scale,
+		Vector2(_view_origin) * Vector2(_tile_size))
 
 func _ensure_field_particles() -> void:
 	if _field_particles != null and is_instance_valid(_field_particles):
@@ -633,8 +747,14 @@ func _refresh_lights() -> void:
 			beam.light_color = Color(src[i + 3], src[i + 4], src[i + 5])
 			beam.light_energy = clampf(src[i + 6] * LIGHT_ENERGY_SCALE, 0.15, 6.0)
 			# Compass bearing, 0 at north, and a SpotLight3D shines along its own -Z:
-			# rotating by -bearing about Y is what turns one into the other.
-			beam.rotation = Vector3(0.0, -deg_to_rad(src[i + 7]), 0.0)
+			# rotating by -bearing about Y is what turns one into the other. Pitched
+			# down as well, because a dead-level beam half a tile up never meets the
+			# ground -- the up-facing floor sees it at a grazing angle and lights not
+			# at all, which is what the first headlight screenshot showed: two beams
+			# built, nothing lit. Godot's YXZ Euler order makes this yaw-then-pitch,
+			# which is exactly how a headlight is mounted.
+			beam.rotation = Vector3(-deg_to_rad(BEAM_PITCH_DEGREES),
+				-deg_to_rad(src[i + 7]), 0.0)
 			beam.shadow_enabled = _tilted
 			beam.visible = _tilted
 			beams += 1
@@ -742,19 +862,101 @@ func _ensure_environment() -> void:
 	# and the threshold stops being a safety mechanism.
 	env.glow_bloom = 0.0
 	env.glow_blend_mode = Environment.GLOW_BLEND_MODE_ADDITIVE
-	if VOLUMETRIC_FOG:
-		# The fog volume is a fixed length of frustum measured from the camera, which
-		# is why CAM_Z came down from 4096: a volume that stops short of the world
-		# lights nothing in it.
-		env.volumetric_fog_enabled = true
-		env.volumetric_fog_density = FOG_DENSITY
-		env.volumetric_fog_length = CAM_Z + CAM_NEAR * 2.0
 	_world_env = WorldEnvironment.new()
 	_world_env.name = "WorldEnvironment"
 	_world_env.environment = env
 	add_child(_world_env)
+	_refresh_environment()
 	# No visibility dance here, unlike the 2D backend's: this environment is inside
 	# the world's own viewport, which is the thing ADR-004 bought.
+
+## Apply the parts of the environment that depend on runtime state: today, the fog.
+##
+## Fog only while tilted, for the reason VOLUMETRIC_FOG documents -- flat, every
+## light is invisible anyway and a fog volume is bounded by shadow casters the flat
+## world does not have, so a lamp behind a wall glows through it. Stood up, walls
+## cast, and the objection retires with the flat default.
+##
+## The volume is a fixed length of frustum measured from the camera, so the length
+## has to reach the world's far edge -- which while tilted is `camera.far`, not the
+## `CAM_Z + 2` that fit the flat world. Getting this wrong fogs the near half of
+## the map and leaves lights in the far half shining into clear air.
+func _refresh_environment() -> void:
+	if _world_env == null or not is_instance_valid(_world_env) or _world_env.environment == null:
+		return
+	var env: Environment = _world_env.environment
+	var want := _volumetric_fog and _tilted
+	env.volumetric_fog_enabled = want
+	if _fog_volume != null and is_instance_valid(_fog_volume):
+		_fog_volume.visible = want
+	if want:
+		# All of the density is in the box below; the global term would fog the
+		# telephoto's empty approach. See VOLUMETRIC_FOG.
+		env.volumetric_fog_density = 0.0
+		var reach := CAM_Z + CAM_NEAR * 2.0
+		if _camera != null and is_instance_valid(_camera):
+			reach = _camera.far
+		env.volumetric_fog_length = reach
+		_ensure_fog_volume()
+		# Fitted to the map: its footprint plus a tile of skirt, from two levels
+		# below the floor (a basement fire wants its haze too) up to four tiles of
+		# painted height, which clears every roofline the art draws.
+		var map_w := float(_view_size.x * _tile_size.x)
+		var depth := float(_view_size.y * _tile_size.y) / maxf(_sin_tilt, 0.0001)
+		var top := 4.0 * float(_tile_size.y) / maxf(_cos_tilt, 0.0001)
+		var bottom := _level_y(2)
+		var pad := float(_tile_size.y) * 2.0
+		_fog_volume.size = Vector3(map_w + pad, top - bottom, depth + pad)
+		_fog_volume.position = Vector3(map_w * 0.5, (top + bottom) * 0.5, depth * 0.5)
+
+## Fill the world with light-catching fog, or drain it, at runtime. Same shape as
+## `set_tilt_degrees`: the const is the default, this is the experiment's handle.
+func set_volumetric_fog(on: bool) -> void:
+	if on == _volumetric_fog:
+		return
+	_volumetric_fog = on
+	_refresh_environment()
+
+## The fogged air itself. Lazy, like the camera and the environment: built the first
+## refresh that wants it, resized every refresh after.
+func _ensure_fog_volume() -> void:
+	if _fog_volume != null and is_instance_valid(_fog_volume):
+		return
+	_fog_volume = FogVolume.new()
+	_fog_volume.name = "MapFog"
+	# A box, said out loud: the default shape is an ellipsoid, which would thin the
+	# fog toward the map's edges and corners for no reason anyone asked for.
+	_fog_volume.shape = RenderingServer.FOG_VOLUME_SHAPE_BOX
+	var mat := FogMaterial.new()
+	mat.density = FOG_DENSITY
+	_fog_volume.material = mat
+	add_child(_fog_volume)
+
+## Tune the density on a running game (VER-1); FOG_DENSITY documents the unit.
+func set_fog_density(density: float) -> void:
+	_ensure_fog_volume()
+	var mat := _fog_volume.material as FogMaterial
+	if mat != null:
+		mat.density = clampf(density, 0.0, 1.0)
+
+## Drive the projection on a running game, and let the geometry gate force the
+## orthographic baseline it asserts about. No rebuild: the world's geometry is the
+## same either way, only the camera looking at it moves.
+func set_perspective(on: bool) -> void:
+	if on == _perspective:
+		return
+	_perspective = on
+	_update_camera()
+
+func perspective_enabled() -> bool:
+	return _perspective
+
+func set_perspective_fov(degrees: float) -> void:
+	var want := clampf(degrees, 2.0, 45.0)
+	if is_equal_approx(want, _fov_degrees):
+		return
+	_fov_degrees = want
+	_update_camera()
 
 func refresh() -> void:
 	if _host == null:
@@ -794,6 +996,7 @@ func refresh() -> void:
 	_rebuild_glyph_layers()
 	_rebuild_shadows()
 	_refresh_field_particles()
+	_refresh_weather_particles()
 	_refresh_lights()
 	_refresh_sun()
 	_update_light_texture()
@@ -843,12 +1046,12 @@ func _report_once() -> void:
 		str(not vp.disable_3d), str(vp.own_world_3d), str(vp.transparent_bg)])
 	print("[map3d] lights=%d + beams=%d of %d published (cap %d), sun=%s, fog=%s" % [
 		_lights_used, _beams_used, _lights_published, MAX_LIGHTS,
-		str(_sun != null and _sun.visible), str(VOLUMETRIC_FOG)])
+		str(_sun != null and _sun.visible), str(_volumetric_fog and _tilted)])
 	if _creature_meshes != null and is_instance_valid(_creature_meshes):
 		var ms: Dictionary = _creature_meshes.debug_stats()
-		print("[map3d] creature meshes: %d drawn, %d ids seen, %d with art" % [
+		print("[map3d] creature meshes: %d drawn, %d ids seen, %d with art (%d animated)" % [
 			int(ms.get("drawn", 0)), int(ms.get("ids_seen", 0)),
-			int(ms.get("ids_with_meshes", 0))])
+			int(ms.get("ids_with_meshes", 0)), int(ms.get("animated_ids", 0))])
 	if SHOW_SHADOW_PROXIES and _tilted:
 		print("[map3d] SHOW_SHADOW_PROXIES: creature sprites are hidden and their capsules "
 			+ "are drawn in their place (3D-7b). This is meant to look wrong.")
@@ -868,8 +1071,15 @@ func _report_once() -> void:
 		print("[map3d] draw list by layer: ", " ".join(parts))
 		print("[map3d] light sources from the game = %d, open columns = %d" % [
 			int(st.get("lights", 0)), int(st.get("open_columns", 0))])
+	if _mesh_suppressed > 0:
+		# Said out loud because from outside it is indistinguishable from losing
+		# content: the suppressed body takes every clothing overlay with it, and
+		# "the avatar draws naked" was reported as a regression when it was this.
+		print("[map3d] %d creature sprite command(s) left to their meshes (3D-7c), "
+			% _mesh_suppressed + "overlays included -- a meshed creature wears nothing yet")
 	if _skipped.is_empty():
-		print("[map3d] every published command was drawn")
+		print("[map3d] every published command was drawn"
+			+ ("" if _mesh_suppressed == 0 else " or meshed"))
 	else:
 		var lost: Array[String] = []
 		for sl in _skipped:
@@ -897,6 +1107,8 @@ func set_tilt_degrees(degrees: float) -> void:
 	_tilt_degrees = want
 	_batched_generation = -1
 	_update_camera()
+	# The fog is gated on the tilt and sized by the camera, both of which just moved.
+	_refresh_environment()
 
 func tilt_degrees() -> float:
 	return _tilt_degrees
@@ -909,6 +1121,8 @@ func zoom_step(direction: int) -> void:
 
 func _load_atlases() -> void:
 	_atlases.clear()
+	_atlas_images.clear()
+	_painted.clear()
 	var count: int = _host.get_tileset_atlas_count()
 	if count <= 0:
 		return
@@ -917,8 +1131,10 @@ func _load_atlases() -> void:
 		if img == null or img.get_width() <= 0:
 			push_warning("MapView3D: empty atlas %d" % i)
 			_atlases.append(null)
+			_atlas_images.append(null)
 			continue
 		_atlases.append(ImageTexture.create_from_image(img))
+		_atlas_images.append(img)
 	_atlases_loaded = _atlases.size() > 0
 	_palette_tex = null
 	if _host.has_method("get_palette_image"):
@@ -992,16 +1208,45 @@ func _update_camera() -> void:
 		# matters is that near and far contain a world that is now deep.
 		var depth := map_h / maxf(_sin_tilt, 0.0001)
 		var target := Vector3(map_w * 0.5, 0.0, depth * 0.5)
-		_camera.position = target + _view_axis() * CAM_Z
 		# Pitch down. Negative about X takes the camera's forward from -Z toward -Y.
 		_camera.rotation = Vector3(-_tilt, 0.0, 0.0)
-		_camera.far = CAM_Z + depth + CAM_FAR
+		if _perspective:
+			# The telephoto (see PERSPECTIVE): the distance is derived so the FOV
+			# spans at the target exactly what the orthographic size spanned
+			# everywhere, which keeps the centre of the frame at ortho scale and
+			# makes zoom a dolly.
+			var span := maxf(1.0, area.y / maxf(_zoom, 0.01))
+			var dist := (span * 0.5) / tan(deg_to_rad(_fov_degrees) * 0.5)
+			# Half the map's own reach along the view axis, plus headroom for
+			# standing heights: what near and far must clear around the target.
+			var half := map_h * 0.5 + float(_tile_size.y) * 8.0
+			_camera.projection = Camera3D.PROJECTION_PERSPECTIVE
+			_camera.fov = _fov_degrees
+			_camera.position = target + _view_axis() * dist
+			# The near plane rides just in front of the world rather than at the
+			# camera: nothing exists in the kilometres of approach a telephoto
+			# stands back through, and starting the frustum at the map is what
+			# keeps depth precision -- and later the volumetric fog's froxel
+			# buffer -- spent on the part with a world in it.
+			_camera.near = maxf(CAM_NEAR, dist - half)
+			_camera.far = dist + half + CAM_FAR
+		else:
+			_camera.projection = Camera3D.PROJECTION_ORTHOGONAL
+			_camera.position = target + _view_axis() * CAM_Z
+			_camera.near = CAM_NEAR
+			_camera.far = CAM_Z + depth + CAM_FAR
 	else:
+		_camera.projection = Camera3D.PROJECTION_ORTHOGONAL
 		_camera.position = Vector3(map_w * 0.5, -map_h * 0.5, CAM_Z)
 		# Looking straight down -Z with +Y up: no rotation at all. Set rather than
 		# assumed, because the tilt above is what changes it.
 		_camera.rotation = Vector3.ZERO
+		_camera.near = CAM_NEAR
 		_camera.far = CAM_FAR
+	# What the smooth follow composes onto, next frame and every frame after.
+	_camera_base = _camera.position
+	# The fog volume is a length of this camera's frustum, so it follows the far plane.
+	_refresh_environment()
 	_update_uniforms()
 
 ## Put the 2D remainder where the camera puts the world.
@@ -1028,8 +1273,9 @@ func _sync_canvas_transform(area: Vector2, map_w: float, map_h: float) -> void:
 	if _canvas == null or not is_instance_valid(_canvas):
 		return
 	_canvas.visible = true
-	_canvas.transform = Transform2D(0.0, Vector2(_zoom, _zoom), 0.0, Vector2(
-		(area.x - map_w * _zoom) * 0.5, (area.y - map_h * _zoom) * 0.5))
+	_canvas_base_origin = Vector2(
+		(area.x - map_w * _zoom) * 0.5, (area.y - map_h * _zoom) * 0.5)
+	_canvas.transform = Transform2D(0.0, Vector2(_zoom, _zoom), 0.0, _canvas_base_origin)
 
 func _ensure_quad() -> ArrayMesh:
 	if _quad != null:
@@ -1061,11 +1307,122 @@ func _ensure_quad() -> ArrayMesh:
 	_quad.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
 	return _quad
 
+## Which mesh a sprite batch draws (3D-8). Standing terrain gets the box; everything
+## else -- ground, creatures, the whole flat world -- keeps the quad. Vegetation is
+## excluded by its sway flag on purpose: a canopy painted out to the frame's edge
+## would grow walls and a roof of smeared leaf pixels, where a wall's edge pixels
+## *are* its material. Furniture that stops short of the frame edge degrades to the
+## quad look on its own, because its edge pixels are transparent and the scissor
+## discards the faces they cover.
+func _sprite_mesh(tall: bool, creature: bool, sway: bool) -> ArrayMesh:
+	if _tilted and tall and not creature and not sway:
+		return _ensure_box()
+	return _ensure_quad()
+
+## Where a sprite's paint actually is, as a sprite-local rect (3D-8's fitting pass).
+##
+## The frame is the artist's canvas, not the object's outline: a chair uses a third
+## of its cell and a full-frame box around it reads as a chair painted on a crate.
+## This is the measurement that lets the box shrink to the chair. `get_used_rect`
+## counts any pixel with alpha, which is slightly generous next to the shader's 0.5
+## scissor -- a soft halo inflates the fit by a pixel -- and generous is the right
+## direction to be wrong in. Falls back to the full frame when the atlas has no
+## CPU-side image or the region is entirely transparent.
+func _painted_rect(atlas_i: int, sx: int, sy: int, sw: int, sh: int) -> Rect2i:
+	var key := "%d:%d:%d:%d:%d" % [atlas_i, sx, sy, sw, sh]
+	var hit = _painted.get(key)
+	if hit != null:
+		return hit
+	var rect := Rect2i(0, 0, sw, sh)
+	if atlas_i >= 0 and atlas_i < _atlas_images.size() and _atlas_images[atlas_i] != null:
+		var img: Image = _atlas_images[atlas_i]
+		var used: Rect2i = img.get_region(Rect2i(sx, sy, sw, sh)).get_used_rect()
+		if used.size.x > 0 and used.size.y > 0:
+			rect = used
+	_painted[key] = rect
+	return rect
+
+## The standing quad extruded away from the camera (3D-8), so a north-south wall
+## run meets the next tile's front face with no gap.
+##
+## Local space matches `_ensure_quad` -- x across, y down the sprite, unit-sized --
+## and the depth is unit too: local z spans [-1, 0], and the instance transform's
+## basis z column stretches it to the real depth in world units (a tile of ground
+## is `tile / sin` there, the same pre-stretch the ground rows get). Baking the
+## depth into the mesh was the first version, and it meant one depth for every
+## sprite and a rebuild whenever the tilt moved; on the instance, a wall and a
+## fitted chair share this mesh in the same batch.
+##
+## Faces: front (the original quad, pixel-identical), two sides sampling the sprite's
+## edge columns, a top sampling its top row. The UV pinning is the whole trick: the
+## fragment shader already clamps samples half a texel inside the sprite's rect, so
+## u = 0 exactly is the left column and v = 0 the top row, smeared across the face.
+## No bottom -- it stands on the ground -- and no back: the camera's yaw is fixed, so
+## a back face could only ever be seen *through* transparent front pixels, where it
+## would read as a second copy of the sprite a tile deeper.
+func _ensure_box() -> ArrayMesh:
+	if _box != null:
+		return _box
+	var d := 1.0
+	var vertices := PackedVector3Array([
+		# Front, z = 0: vertex for vertex the quad above.
+		Vector3(0.0, 0.0, 0.0), Vector3(1.0, 0.0, 0.0),
+		Vector3(1.0, 1.0, 0.0), Vector3(0.0, 1.0, 0.0),
+		# Left side, x = 0.
+		Vector3(0.0, 0.0, 0.0), Vector3(0.0, 0.0, -d),
+		Vector3(0.0, 1.0, -d), Vector3(0.0, 1.0, 0.0),
+		# Right side, x = 1.
+		Vector3(1.0, 0.0, 0.0), Vector3(1.0, 1.0, 0.0),
+		Vector3(1.0, 1.0, -d), Vector3(1.0, 0.0, -d),
+		# Top, y = 0 -- the sprite's top edge, which is up in the world.
+		Vector3(0.0, 0.0, 0.0), Vector3(1.0, 0.0, 0.0),
+		Vector3(1.0, 0.0, -d), Vector3(0.0, 0.0, -d),
+	])
+	var uvs := PackedVector2Array([
+		Vector2(0.0, 0.0), Vector2(1.0, 0.0), Vector2(1.0, 1.0), Vector2(0.0, 1.0),
+		# Sides pin u to the edge column; v still runs down the sprite.
+		Vector2(0.0, 0.0), Vector2(0.0, 0.0), Vector2(0.0, 1.0), Vector2(0.0, 1.0),
+		Vector2(1.0, 0.0), Vector2(1.0, 1.0), Vector2(1.0, 1.0), Vector2(1.0, 0.0),
+		# Top pins v to the top row; u still runs across it.
+		Vector2(0.0, 0.0), Vector2(1.0, 0.0), Vector2(1.0, 0.0), Vector2(0.0, 0.0),
+	])
+	# Local y grows *down* the sprite (the placement's y column carries the flip), so
+	# world-up is local -y. The shader turns any of these toward the viewer anyway.
+	var normals := PackedVector3Array([
+		Vector3(0.0, 0.0, 1.0), Vector3(0.0, 0.0, 1.0),
+		Vector3(0.0, 0.0, 1.0), Vector3(0.0, 0.0, 1.0),
+		Vector3(-1.0, 0.0, 0.0), Vector3(-1.0, 0.0, 0.0),
+		Vector3(-1.0, 0.0, 0.0), Vector3(-1.0, 0.0, 0.0),
+		Vector3(1.0, 0.0, 0.0), Vector3(1.0, 0.0, 0.0),
+		Vector3(1.0, 0.0, 0.0), Vector3(1.0, 0.0, 0.0),
+		Vector3(0.0, -1.0, 0.0), Vector3(0.0, -1.0, 0.0),
+		Vector3(0.0, -1.0, 0.0), Vector3(0.0, -1.0, 0.0),
+	])
+	var indices := PackedInt32Array([
+		0, 1, 2, 0, 2, 3,
+		4, 5, 6, 4, 6, 7,
+		8, 9, 10, 8, 10, 11,
+		12, 13, 14, 12, 14, 15,
+	])
+	var arrays := []
+	arrays.resize(Mesh.ARRAY_MAX)
+	arrays[Mesh.ARRAY_VERTEX] = vertices
+	arrays[Mesh.ARRAY_TEX_UV] = uvs
+	arrays[Mesh.ARRAY_NORMAL] = normals
+	arrays[Mesh.ARRAY_INDEX] = indices
+	_box = ArrayMesh.new()
+	_box.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+	return _box
+
 func _clear_batches() -> void:
 	for node in _batches.values():
 		if is_instance_valid(node):
 			node.queue_free()
 	_batches.clear()
+	for node in _ident_batches.values():
+		if is_instance_valid(node):
+			node.queue_free()
+	_ident_batches.clear()
 
 ## Screen pixels to world units, flat: y flips, because screen y grows downward and 3D
 ## y grows up. Everything the snapshot publishes is in screen pixels, so this is where
@@ -1163,6 +1520,11 @@ func _batch_for(key: String, atlas_i: int, sway: bool, palette: int,
 		lit: bool, tall: bool, creature: bool, z_below: int) -> MultiMeshInstance3D:
 	var existing = _batches.get(key)
 	if existing != null and is_instance_valid(existing):
+		# Re-chosen on reuse, because batch nodes outlive the thing the choice
+		# depends on: a tilt toggle rebuilds instances but keeps the nodes, and a
+		# node built flat would keep drawing quads where the stood-up world wants
+		# boxes. Assigning the same mesh back is free.
+		existing.multimesh.mesh = _sprite_mesh(tall, creature, sway)
 		return existing
 
 	var tex: Texture2D = _atlases[atlas_i]
@@ -1170,7 +1532,7 @@ func _batch_for(key: String, atlas_i: int, sway: bool, palette: int,
 	mm.transform_format = MultiMesh.TRANSFORM_3D
 	mm.use_custom_data = true
 	mm.use_colors = true
-	mm.mesh = _ensure_quad()
+	mm.mesh = _sprite_mesh(tall, creature, sway)
 
 	var mat := ShaderMaterial.new()
 	mat.shader = TILE_SHADER_3D
@@ -1202,6 +1564,99 @@ func _batch_for(key: String, atlas_i: int, sway: bool, palette: int,
 	_batches[key] = node
 	return node
 
+## Which library id a command's ident bits name, or "" when the id has no mesh.
+## The table is append-only in C++, so it is re-copied only when a command names
+## an index past the cached end -- one call per new id ever seen, not per frame.
+func _ident_id(ident: int) -> String:
+	var index := ident - 1
+	if index >= _ident_table.size():
+		if _host != null and _host.has_method("get_map_ident_table"):
+			_ident_table = _host.get_map_ident_table()
+		if index >= _ident_table.size():
+			return ""
+	var id := _ident_table[index]
+	return id if TERRAIN_MESHES.library().has(id) else ""
+
+## One MultiMesh per furniture id on screen, drawing that id's library mesh with
+## the CDDA tint in INSTANCE_CUSTOM (COLOR is the baked material; see
+## mesh_tiles_3d.gdshader). Real geometry casts real shadows.
+func _ident_batch_for(id: String, mesh: Mesh) -> MultiMeshInstance3D:
+	var existing = _ident_batches.get(id)
+	if existing != null and is_instance_valid(existing):
+		return existing
+	var mm := MultiMesh.new()
+	mm.transform_format = MultiMesh.TRANSFORM_3D
+	mm.use_custom_data = true
+	mm.mesh = mesh
+	var mat := ShaderMaterial.new()
+	mat.shader = MESH_SHADER_3D
+	var node := MultiMeshInstance3D.new()
+	node.name = "IdentMesh_" + id
+	node.multimesh = mm
+	node.material_override = mat
+	node.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+	add_child(node)
+	_ident_batches[id] = node
+	return node
+
+## Place every routed furniture command as its library mesh (3D-8d).
+##
+## Sizing is two rules and a min. Height-match: at this camera a mesh's apparent
+## height on screen is `k * (box.y + box.z)` -- the pre-stretches cancel so the
+## rise contributes its true height and the depth its true depth -- so k is
+## chosen to reproduce the sprite's painted height, and a bed that paints low
+## and deep comes out low and deep. Footprint cap: k may not push the footprint
+## past 1.1 tiles, which is what stops the height rule from growing a bed past
+## the tile it owns. The min of the two is the scale.
+func _fill_ident_batches(mesh_buckets: Dictionary) -> void:
+	for id in _ident_batches:
+		if not mesh_buckets.has(id):
+			var idle: MultiMeshInstance3D = _ident_batches[id]
+			if is_instance_valid(idle):
+				idle.multimesh.instance_count = 0
+	if mesh_buckets.is_empty():
+		return
+	var rise := 1.0 / maxf(_cos_tilt, 0.0001)
+	var ground := 1.0 / maxf(_sin_tilt, 0.0001)
+	for id in mesh_buckets:
+		var entry: Dictionary = TERRAIN_MESHES.library()[id]
+		var node := _ident_batch_for(id, entry["mesh"])
+		var box: AABB = entry["box"]
+		var offsets: PackedInt32Array = mesh_buckets[id]
+		var mm := node.multimesh
+		mm.instance_count = offsets.size()
+		for slot in offsets.size():
+			var o: int = offsets[slot]
+			var src_w: int = _cmds[o + 3]
+			var src_h: int = _cmds[o + 4]
+			# The sprite's own placement, depth-rank zero: real geometry needs
+			# no ordering nudge, the depth buffer has its actual shape.
+			var flat := MV.tile_transform(
+				float(_cmds[o + 5]), float(_cmds[o + 6]),
+				float(src_w), float(src_h), 0, false)
+			var placed := _place(flat, true, float(_cmds[o + 6] + src_h), 0.0,
+				(_cmds[o + 9] & MV.Z_BELOW_MASK) >> MV.Z_BELOW_SHIFT)
+			# Bottom-centre of the sprite's front face is the tile's front row;
+			# the mesh stands in the middle of the tile's ground, half a
+			# stretched tile further north.
+			var anchor := placed * Vector3(0.5, 1.0, 0.0)
+			anchor.z -= float(_tile_size.y) * ground * 0.5
+			var fitr := _painted_rect(_cmds[o], _cmds[o + 1], _cmds[o + 2],
+				src_w, src_h)
+			var k := minf(
+				float(fitr.size.y) / maxf(0.05, box.size.y + box.size.z),
+				1.1 * float(_tile_size.y) / maxf(0.05, maxf(box.size.x, box.size.z)))
+			# World anisotropy on the world's axes, the piece's quarter-turn
+			# inside it -- the same order every placement here uses.
+			var rot: int = _cmds[o + 9] & MV.ROTATION_MASK
+			var basis := Basis(
+				Vector3(k, 0.0, 0.0),
+				Vector3(0.0, k * rise, 0.0),
+				Vector3(0.0, 0.0, k * ground)) \
+				* Basis(Vector3.UP, -PI * 0.5 * float(rot))
+			mm.set_instance_transform(slot, Transform3D(basis, anchor))
+			mm.set_instance_custom_data(slot, _unpack_tint(_cmds[o + 8]))
+
 ## Bucket by what a batch's uniforms are, put the depth on each sprite, and let the
 ## depth buffer do the interleaving (3D-1b).
 ##
@@ -1230,6 +1685,10 @@ func _rebuild_batches() -> void:
 	var n := _cmds.size()
 	var i := 0
 	_skipped.clear()
+	_mesh_suppressed = 0
+	_ident_routed = 0
+	# id -> command offsets drawn from the mesh library instead of sprites.
+	var mesh_buckets: Dictionary = {}
 	var suppressed: Dictionary = {}
 	if _creature_meshes != null and is_instance_valid(_creature_meshes):
 		suppressed = _creature_meshes.suppressed_tiles()
@@ -1275,9 +1734,33 @@ func _rebuild_batches() -> void:
 			var centre_x := float(_cmds[i + 5]) + float(_cmds[i + 3]) * 0.5
 			var foot_y := float(_cmds[i + 6] + _cmds[i + 4]) - 1.0
 			if suppressed.has(CREATURE_MESHES.tile_key(centre_x, foot_y, _tile_size)):
+				# Counted, because it is invisible by design and was mistaken for a
+				# regression: the body's overlays go with it, so a meshed avatar
+				# "loses" a dozen commands every frame, on purpose.
+				_mesh_suppressed += 1
 				i += MV.CMD_STRIDE
 				continue
 		var tall := (flags & MV.FLAG_TALL) != 0 or creature
+		# A furniture id with a model in the library draws the model instead of
+		# the sprite (3D-8d) -- tall or flat: a bed Ultica paints as a 32x32
+		# ground quad is exactly as much a bed as a locker it paints standing,
+		# and the mesh stands either way. Only the avatar's own level:
+		# level_below is a per-batch shader uniform and one id's mesh batch must
+		# not span levels, so lower floors keep their sprites -- dimmed and
+		# distant, which is where a sprite is at its best anyway.
+		if _tilted and z_below == 0 and layer == MV.FURNITURE_LAYER:
+			var ident: int = (flags & MV.IDENT_MASK) >> MV.IDENT_SHIFT
+			if ident > 0:
+				var mesh_id := _ident_id(ident)
+				if not mesh_id.is_empty():
+					if not mesh_buckets.has(mesh_id):
+						mesh_buckets[mesh_id] = PackedInt32Array()
+					var mb: PackedInt32Array = mesh_buckets[mesh_id]
+					mb.append(i)
+					mesh_buckets[mesh_id] = mb
+					_ident_routed += 1
+					i += MV.CMD_STRIDE
+					continue
 		# The level is back in the key because it is a shader uniform again: the
 		# depth fade moved out of C++ into `level_fade`, so a batch may not span two
 		# levels any more than it may span two palettes. Levels are few.
@@ -1338,6 +1821,11 @@ func _rebuild_batches() -> void:
 		var offsets: PackedInt32Array = buckets[key]
 		var mm := node.multimesh
 		mm.instance_count = offsets.size()
+		# Whether this batch draws the extruded box (`_sprite_mesh`'s condition,
+		# spelled in key fields): standing terrain, tilted, not vegetation. Only
+		# these instances get fitted and given a depth.
+		var boxed := _tilted and int(parts[4]) != 0 and int(parts[5]) == 0 \
+			and int(parts[1]) == 0
 		var creatures: Array = []
 		for slot in offsets.size():
 			var o: int = offsets[slot]
@@ -1347,16 +1835,64 @@ func _rebuild_batches() -> void:
 				float(_cmds[o + 5]), float(_cmds[o + 6]),
 				float(src_w), float(src_h), _cmds[o + 9] & MV.ROTATION_MASK,
 				(_cmds[o + 9] & MV.FLAG_FLIP_X) != 0)
+			# The atlas sub-rect this instance samples; the fitting below may
+			# narrow it together with the geometry, which is what keeps the front
+			# face's pixels exactly the 2D backend's -- the same sub-rect over the
+			# same screen rectangle.
+			var cut := Rect2i(_cmds[o + 1], _cmds[o + 2], src_w, src_h)
+			# One tile of ground: the depth a connector's box gets.
+			var depth_px := float(_tile_size.y)
+			if boxed:
+				# What the game says this tile *is* (3D-8c) -- the claim paint
+				# cannot make. Zero is an old library or an unclassified tile,
+				# and falls through to the fitting heuristic below.
+				var shape: int = (_cmds[o + 9] & MV.SHAPE_MASK) >> MV.SHAPE_SHIFT
+				if shape == MV.SHAPE_DOOR or shape == MV.SHAPE_THIN:
+					# A panel at the tile's face: a door is not a metre of oak,
+					# and a fence is something to see over and past -- it was a
+					# full connector box before these bits, because chain-link
+					# paint spans its frame exactly the way a wall's does.
+					depth_px = maxf(2.0, float(_tile_size.y) / 8.0)
+				if shape == MV.SHAPE_WALL or shape == MV.SHAPE_WINDOW:
+					# Walls and windows keep the full frame and the full tile
+					# whatever their paint says: runs must seal, and a curtained
+					# window is still a wall's worth of building.
+					pass
+				else:
+					var fit := _painted_rect(atlas_i, cut.position.x, cut.position.y,
+						src_w, src_h)
+					# Paint that spans the frame's full width keeps the full frame
+					# -- a counter run must not open seams. Anything narrower is
+					# an object: geometry and sampled pixels shrink to the paint,
+					# so a chair is a chair-sized block with chair-coloured sides
+					# and a *visible* painted top, where the full frame's top row
+					# was transparent and the scissor ate the face. An open door
+					# fits down to its swung panel the same way.
+					if fit.position.x > 1 or fit.end.x < src_w - 1:
+						if shape == MV.SHAPE_NONE:
+							# With no claim from the game, the paint's width is
+							# also the best guess at its depth, capped at a tile.
+							depth_px = minf(float(fit.size.x), depth_px)
+						flat = flat * Transform2D(
+							Vector2(float(fit.size.x) / float(src_w), 0.0),
+							Vector2(0.0, float(fit.size.y) / float(src_h)),
+							Vector2(float(fit.position.x) / float(src_w),
+								float(fit.position.y) / float(src_h)))
+						cut = Rect2i(cut.position + fit.position, fit.size)
 			var xf := _place(flat, MV.CREATURE_LAYERS.has(_cmds[o + 7])
 				or (_cmds[o + 9] & MV.FLAG_TALL) != 0,
 				float(_cmds[o + 6] + src_h), _depths.get(_rank_of(o), 0.0),
 				(_cmds[o + 9] & MV.Z_BELOW_MASK) >> MV.Z_BELOW_SHIFT)
+			if boxed:
+				# The unit-deep box takes its real depth here, in the same
+				# pre-stretched units the ground rows use.
+				xf.basis.z *= depth_px / maxf(_sin_tilt, 0.0001)
 			mm.set_instance_transform(slot, xf)
 			mm.set_instance_custom_data(slot, Color(
-				float(_cmds[o + 1]) * inv_w,
-				float(_cmds[o + 2]) * inv_h,
-				float(src_w) * inv_w,
-				float(src_h) * inv_h
+				float(cut.position.x) * inv_w,
+				float(cut.position.y) * inv_h,
+				float(cut.size.x) * inv_w,
+				float(cut.size.y) * inv_h
 			))
 			mm.set_instance_color(slot, _unpack_tint(_cmds[o + 8]))
 			# Creatures are the instances that move between rebuilds (SP-5), and
@@ -1386,6 +1922,8 @@ func _rebuild_batches() -> void:
 		else:
 			_creature_slots[key] = creatures
 
+	_fill_ident_batches(mesh_buckets)
+
 	# A MultiMesh recomputes its own bounds from every instance and a batch is
 	# rebuilt every turn, so hand the bounds over instead: the map's extent is known
 	# here and is the same for every batch. The margin covers sprites that overhang
@@ -1398,6 +1936,10 @@ func _rebuild_batches() -> void:
 		Vector3(map_w + margin * 2.0, map_h + margin * 2.0, _depth_span + Z_STEP * 2.0))
 	for key in _batches:
 		var node: MultiMeshInstance3D = _batches[key]
+		if is_instance_valid(node):
+			node.custom_aabb = bounds
+	for id in _ident_batches:
+		var node: MultiMeshInstance3D = _ident_batches[id]
 		if is_instance_valid(node):
 			node.custom_aabb = bounds
 
@@ -1574,6 +2116,34 @@ func _refresh_field_particles() -> void:
 		_field_particles.set_conditions(float(pc.get("daylight", 1.0)),
 			float(pc.get("precipitation", 0.0)), float(pc.get("pain", 0.0)))
 
+## Weather falling through the scene (3D-6). Tilted only, like the engine lights:
+## flat has no "through the scene" for anything to fall through, and the flat world
+## is the 2D backend's baseline and must stay on it.
+func _refresh_weather_particles() -> void:
+	if _weather_particles == null or not is_instance_valid(_weather_particles):
+		return
+	if _host == null or not _host.has_method("get_conditions"):
+		return
+	var wind := Vector2.ZERO
+	if _host.has_method("get_wind_vector"):
+		wind = _host.get_wind_vector()
+	var cond: Dictionary = _host.get_conditions()
+	var map_w := float(_view_size.x * _tile_size.x)
+	var map_h := float(_view_size.y * _tile_size.y)
+	_weather_particles.set_tilted(_tilted, _sin_tilt)
+	_weather_particles.refresh(int(cond.get("weather_kind", 0)),
+		float(cond.get("precipitation", 0.0)), float(cond.get("daylight", 1.0)),
+		wind, Vector2(map_w, map_h), float(_tile_size.y))
+
+func _ensure_weather_particles() -> void:
+	if _weather_particles != null and is_instance_valid(_weather_particles):
+		return
+	_weather_particles = Node3D.new()
+	_weather_particles.name = "WeatherParticles"
+	_weather_particles.set_script(WEATHER_PARTICLES_3D)
+	add_child(_weather_particles)
+	_weather_particles.setup()
+
 ## The depth rank of the command at offset @p i -- `map_view.gd`'s, unchanged, so
 ## the two backends agree about what is in front of what.
 func _rank_of(i: int) -> int:
@@ -1653,8 +2223,10 @@ func _update_uniforms() -> void:
 		daylight = float(c.get("daylight", 1.0))
 		precipitation = float(c.get("precipitation", 0.0))
 		pain = float(c.get("pain", 0.0))
-	for key in _batches:
-		var node: MultiMeshInstance3D = _batches[key]
+	# The sprite batches and the mesh library batches share every uniform name
+	# on purpose (see mesh_tiles_3d.gdshader), so one loop feeds both.
+	for key in _batches.keys() + _ident_batches.keys():
+		var node: MultiMeshInstance3D = _batches.get(key, _ident_batches.get(key))
 		if not is_instance_valid(node) or node.material_override == null:
 			continue
 		var mat: ShaderMaterial = node.material_override
@@ -1674,6 +2246,7 @@ func _process(delta: float) -> void:
 	if not visible or _host == null:
 		return
 	_poll_hits()
+	_follow_avatar()
 	if _hits.is_empty():
 		return
 	var still: Array = []
@@ -1686,6 +2259,29 @@ func _process(delta: float) -> void:
 	if not _hits.is_empty() or ended:
 		_apply_hit_reactions()
 
+## The smooth camera (SMOOTH_CAMERA): compose the avatar's tween offset onto the
+## per-turn camera placement, and shift the world canvas by the matching screen
+## delta so the glyphs and the animation overlay stay glued to the ground they
+## annotate. Screen px per world unit is the zoom for an orthographic camera; a
+## ground step of world z projects to z*sin(tilt) px, and the flat world's
+## vertical is -y -- the same two mappings every placement here makes.
+func _follow_avatar() -> void:
+	if not SMOOTH_CAMERA or _camera == null or not is_instance_valid(_camera):
+		return
+	if _camera_base == Vector3.INF:
+		return
+	var off := Vector3.ZERO
+	if _creature_meshes != null and is_instance_valid(_creature_meshes) \
+			and _creature_meshes.has_method("avatar_visual_offset"):
+		off = _creature_meshes.avatar_visual_offset()
+	_camera.position = _camera_base + off
+	if _canvas == null or not is_instance_valid(_canvas) or _canvas_base_origin == Vector2.INF:
+		return
+	var screen := Vector2(off.x, off.z * _sin_tilt) if _tilted else Vector2(off.x, -off.y)
+	var t := _canvas.transform
+	t.origin = _canvas_base_origin - screen * _zoom
+	_canvas.transform = t
+
 func _poll_hits() -> void:
 	if not _host.has_method("get_hit_generation"):
 		return
@@ -1694,16 +2290,30 @@ func _poll_hits() -> void:
 		return
 	var events: PackedInt32Array = _host.get_hit_events()
 	var n := events.size()
+	if n % MV.HIT_STRIDE != 0:
+		# Pre-API-24 packing; the handshake reports it, this declines to smear it.
+		return
 	var i := 0
 	while i + MV.HIT_STRIDE - 1 < n:
 		var id: int = events[i]
 		if id > _hit_seen:
-			_hits.append({
-				"tile": Vector2i(events[i + 1], events[i + 2]),
-				"dir": Vector2(float(events[i + 4]), float(events[i + 5])),
-				"flash": _unpack_tint(events[i + 6]),
-				"t": 0.0,
-			})
+			var kind: int = events[i + 9]
+			# The mesh layer gets every event -- attack and hit clips on kind 0,
+			# the death clip on kind 1 -- addressed by the uids the channel
+			# carries since API 24.
+			if _creature_meshes != null and is_instance_valid(_creature_meshes) \
+					and _creature_meshes.has_method("on_hit_event"):
+				_creature_meshes.on_hit_event(events[i + 7], events[i + 8], kind)
+			# The sprite lunge stays for creatures still drawn as sprites, and
+			# only for real hits: a dead sprite is gone from the next draw list,
+			# and a swing's position is the attacker's own tile.
+			if kind == MV.HIT_KIND_HIT:
+				_hits.append({
+					"tile": Vector2i(events[i + 1], events[i + 2]),
+					"dir": Vector2(float(events[i + 4]), float(events[i + 5])),
+					"flash": _unpack_tint(events[i + 6]),
+					"t": 0.0,
+				})
 		i += MV.HIT_STRIDE
 	_hit_seen = generation
 
@@ -1816,6 +2426,12 @@ func debug_stats() -> Dictionary:
 		"tilt": _tilt_degrees,
 		"level_drop": LEVEL_DROP_TILES if _tilted else 0.0,
 		"tilted": _tilted,
+		"suppressed": _mesh_suppressed,
+		"furniture_meshes": _ident_routed,
+		"lights": _lights_used,
+		"beams": _beams_used,
+		"lights_published": _lights_published,
+		"fog": _volumetric_fog and _tilted,
 		"zoom": _zoom,
 		"camera_size": _camera.size if _camera != null and is_instance_valid(_camera) else 0.0,
 		"camera_position": _camera.position if _camera != null and is_instance_valid(_camera) \

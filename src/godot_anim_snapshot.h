@@ -16,6 +16,7 @@
 
 #include "coordinates.h"
 
+class Creature;
 class nc_color;
 
 namespace godot_backend
@@ -97,7 +98,8 @@ struct anim_text {
  * thread has no business knowing how long a recoil lasts, and the alternative
  * -- driving it from here -- would tie the animation to the turn rate.
  *
- * Packed as 7 ints: id, x, y, z, dir_x, dir_y, flash.
+ * Packed as 10 ints: id, x, y, z, dir_x, dir_y, flash, attacker_uid,
+ * target_uid, kind.
  */
 struct anim_hit {
     /// Monotonic, so MapView can tell a new hit from one it has already played
@@ -112,6 +114,17 @@ struct anim_hit {
     int32_t dir_y = 0;
     /// 0xRRGGBBAA to flash toward.
     int32_t flash = 0;
+    /// Who struck and who was struck; see creature_uid (godot_map_snapshot.h).
+    /// A tile match was enough to nudge a sprite, but an animated mesh has to
+    /// play its reaction on a specific body, and the tile under a melee is
+    /// exactly where two creatures are most likely to stand adjacent. Zero
+    /// means unknown, which the sprite path already tolerates.
+    int32_t attacker_uid = 0;
+    int32_t target_uid = 0;
+    /// 0 a hit, 1 a death, 2 a swing. One channel for all three because they
+    /// share everything else: the polling, the aging, the "do not miss one
+    /// between polls".
+    int32_t kind = 0;
 };
 
 /**
@@ -137,7 +150,7 @@ class AnimSnapshot
         static constexpr int cmd_stride = 7;
 
         /// Ints per packed hit in @ref copy_hits.
-        static constexpr int hit_stride = 7;
+        static constexpr int hit_stride = 10;
 
         void add_glyph( const tripoint_bub_ms &p, char32_t ch, const nc_color &color );
         void add_highlight( const tripoint_bub_ms &p );
@@ -152,9 +165,23 @@ class AnimSnapshot
         /// Record a hit at @p p, struck from @p from. Unlike the glyph
         /// primitives this is not part of a frame: it is kept until it ages out
         /// of the recent list, because MapView polls at its own rate and must
-        /// not miss one that landed between polls.
+        /// not miss one that landed between polls. The uids default to zero --
+        /// unknown -- so a caller that has no identity to offer says nothing
+        /// rather than something wrong.
         void add_hit( const tripoint_bub_ms &p, const tripoint_bub_ms &from,
-                      const nc_color &color );
+                      const nc_color &color, int32_t attacker_uid = 0,
+                      int32_t target_uid = 0, int32_t kind = 0 );
+        /// Record a death at @p p: an anim_hit with kind 1, no direction and no
+        /// flash colour -- what a death looks like is the mesh's business, not a
+        /// tint the game picked for a blow.
+        void add_death( const tripoint_bub_ms &p, int32_t target_uid );
+        /// Record a swing at @p attacker_pos: an anim_hit with kind 2, no
+        /// direction and no flash. A swing exists for the attacker's animation
+        /// only -- the sprite lunge and the flinch belong to hits -- which is
+        /// why direction and flash stay zero, and why a swing fires whether or
+        /// not the blow lands.
+        void add_swing( const tripoint_bub_ms &attacker_pos, int32_t attacker_uid,
+                        int32_t target_uid );
         godot::PackedInt32Array copy_hits() const;
         /// Id of the most recent hit. MapView compares against the last it
         /// played; equal means there is nothing new to copy.
@@ -185,6 +212,11 @@ class AnimSnapshot
         godot::Dictionary copy_stats() const;
 
     private:
+        /// Stamp @p hit with the next id and append it to the recent list,
+        /// dropping the oldest past the cap. The one place hits enter, so the
+        /// sequence and the bound cannot disagree between add_hit and add_death.
+        void push_hit( anim_hit hit );
+
         mutable std::mutex mutex_;
         /// Appended by draw callbacks during game::draw. Game thread only.
         std::vector<anim_cmd> pending_;
@@ -204,6 +236,33 @@ class AnimSnapshot
 };
 
 AnimSnapshot &get_anim_snapshot();
+
+/**
+ * Publish @p critter's death on the hit channel (anim_hit kind 1), so its mesh
+ * can play a death instead of vanishing between two frames.
+ *
+ * Lives here rather than in godot_map_snapshot because it produces an anim_hit;
+ * the identity it stamps on it (creature_uid) is borrowed from over there.
+ *
+ * Deliberately safe to call from anywhere, any time: die() runs during world
+ * teardown and from odd corners of the game loop, so the "is there even a game"
+ * guard is inside this helper, not the call sites' problem. Call it from the
+ * top of a die() override and forget about it.
+ */
+void note_creature_death( const Creature &critter );
+
+/**
+ * Publish @p attacker swinging at @p target on the hit channel (anim_hit kind
+ * 2), so the attacker's mesh can play its attack clip. Hits only name the
+ * attacker when the avatar strikes a monster, which left every other swing --
+ * a monster's above all -- invisible to the renderer.
+ *
+ * Same shape as note_creature_death, for the same reason: the "is there even a
+ * game" guard is inside, and the uids are resolved here, because melee entry
+ * points should not need to know about uids or channels, exactly as die() does
+ * not.
+ */
+void note_creature_swing( const Creature &attacker, const Creature &target );
 
 /**
  * Run the game's draw callbacks and publish the frame they produced.

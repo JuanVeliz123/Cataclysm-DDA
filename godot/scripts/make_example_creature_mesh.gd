@@ -21,6 +21,13 @@ extends Node
 const TILE := 32.0
 const TOTAL_HEIGHT := 48.0
 
+## What the figure is scaled to on the way out: the height Ultica PAINTS, not the frame
+## it paints in. Measured from the composed atlas (2026-08-18): a person is 32-33 opaque
+## pixels of the 32x48 frame. The proportions below stay authored against 48 because
+## they read better that way; one uniform scale at commit makes the saved mesh match
+## the art instead of towering half again over it.
+const PAINTED_HEIGHT := 33.0
+
 const HEAD := Vector3(9.0, 9.0, 9.0)
 const TORSO := Vector3(14.0, 17.0, 8.0)
 const HIPS := Vector3(11.0, 4.0, 8.0)
@@ -63,7 +70,15 @@ func _ready() -> void:
 	_box(tool, Vector3(2.0, 2.0, 2.5), Vector3(0.0, head_y, HEAD.z * 0.5 + 1.0))
 
 	tool.generate_normals()
-	var mesh: ArrayMesh = tool.commit()
+	# The painted-height scale, applied to the baked vertices -- a bare Mesh has no
+	# wrapper node to carry a transform, so the rescale happens here or nowhere.
+	var authored: ArrayMesh = tool.commit()
+	var sized := SurfaceTool.new()
+	sized.begin(Mesh.PRIMITIVE_TRIANGLES)
+	sized.append_from(authored, 0,
+		Transform3D(Basis.from_scale(Vector3.ONE * (PAINTED_HEIGHT / TOTAL_HEIGHT)),
+			Vector3.ZERO))
+	var mesh: ArrayMesh = sized.commit()
 
 	# Plain and matte. The mesh is lit by the world's own sun and lamps, which is the point
 	# of it being geometry, so anything shiny would be reading the lighting rather than
@@ -73,12 +88,12 @@ func _ready() -> void:
 	mat.roughness = 0.9
 	mesh.surface_set_material(0, mat)
 
-	var top := head_y + HEAD.y * 0.5
-	print("[mesh] built %d surface(s), %.1f units tall (sprite is %.0f), origin at the feet"
-		% [mesh.get_surface_count(), top, TOTAL_HEIGHT])
-	if absf(top - TOTAL_HEIGHT) > 1.0:
-		push_warning("the example mesh is %.1f units tall but a 32x48 sprite is %.0f: it "
-			% [top, TOTAL_HEIGHT] + "will not stand the same height as the art it replaces")
+	var top := (head_y + HEAD.y * 0.5) * (PAINTED_HEIGHT / TOTAL_HEIGHT)
+	print("[mesh] built %d surface(s), %.1f units tall (the art paints %.0f), origin at the feet"
+		% [mesh.get_surface_count(), top, PAINTED_HEIGHT])
+	if absf(top - PAINTED_HEIGHT) > 1.0:
+		push_warning("the example mesh is %.1f units tall but the art paints %.0f: it "
+			% [top, PAINTED_HEIGHT] + "will not stand the same height as the sprites beside it")
 
 	var err := ResourceSaver.save(mesh, OUT_PATH)
 	if err != OK:

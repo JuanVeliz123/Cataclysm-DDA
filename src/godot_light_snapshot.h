@@ -230,6 +230,12 @@ class LightSnapshot
             /// "no sun" and is why this is not folded into @ref daylight.
             float sun_azimuth = 0.0f;
             float sun_altitude = -90.0f;
+            /// What is falling, for the weather particle pass: 0 nothing, 1 rain,
+            /// 2 snow, 3 acid. @ref precipitation says how much; this says what.
+            /// Derived from the weather type's own `rains` / `tiles_animation`,
+            /// which is the key the SDL renderer animated from -- the HUD's
+            /// weather string is localized text and unusable as an id.
+            int weather_kind = 0;
         };
         void set_conditions( const conditions &c );
         conditions get_conditions() const;

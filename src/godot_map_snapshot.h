@@ -19,6 +19,8 @@
 #include <godot_cpp/variant/packed_int32_array.hpp>
 #include <godot_cpp/variant/vector2i.hpp>
 
+class Creature;
+
 namespace godot_backend
 {
 
@@ -63,6 +65,40 @@ enum cmd_flag : int32_t {
     /// would hide the thing the view is for.
     cmd_z_below_shift = 9,
     cmd_z_below_mask = 0xF << cmd_z_below_shift,
+    /// Bits 13-15: what a standing tile *is*, coarsely (3D-8c). The renderer's
+    /// extrusion can fit a box to a sprite's paint, but paint cannot say that a
+    /// closed door is thin or that a curtained window still seals its wall run
+    /// -- only the game data knows, and these three bits are it saying so.
+    /// Values are @ref cmd_shape; zero claims nothing and leaves the renderer
+    /// to its own fitting.
+    cmd_shape_shift = 13,
+    cmd_shape_mask = 0x7 << cmd_shape_shift,
+    /// Bits 16-30: *which* terrain or furniture this command draws, as one plus
+    /// an index into the interned id table (3D-8d) -- zero claims nothing. The
+    /// shape bits above say what kind of thing a tile is; these say which thing,
+    /// which is what lets a renderer swap a sprite for a mesh it has for that
+    /// id. The table is append-only for the life of the session, so an index a
+    /// consumer cached last frame still names the same id this frame; see
+    /// @ref MapSnapshot::copy_ident_table.
+    cmd_ident_shift = 16,
+    cmd_ident_mask = 0x7FFF << cmd_ident_shift,
+};
+
+/// What kind of standing thing a draw command's tile is; rides in the
+/// @ref cmd_shape_shift bits of rot_flags. Coarse on purpose: the renderer
+/// needs depths, not a terrain catalogue -- anything finer belongs in a mesh
+/// library keyed by id, not in three bits.
+enum class cmd_shape : int32_t {
+    /// No claim; the renderer fits the paint.
+    none = 0,
+    /// Full footprint, a tile deep: wall runs must seal.
+    wall = 1,
+    /// As deep as a wall, because a window is a wall with glass in it.
+    window = 2,
+    /// Thin, at the tile's face: a door is a panel, not a metre of oak.
+    door = 3,
+    /// Thin: fences, railings, bars.
+    thin = 4,
 };
 
 /// Deepest level below the avatar a draw command can name; see
@@ -244,6 +280,14 @@ struct creature_record {
     /// 0 monster, 1 NPC, 2 the avatar. Enough to scale a stand-in differently, and to
     /// tell the one creature that is the viewpoint from the rest.
     int32_t kind = 0;
+    /// Which creature this is, frame to frame; see @ref creature_uid. Two records at
+    /// the same tile in consecutive frames could be one creature or two that swapped
+    /// places, and an animated mesh must not restart its walk cycle -- or play a hit
+    /// on the wrong body -- because of the ambiguity.
+    int32_t uid = 0;
+    /// Gait, for the mesh's locomotion animation: 0 walk, 1 run, 2 crouch, 3 prone.
+    /// Monsters are always 0 -- the game gives them no move mode to read.
+    int32_t move_mode = 0;
     /// View-relative pixels of the creature's **feet**: the bottom centre of its tile.
     /// The same space `map_draw_cmd::dest_x` is in, so a renderer needs no second
     /// mapping, and the same anchor the contact shadows and proxies use.
@@ -254,6 +298,21 @@ struct creature_record {
     /// Facing left, which SDL draws by mirroring rather than by rotating.
     bool flip = false;
 };
+
+/**
+ * A stable-enough identity for @p critter, for @ref creature_record::uid and the
+ * hit channel's attacker/target fields. Game thread only: the serial map behind
+ * it is unlocked, and update_from_game is what ages it.
+ *
+ * Characters have a real identity -- character_id, positive, stable across saves
+ * -- so they simply use it. Monsters have none: the game finds them by position,
+ * and their only per-instance handle is the object's address, which the allocator
+ * hands to a new monster the moment an old one dies. So monsters get negative
+ * serials minted on first sight, keyed by pointer, and forgotten a few frames
+ * after the pointer stops appearing -- see the prune in update_from_game for why
+ * that window is what makes a recycled pointer read as a new creature.
+ */
+int32_t creature_uid( const Creature &critter );
 
 /**
  * Godot-owned tileset present bridge (ADR-002 tileset MapView).
@@ -365,9 +424,10 @@ class MapSnapshot
         /**
          * Every creature in view, by identity (@ref creature_record).
          *
-         * Each entry is { id, kind, x, y, z_below, flip }. Published every frame beside
-         * the draw list, from the same walk, so a consumer that matches a creature to
-         * its sprite by tile is matching within one frame's state.
+         * Each entry is { id, kind, uid, move_mode, x, y, z_below, flip }. Published
+         * every frame beside the draw list, from the same walk, so a consumer that
+         * matches a creature to its sprite by tile is matching within one frame's
+         * state.
          */
         godot::Array copy_creatures() const;
 
@@ -375,6 +435,11 @@ class MapSnapshot
         /// can skip copying and re-batching an unchanged draw list -- MapView
         /// refreshes per frame but the map only changes per turn.
         uint64_t generation() const;
+
+        /// The interned id table for @ref cmd_ident_shift: element N is the base
+        /// terrain/furniture id whose commands carry N + 1. Append-only, so a
+        /// consumer can cache by index and re-copy only when the size grows.
+        godot::PackedStringArray copy_ident_table() const;
 
     private:
         mutable std::mutex mutex_;
@@ -416,6 +481,12 @@ class MapSnapshot
         /// Ids that resolved past @ref sprite_fallback::looks_like only: an
         /// exact hit is the normal case and there are tens of thousands of them.
         std::unordered_map<std::string, coverage_entry> coverage_;
+        /// The interned id table (3D-8d); see @ref copy_ident_table. The table
+        /// itself is shared with the Godot thread and appends under mutex_; the
+        /// index beside it is the game thread's private lookup and takes no
+        /// lock, because @ref update_from_game is the only writer and reader.
+        std::vector<std::string> ident_table_;
+        std::unordered_map<std::string, int32_t> ident_index_;
         /// Commands emitted at each @ref sprite_fallback level, this frame.
         std::array<int32_t, static_cast<size_t>( sprite_fallback::last )> fallback_counts_{};
         /// Commands emitted on each @ref map_layer, this frame.
@@ -472,6 +543,17 @@ MapSnapshot &get_map_snapshot();
 
 bool ensure_tileset_loaded( const std::string &tileset_id = "UltimateCataclysm" );
 void update_map_snapshot();
+
+/**
+ * Whether the view's centre has moved since the last published frame.
+ *
+ * The centre is pos + view_offset, and view_offset is what look-around pans --
+ * the game thread parks in look_around's own input loop, where nothing
+ * republishes per cursor move the way do_turn republishes per turn. The input
+ * wait polls this (game thread only) and republishes when it answers true,
+ * which is what makes the camera follow the look cursor at all.
+ */
+bool view_center_moved();
 
 } // namespace godot_backend
 

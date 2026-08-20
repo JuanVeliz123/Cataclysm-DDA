@@ -1,0 +1,6 @@
+[gd_scene load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://scripts/convert_creature_meshes.gd" id="1"]
+
+[node name="ConvertCreatureMeshes" type="Node"]
+script = ExtResource("1")

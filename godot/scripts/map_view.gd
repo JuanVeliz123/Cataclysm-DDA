@@ -39,6 +39,23 @@ const FLAG_TALL := 1 << 8
 ## Bits 9-12: z-levels below the avatar's own, 0-15; see cmd_z_below_shift.
 const Z_BELOW_SHIFT := 9
 const Z_BELOW_MASK := 0xF << Z_BELOW_SHIFT
+## Bits 13-15: what a standing tile *is*, coarsely; see cmd_shape (3D-8c). The
+## 2D backend ignores these -- a flat view has no depths to assign -- but they
+## share the layout comment above because the layout is one contract.
+const SHAPE_SHIFT := 13
+const SHAPE_MASK := 0x7 << SHAPE_SHIFT
+const SHAPE_NONE := 0
+const SHAPE_WALL := 1
+const SHAPE_WINDOW := 2
+const SHAPE_DOOR := 3
+const SHAPE_THIN := 4
+## Bits 16-30: one plus this command's index into get_map_ident_table(), which
+## id the tile is -- what lets the 3D backend swap a sprite for a mesh it has
+## for that id (3D-8d). Zero claims nothing.
+const IDENT_SHIFT := 16
+const IDENT_MASK := 0x7FFF << IDENT_SHIFT
+## map_layer::furniture -- the one layer the mesh library replaces sprites on.
+const FURNITURE_LAYER := 2
 
 ## Everything MapView owns has to stay inside a narrow z window. The host stacks
 ## the UI over the map starting at the minimap panel on z 8 and running to 18,
@@ -187,9 +204,17 @@ const PLAYER_LAYER_BODY := 9
 ## map_layer::field, which the smoke particles seat themselves against.
 const FIELD_LAYER := 4
 
-## Ints per packed hit event: id, x, y, z, dir x/y, flash.
-## Must match AnimSnapshot::hit_stride in src/godot_anim_snapshot.h.
-const HIT_STRIDE := 7
+## Ints per packed hit event: id, x, y, z, dir x/y, flash, attacker uid,
+## target uid, kind (0 hit, 1 death).
+## Must match AnimSnapshot::hit_stride in src/godot_anim_snapshot.h (API 24).
+const HIT_STRIDE := 10
+## Values of the kind field, the last int of a packed hit event.
+const HIT_KIND_HIT := 0
+const HIT_KIND_DEATH := 1
+## A swing that may or may not have landed: the attacker's animation cue, and
+## nothing else -- it carries no direction and no flash, and its position is the
+## attacker's own tile, so lunging on it would recoil the one who swung.
+const HIT_KIND_SWING := 2
 ## How long a hit reaction runs. Long enough to see, short enough not to still
 ## be playing when the next blow lands in a melee exchange.
 const HIT_DURATION := 0.22
@@ -959,10 +984,18 @@ func _poll_hits() -> void:
 		return
 	var events: PackedInt32Array = _host.get_hit_events()
 	var n := events.size()
+	if n % HIT_STRIDE != 0:
+		# A library from before API 24 packs 7 ints; reading it at 10 would smear
+		# fields across records. The version handshake reports the mismatch; this
+		# just declines to animate garbage.
+		return
 	var i := 0
 	while i + HIT_STRIDE - 1 < n:
 		var id: int = events[i]
-		if id > _hit_seen:
+		# Only real hits lunge. Deaths and swings ride the same channel for the
+		# mesh layer's sake: a sprite that just died is gone from the very next
+		# draw list, and a swing's position is the attacker's own tile.
+		if id > _hit_seen and events[i + 9] == HIT_KIND_HIT:
 			_hits.append({
 				"tile": Vector2i(events[i + 1], events[i + 2]),
 				"dir": Vector2(float(events[i + 4]), float(events[i + 5])),

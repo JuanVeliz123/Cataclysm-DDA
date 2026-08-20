@@ -49,6 +49,8 @@
 
 #if defined(GODOT)
 #include "godot_anim_snapshot.h"
+// For creature_uid, so the hit events can say who was struck and not just where.
+#include "godot_map_snapshot.h"
 #endif
 
 static const activity_id ACT_TARGET_PRACTICE( "ACT_TARGET_PRACTICE" );
@@ -781,8 +783,12 @@ void game::draw_hit_mon( const tripoint_bub_ms &p, const monster &m, const bool 
     const std::string sym = dead ? "%" : m.symbol();
     // The marker glyph says a hit landed; the reaction (SP-5) is what makes it
     // read as a blow. MapView owns its timing, so this only reports the event.
+    // Whoever actually swung is not passed in here; naming u as the attacker is
+    // the claim this channel has always made -- `from` has been u's tile since
+    // SP-5 -- and the uid just says it in a form a mesh can look up.
     godot_backend::get_anim_snapshot().add_hit( p, u.pos_bub(),
-            red_background( m.type->color ) );
+            red_background( m.type->color ),
+            godot_backend::creature_uid( u ), godot_backend::creature_uid( m ) );
     hit_animation_godot( p, red_background( m.type->color ),
                          sym.empty() ? U'%' : static_cast<char32_t>(
                              static_cast<unsigned char>( sym[0] ) ) );
@@ -830,8 +836,10 @@ void game::draw_hit_player( const Character &p, const int dam ) const
                          : red_background( p.symbol_color() );
     const std::string sym = p.symbol();
     // Nobody to point at: whoever struck is not passed in here. A hit with no
-    // direction is a straight recoil, which is the right read for the avatar.
-    godot_backend::get_anim_snapshot().add_hit( p.pos_bub(), p.pos_bub(), col );
+    // direction is a straight recoil, which is the right read for the avatar --
+    // and the attacker uid stays 0, unknown, for the same reason.
+    godot_backend::get_anim_snapshot().add_hit( p.pos_bub(), p.pos_bub(), col,
+            0, godot_backend::creature_uid( p ) );
     hit_animation_godot( p.pos_bub(), col,
                          sym.empty() ? U'@' : static_cast<char32_t>(
                              static_cast<unsigned char>( sym[0] ) ) );

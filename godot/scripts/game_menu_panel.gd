@@ -213,6 +213,23 @@ func _confirm(action: int, what: String) -> void:
 func _dispatch(action: int, note: String) -> void:
 	if _host == null or not _host.has_method("request_menu_action"):
 		return
+	# A queued action only runs when the game thread's command drain is willing,
+	# and it refuses while any legacy C++ screen is shown -- including ones the
+	# player never opened (the ambient soliloquy window). A quit clicked then
+	# starved silently, which read as "quitting sometimes works". The player
+	# asked to leave: closing whatever legacy screen is up is what they meant,
+	# so nudge it shut with Escape until the queue is willing, bounded.
+	if _host.has_method("commands_ready") and not _host.commands_ready() \
+			and _host.has_method("push_input_event"):
+		for nudge in 4:
+			var esc := InputEventKey.new()
+			esc.keycode = KEY_ESCAPE
+			esc.physical_keycode = KEY_ESCAPE
+			esc.pressed = true
+			_host.push_input_event(esc)
+			await get_tree().create_timer(0.3).timeout
+			if _host.commands_ready():
+				break
 	var err := str(_host.request_menu_action(action))
 	if err != "":
 		_status.text = err.to_upper()

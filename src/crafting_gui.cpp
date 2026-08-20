@@ -3123,7 +3123,8 @@ crafting_ui_impl::build_godot_detail() const
     const requirement_data &req = recp.simple_requirements();
     const std::function<bool( const item & )> filter =
         recp.get_component_filter( recipe_filter_flags::none );
-    const std::vector<std::string> tools = req.get_folded_tools_list( 72, c_white, inv, batch_size );
+    const std::vector<std::string> tools = req.get_folded_tools_list( crafter, 72, c_white, inv,
+            batch_size );
     if( tools.size() > 1 ) {
         head( _( "Tools" ) );
         for( size_t i = 1; i < tools.size(); ++i ) {
@@ -3131,7 +3132,7 @@ crafting_ui_impl::build_godot_detail() const
         }
     }
     const std::vector<std::string> comps =
-        req.get_folded_components_list( 72, c_white, inv, filter, batch_size );
+        req.get_folded_components_list( crafter, 72, c_white, inv, filter, batch_size );
     if( comps.size() > 1 ) {
         head( _( "Components" ) );
         for( size_t i = 1; i < comps.size(); ++i ) {

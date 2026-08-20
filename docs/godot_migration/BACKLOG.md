@@ -170,9 +170,13 @@ grass qualifies has not been checked. Do not solve it by shearing.
   `scale`/`lifetime` values are first guesses. The first sway attempt shipped a
   bug that only a person watching the game found, so treat this area as
   under-verified until someone has.
-- **Memory has not been observed.** The probe never leaves the starting shelter,
-  so no tile has gone out of view and come back as memory. The channel and the
-  shader path are exercised; the look is not.
+- ~~**Memory has not been observed.**~~ **It could not be: it did not exist**
+  (found and fixed 2026-08-18 -- see `CHANGELOG.md`, the recurring bug's eighth
+  instance). The write half and the region preparation both lived only in the
+  SDL/curses draw paths. The snapshot walk now prepares and memorizes; the
+  scenario probe walks out of a house and counts remembered texels, and its
+  `09_house_memory` still shows the tint. Whether the tint reads *well* is a
+  VER-1 question (first finding: too dark).
 - **Shaders are only parse-checked.** `res://scenes/shader_check.tscn` catches
   language-level errors headlessly (the dummy driver still runs Godot's shader
   front end) but cannot catch a GPU backend rejecting valid code.
@@ -190,16 +194,13 @@ grass qualifies has not been checked. Do not solve it by shearing.
   between the avatar and the camera, so `faded` is zero there too — the counter
   proves the plumbing, not the policy. **Needs a forest and a person.**
 
-- **Nothing has been seen down a hole.** The map publishes the levels below the
-  avatar now (ADR-005 item 1), and every tile of the probe's shelter has a floor
-  under it, so `open_columns` is zero there and the walk never descends.
-  Everything downstream of it is therefore exercised by no run so far: the depth
-  fog in `fog_for_depth`, lower levels sitting out the light pass, a creature two
-  floors down being culled against the column it is under. **Needs a basement, a
-  staircase or the lip of a roof, and a person standing at the top of it.** The
-  render overlay has the two numbers to read while standing there — `open
-  columns` says the walk went down at all, `levels below` says how far and how
-  many commands it cost.
+- **A hole has now been looked down, barely.** The scenario probe stands the
+  avatar on a staircase (`scenario_stand_on("GOES_DOWN")`) and `open_columns=1`:
+  the walk descends, for the first time since ADR-005 item 1 landed. What one
+  stair tile cannot show is the *look* -- 32 px of basement reads as a dark
+  square, so `level_fade` and the two-tile drop are still unjudged. **Needs a
+  rooftop lip or an open pit, and a person**; the render overlay's `open
+  columns` / `levels below` numbers work as documented.
 
 ---
 
@@ -400,6 +401,27 @@ back) and a lantern gradient at night (drop a light source in the dark).
 Please write findings back into this table rather than into a commit message —
 the next person needs the numbers, not the history.
 
+### First findings (2026-08-18, scenario-probe stills under lavapipe)
+
+The scenario probe (VER-2 item 1) produced the first screenshots of most of the
+scenes this table asks about. Stills under a software rasteriser are a floor,
+not a verdict — motion, feel and colour on a real monitor still need a person —
+but they answer some questions and sharpen others:
+
+| What | Observed |
+|---|---|
+| Night grade | **Reads as night**, not as a blue filter. Ground detail survives but is near the readability floor; borderline, keep the numbers. |
+| Map memory | **Exists on screen for the first time** (it was structurally dead before this date — see `CHANGELOG.md`). Remembered rooms are clearly distinct from never-seen void, but read close to black beside noon grass; `memory_color` likely wants brightening. |
+| **The night mask has no headroom** | The load-bearing find of the sitting: at 1am, **1072 of 1075 texels carry G > 0.5 before any light exists**. A moonlit CDDA night reports outdoor tiles as `LIT` (`light_at` is honest; a bright moon clears `LIGHT_AMBIENT_LIT`), so the per-tile mask saturates and **no lamp, fire pool or headlight cone can brighten outdoor ground at night** — the visible darkness is entirely the daylight grade, which dims lit and unlit alike. Not a bug — the game is the authority — but it means every "gradient at night" question must be asked somewhere genuinely dark (a basement, a new-moon night), and the probe now does. |
+| Fire | The +22 brightness measured around it is the particles and the B-channel flicker, not a G pool (see above). Visually **fire reads as a pale smoke puff**: smoke particles out-draw the fire puffs ~10:1 by area (scale 0.6–1.6×2.2s vs 0.25–0.7×0.7s), and the night grade turns the blob blue-white. No orange survives. The tuning sitting should start here. |
+| Lantern gradient | Outdoors: unanswerable under a bright moon (mask saturated, above) — and the fixture's `electric_lantern_on` spawns chargeless anyway, so the game says dark twice over. Asked in the **basement** instead: lit texels went 0 → 48 around a spawned fire, and the `10a_basement_fire` still is the answer this table has waited for — an orange core, a room lit with a believable falloff, black past the pool's edge, the avatar mesh correctly inside it. Mild banding where the pool meets the dark (the per-tile texture's bilinear seam); the bands themselves read well. Fire also reads as *fire* here — the outdoor blue-puff problem is the moonlit mask plus the night grade, not the fire pass itself. |
+| Headlights | Two beams built, **nothing lit**, for two stacked reasons: the mask saturation above (a cone adds nothing to an already-LIT moonlit field), and a level beam half a tile up grazing the up-facing ground at ndl≈0. `BEAM_PITCH_DEGREES` (15°) added for the second; the first needs a dark night or interior to judge at all. |
+| Volumetric fog | Works under lavapipe (no banding), and the fire gains a genuine glow-through-air halo — but density 0.02 dims the whole tilted frame (fog attenuates the EMISSION-lit tiles). Fog length now tracks `camera.far`. Default stays off. |
+| Rain | Streaks fall and lean with the wind; at night the wet grade is barely distinguishable from the night grade — the streaks are what says "rain". |
+| Levels below | `open_columns=1` on a staircase — the walk descends — but one 32 px stair tile shows nothing legible of the floor below. Judging `level_fade` needs a rooftop lip or an open pit, not a stairwell. |
+| Creature mesh | The converted `player_female.res` sits right: feet planted, ~1.5 tiles tall against 2-tile walls, black silhouette at night and grey in daylight (lit geometry among unlit sprites, as intended). It is a T-pose, which is the art's problem, not the renderer's. |
+| Anomalies noted | Creature sprites occasionally draw beyond the map's west edge, in the void left of the ground plane; and a lone black quad sits past the SE corner. Both seen in every field-scene still; neither attributed yet. |
+
 ### ~~VER-0~~ — **Done** (e2ce7ced1b)
 
 The probe now fails when a required fixture stage never executed, or a required
@@ -411,19 +433,59 @@ ignored.
 
 It went red on its first run and caught real crafting-fixture flakiness.
 
+**And its exit code never survived a session (found and fixed 2026-08-18).**
+Shutdown with a live session ends in `std::_Exit( 0 )` on the game thread --
+the input wait's shutdown check, or `~CDDAHost` when the thread will not stop --
+which *overwrites the exit code Godot was about to return*. So every failing
+probe run since VER-0 landed has exited 0, and "exit code, not a printed note"
+was a printed note after all. (`_Exit` also skips stdio flushing, so the
+diagnostic that would have revealed it was swallowed with it.) Both `_Exit`
+sites now carry the code the fixture registers via `CDDAHost.note_exit_code()`
+before quitting; both probes register theirs. Diagnosed by three
+one-minute fixtures: a plain scene propagates `quit(3)`, a bootstrapped host
+propagates it, a live session turned it into 0.
+
+### Session-end and look-mode coverage (2026-08-18)
+
+Two player reports, both verified fixed by fixtures the same day:
+
+- **"Look freezes the game"**: the snapshot centred on the avatar and ignored
+  `view_offset`, and nothing republished from inside `look_around`'s own loop.
+  Fixed in C++ (centre = pos + view_offset; the input wait republishes when the
+  centre moves); the scenario probe's look stage asserts the published origin
+  pans and comes back.
+- **"Quitting sometimes works"**: `g->uquit` set from the command drain was
+  never re-read by the infinite input wait -- the quit landed on the next
+  keypress, whenever that was. Fixed by a synthetic keypress from the wait when
+  uquit is set (a TIMEOUT event is swallowed by handle_action's idle loop -- the
+  fixture refuted that version). `session_end_probe.tscn --mode
+  quicksave|save_quit|quit_nosave` is the coverage: quits must land with NO key
+  pressed. The game menu also Escapes a starving legacy screen shut before
+  dispatching, since a shown C++ window (the soliloquy) blocks the drain.
+
 ### VER-2 — Tooling that would move work off the person
 
 Ranked by how much verification each unlocks per unit of effort. None exist yet.
 
-1. **A scripted scenario harness.** The single biggest limitation is that every
-   check happens at a fresh evac-shelter spawn: no grass, no night, no fire, no
-   monsters, nothing remembered. A debug hook that can place the avatar at a
-   given overmap location, set the time of day, spawn a monster or a fire, and
-   *then* run the probe would make sway, memory, lighting, particles and hit
-   reactions all directly checkable. `debug_menu.cpp` already has teleport,
-   time-set and spawn commands; the work is exposing a few of them through
-   `godot_game_commands.*` and driving them from the probe. **This is the one to
-   build first** — everything else in this list is worth less without it.
+1. ~~**A scripted scenario harness.**~~ **Built (2026-08-18, API 23).** Nine
+   scenario commands on `godot_game_commands.*` / `CDDAHost` -- teleport to an
+   OMT type by prefix, relative teleport, stand-on-flag (how a fixture finds a
+   staircase), set time, force weather, spawn field / vehicle (lights switched
+   on) / item, set avatar sex -- plus `get_scenario_status()`, a generation
+   counter the fixture polls because a teleport-by-search can only fail on the
+   game thread. Each command ends by rebuilding the map cache and republishing
+   the snapshots, or the mutation is invisible until the next player action.
+   None of them opens a screen, which is the rule that matters.
+
+   `res://scenes/scenario_probe.tscn` drives them end to end: field at noon,
+   night, a lit lantern, a fire, a car with headlights on, volumetric fog for
+   one frame, rain, a house entered and left (memory), a basement and the
+   staircase above it, a zombie. VER-0-style REQUIRED/WARN checks, honest exit
+   code, and one PNG per scene under the xvfb `--screenshot` recipe. First
+   runs immediately produced: `open_columns=1` (the first look down a hole
+   since ADR-005 item 1), `beams=2` (the first headlight cones ever built),
+   rain particles, and two of the dead-frame-boundary class of bug -- see
+   VER-0's exit-code note and the map-memory entry in `CHANGELOG.md`.
 2. **Screenshot comparison against stored baselines.** The Xvfb + lavapipe route
    (see `AGENT_HANDOFF.md`) renders real frames; what is missing is remembering
    what they looked like last time. Commit a handful of reference PNGs, compare
@@ -507,7 +569,8 @@ on this branch were settled by printing a value instead of arguing about it.
 | ~~3D-7a~~ | S | **Done (2026-08-17): shadow proxies.** One invisible capsule per creature, `SHADOWS_ONLY`, sized from its sprite; creature billboards stop casting so there is one shadow rather than two. Terrain that stands keeps its own silhouette. | A billboard's silhouette never changes, so a figure lit from the side cast a front view of itself -- the shadow said nothing about where the light was, which is the one thing a shadow is for. The contact blob stays: it works when nothing is casting, and the two cues answer different questions. Gated: the capsule's foot must project onto the creature's feet. |
 | ~~3D-7b~~ | S | **Done (2026-08-17): `SHOW_SHADOW_PROXIES`.** Off by default. On, the creature *sprites* are hidden and their capsules are drawn in their place, lit -- not a capsule behind a sprite, which would answer nothing. | The cheapest answer to "does a body at this scale sit correctly in this world", and it needs no art to exist first. What to look at: feet in the right place, height reading as a person against the walls, and -- since the capsule is lit and the sprites are not -- which way the sun appears to come from. That last one is the first thing in this renderer that shows where the light actually is rather than where an artist decided it was. |
 | ~~3D-7c~~ | M | **Done (2026-08-17, API 22): a mesh per creature id, defaulting to the sprite.** `CDDAHost::get_creatures()` publishes identity -- id, kind, feet in pixels, level, facing -- beside the draw list; `creature_meshes.gd` draws whatever has art under `res://meshes/creatures/<id>.*` and leaves the rest to their sprites. | **Nothing changes until a mesh exists**, which is the design: partial is the normal state. Two things worth knowing. Identity needed a channel of its own because a draw command is an atlas sub-rect -- everything a sprite needs and nothing a mesh can use. And a sprite is suppressed by *tile*, because the draw list still cannot say which creature a command belongs to; CDDA allows one creature per tile, so a tile is an identity. That correspondence is the fragile part and is gated: both sides quantise from the sprite's centre, and quantising its corner instead -- the first draft -- passes for flush sprites and fails for every overhanging one. `README.md` in the mesh directory is what a modeller needs. |
-| 3D-6 | M | **The things only 3D has.** Volumetric fog and light shafts, headlight `SpotLight3D` cones from `map::apply_light_arc`'s existing angle and width, weather as particles that fall through the scene. | `apply_light_arc` maps onto `SpotLight3D` almost field for field. Headlight cones at night are the largest apparent gain per line of code on this list. |
+| ~~3D-8~~ | L | **Done (2026-08-18, API 24): the meshes animate.** Creature `uid` + `move_mode` on the channel; hit events carry attacker/target uids and a kind, with death taps in `monster::die`/`Character::die`; `creature_meshes.gd` tweens each step (world-space deltas — view-relative ones lie whenever the avatar recentres the origin — with live retargeting, snap past 2.5 tiles), yaws a mesh toward its movement, and plays `idle`/`walk`/`run`/`attack`/`hit`/`die`; the converter preserves rigs as `<id>.scn`; `make_example_animated_creature.tscn` writes the rigged mannequin that is both fixture and the modeller's executable spec. Verified by the scenario probe's combat stage: the mannequin zombie walked and flinched on the avatar's blows, `clips_played = { idle, walk, hit }`, exit 0. | **Follow-up (same day):** swings are events now (kind 2, tapped in both melee entry points — a monster's attack clip plays whether or not it connects); the shared clip library landed (`_shared_clips.scn`/`.glb`, borrow-by-bone-name, same-skeleton contract — rig each model once, one clip pack animates them all; README has the human workflow); heights recalibrated to what the art PAINTS (33, measured: a person is 32-33 opaque px of the 32x48 frame — the 48-unit figures towered half again over their sprites); and `SMOOTH_CAMERA` rides the avatar's tween so the world stops snapping a tile ahead of the glide. **Still open:** real rigged art (sourcing is the user's — free/open rigged models on ONE standard skeleton, Mixamo auto-rig included; the pipeline is ready for the drop); gait timings (`WALK_TWEEN_S` 0.22 …, VER-1) on a real GPU; the avatar's own rig (player_female converts but is unrigged — Mixamo auto-rigging that very model is the shortest path). Also found on the way: the legacy ImGui **soliloquy window** (ambient snippet monologue) still opens over the session with no Godot channel — it parks the game thread and starved two probes before being named; migrating it is Part 2 work, and the scenario probe Escapes past it meanwhile. |
+| ~~3D-6~~ | M | **Done in structure, open in judgement (2026-08-18).** Weather falls through the scene (`weather_particles_3d.gd` — rain streaks lean with the wind, snow drifts, acid is rain the wrong colour; kind from the new `weather_kind` condition). Volumetric fog is a runtime toggle gated on the tilt, its length tracking `camera.far` (the CAM_Z-sized volume left the far half of the tilted map unfogged); lavapipe shows it working — the basement-fire halo glows through air — at the cost of dimming the whole EMISSION-lit frame at density 0.02. Headlight beams were already built end to end and had never had a vehicle: the scenario probe spawns one, and the beams needed the downward pitch a level cone turned out to lack (`BEAM_PITCH_DEGREES`). | What still needs eyes on a real GPU: fog density (0.02 dims the map), beam pitch/pool, snow (never forced), and everything against a *dark* night — a moonlit CDDA night is `LIT` nearly everywhere, so light pools only exist indoors or under a new moon (see VER-1's findings table). |
 
 **The hazards are the real risk, not the geometry.** Every 3D renderer default is
 wrong for a 32 px sprite and each one fails quietly: mipmaps bleed the atlas

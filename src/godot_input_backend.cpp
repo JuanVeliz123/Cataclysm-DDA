@@ -7,6 +7,7 @@
 #include "cached_options.h"
 #include "cata_imgui.h"
 #include "cursesdef.h"
+#include "game.h"
 #include "input.h"
 #include "output.h"
 #include "ui_manager.h"
@@ -26,6 +27,7 @@ namespace godot_backend
 namespace
 {
 std::atomic<bool> shutdown_requested{ false };
+std::atomic<int> host_exit_code_{ 0 };
 } // namespace
 
 void request_shutdown()
@@ -38,6 +40,16 @@ bool is_shutdown_requested()
     return shutdown_requested.load();
 }
 
+void set_host_exit_code( int code )
+{
+    host_exit_code_.store( code );
+}
+
+int host_exit_code()
+{
+    return host_exit_code_.load();
+}
+
 } // namespace godot_backend
 
 namespace
@@ -48,8 +60,13 @@ int inputdelay = -1;
 {
     // Match SDL CATA_QUIT: tear down and hard-exit so the Godot host cannot
     // hang joining a game thread blocked in UI / input.
+    //
+    // With the code the host registered, not 0: this runs on every session
+    // teardown -- the game thread is parked exactly here when the window
+    // closes -- so a hardcoded 0 overwrote whatever SceneTree.quit was about
+    // to return, and every failing probe run reported success.
     ::exit_handler( 0 );
-    std::_Exit( 0 );
+    std::_Exit( godot_backend::host_exit_code() );
 }
 } // namespace
 
@@ -128,6 +145,26 @@ input_event input_manager::get_input_event( const keyboard_mode /*preferred_keyb
             if( godot_backend::commands_safe_to_run() ) {
                 godot_backend::drain_game_commands();
             }
+            // A command may just have asked the game to end: the Godot menu's
+            // save-and-quit and quit-without-saving set g->uquit, and uquit is
+            // only read at do_turn boundaries -- which this infinite wait never
+            // reaches on its own. So a quit clicked in the menu did nothing
+            // until the player happened to press another key, and "quitting
+            // sometimes works" was the bug report that found it.
+            //
+            // A synthetic keypress, not a timeout: handle_action's loop swallows
+            // TIMEOUT actions and re-asks (that is how animation ticks idle),
+            // which the first version of this fix learned by fixture -- the
+            // session stayed alive through twenty seconds of synthetic timeouts.
+            // Any keyboard action exits that loop; '.' is pause, which unwinds
+            // silently, and even rebound it exits as an unknown command. The
+            // turn then ends and is_game_over sees the flag. Safe against menu
+            // loops re-entering forever: a shown C++ window refuses the drain
+            // above, so uquit cannot be newly set while one owns the wait.
+            if( g != nullptr && g->uquit != QUIT_NO ) {
+                return input_event{ std::set<keymod_t>(),
+                                    static_cast<int>( '.' ), input_event_t::keyboard_char };
+            }
             if( auto evt = godot_backend::get_input_bridge().pop_event() ) {
                 return *evt;
             }
@@ -146,10 +183,15 @@ input_event input_manager::get_input_event( const keyboard_mode /*preferred_keyb
                 if( now - last_hud_refresh >= std::chrono::milliseconds( 200 ) ) {
                     last_hud_refresh = now;
                     godot_backend::update_hud_snapshot();
-                    // A window resize or a zoom changes how much map MapView needs.
-                    // Rebuilding the draw list is expensive, so only when it asks
-                    // for an extent it has not been given.
-                    if( godot_backend::get_map_snapshot().view_extent_stale() ) {
+                    // A window resize or a zoom changes how much map MapView needs,
+                    // and a pan -- look-around moving view_offset -- changes where
+                    // that map is centred. Rebuilding the draw list is expensive, so
+                    // only when the extent or the centre actually differs from what
+                    // was published. The centre check is what makes look mode pan
+                    // at all: the game thread parks in look_around's own loop, and
+                    // this wait is the only place a republish can come from there.
+                    if( godot_backend::get_map_snapshot().view_extent_stale() ||
+                        godot_backend::view_center_moved() ) {
                         godot_backend::update_map_snapshot();
                     }
                 }

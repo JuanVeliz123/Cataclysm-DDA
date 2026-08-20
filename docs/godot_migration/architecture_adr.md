@@ -841,6 +841,49 @@ keeps something judgeable at every step:
    trade being accepted.
 4. **Art.** Which is the programme, and now has somewhere to arrive.
 
+### What landed (2026-08-18): the meshes move
+
+Steps 1-3 above assumed a mesh is a statue. It is not any more; the pipeline animates,
+at **API 24**, in four pieces that were built in parallel and meet in the middle:
+
+- **Identity that survives a frame.** `creature_record` gains a `uid` (characters keep
+  `getID()`, monsters get session-scoped serials with a three-frame prune window,
+  because the game gives a monster no identity beyond a reusable pointer) and a
+  `move_mode` hint. Without a uid, "walk from A to B" is unknowable -- every turn is
+  teleportation -- and the renderer degrades to exactly that against an older library.
+- **Events with names on them.** `anim_hit` grew attacker and target uids and a kind
+  (hit / death); `monster::die` and `Character::die` carry guarded three-line taps. The
+  renderer plays `attack` on whoever swung, `hit` on whoever was struck, `die` on the
+  fallen -- the corpse holds its final pose for the clip's length and is then released.
+- **Presentation time, manufactured.** The game moves creatures a whole tile per turn
+  at whatever rate turns pass; `creature_meshes.gd` tweens each step over a fraction of
+  a second, plays `walk`/`run` while it does, retargets a live tween rather than
+  queueing a backlog, snaps past 2.5 tiles, and yaws a mesh toward its movement. The
+  trap that cost the first attempt: movement must be detected in **world** space --
+  view-relative feet shift for every creature whenever the avatar recentres the
+  published origin, and a naive delta sends the whole map on little synchronised walks.
+- **Assets that carry their clips.** `<id>.scn` (a PackedScene: one Skeleton3D, one
+  AnimationPlayer, clips `idle`/`walk`/`run` looping and `attack`/`hit`/`die`
+  one-shot, in-place, +Z, feet on origin, 48 tall) outranks `<id>.res` for the same
+  id; the converter preserves rigs instead of flattening them; and
+  `make_example_animated_creature.tscn` writes a rigged mannequin (`mon_zombie.scn`)
+  that is both the test fixture and the modeller's executable spec.
+
+Verified end to end by the scenario probe, which now fights: the avatar's blows land
+as events with uids, and the mannequin zombie walked, flinched twice, and idled --
+`clips_played = { idle: 3, walk: 1, hit: 2 }` -- in a headless run that exits 0.
+
+Two findings from the same session, recorded because they will be re-litigated
+otherwise. A typed GDScript function that returns null does not return null -- it
+raises a script error and hands the caller a default-constructed value, which turned
+the registry's null-means-no-art convention into corrupted instances (the convention
+is now empty-Dictionary-means-no-art). And the legacy ImGui *soliloquy* window -- the
+ambient snippet monologue -- still opens over the session with no Godot channel
+carrying it: it parks the game thread, starves the command queue, and is the
+previously-unattributed window that took the baseline headless probe's late stages
+down. The scenario probe now names it from the cell overlay and Escapes past it;
+migrating it onto the popup channel is Part 2 work.
+
 Two things were named as the ones that would hurt, and both have been answered by the
 person who gets to answer them (2026-08-17):
 
@@ -1144,6 +1187,28 @@ draws naked -- which has not yet been attributed to this backend or to the game.
 matters which: the 3D path dropping a layer would be the first thing here to lose
 content rather than to move it. The render overlay's `BY LAYER` counts settle it in one
 look, and the answer belongs in this section when it arrives.
+
+**Attributed (2026-08-18): it is neither the backend dropping a layer nor the game.
+It is 3D-7c working as designed, fed by a committed test mesh.** `player_male.tres`
+(and, once converted, `player_female.res`) load for the avatar's own creature id, and
+a creature drawn as a mesh has its sprite suppressed *by tile* -- which takes the body
+and every clothing overlay with it, because `CREATURE_LAYERS` includes the overlay
+layers and everything the avatar wears shares the avatar's tile. The mesh that then
+draws is an unclothed placeholder, so the avatar reads as naked. The amendment's
+"start naked" decision, arriving unannounced. The evidence, from one probe run: C++
+resolved 14 of 19 overlay slots to sprites and published them (`BY LAYER` was never
+the problem), the mesh registry printed `[mesh] player_female -> ...player_female.res`,
+and the 3D stage counted 73 instances for 88 commands -- the missing 15 being exactly
+the avatar's body plus overlays.
+
+Two diagnostics were wrong in the same direction and are fixed with the attribution:
+the first-frame report printed "every published command was drawn" while 15 commands
+were deliberately not drawn (suppression was invisible to it), and the probe's
+instance-count check reddened on the difference as if content had been lost. Both now
+account for meshed creatures, the count is in `debug_stats()["suppressed"]`, and the
+first-frame report says out loud that a meshed creature wears nothing yet. The lesson
+is ADR-005's, inverted: this time a number that *should* have been printed was not,
+and a by-design absence spent a day looking like a bug.
 
 ### What landed: 3D-4, levels below get a floor of their own (2026-08-17)
 

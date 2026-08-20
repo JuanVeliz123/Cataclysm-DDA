@@ -3,8 +3,12 @@
 #if defined(GODOT)
 
 #include "color.h"
+#include "creature.h"
 #include "game.h"
 #include "godot_backend.h"
+// For creature_uid: the identity the hit channel stamps on attackers, targets
+// and the dead is minted by the map snapshot, which owns the creature walk.
+#include "godot_map_snapshot.h"
 
 #include <godot_cpp/variant/vector3i.hpp>
 
@@ -45,12 +49,23 @@ void AnimSnapshot::add_glyph( const tripoint_bub_ms &p, const char32_t ch,
     pending_.push_back( cmd );
 }
 
-void AnimSnapshot::add_hit( const tripoint_bub_ms &p, const tripoint_bub_ms &from,
-                            const nc_color &color )
+void AnimSnapshot::push_hit( anim_hit hit )
 {
     /// More than this and the oldest is dropped; see AnimSnapshot::hits_.
     constexpr size_t max_recent_hits = 32;
 
+    std::lock_guard<std::mutex> lock( mutex_ );
+    hit.id = static_cast<int32_t>( ++hit_seq_ );
+    hits_.push_back( hit );
+    if( hits_.size() > max_recent_hits ) {
+        hits_.erase( hits_.begin(), hits_.end() - max_recent_hits );
+    }
+}
+
+void AnimSnapshot::add_hit( const tripoint_bub_ms &p, const tripoint_bub_ms &from,
+                            const nc_color &color, const int32_t attacker_uid,
+                            const int32_t target_uid, const int32_t kind )
+{
     anim_hit hit;
     hit.x = p.x();
     hit.y = p.y();
@@ -60,13 +75,39 @@ void AnimSnapshot::add_hit( const tripoint_bub_ms &p, const tripoint_bub_ms &fro
     hit.dir_x = ( p.x() > from.x() ) - ( p.x() < from.x() );
     hit.dir_y = ( p.y() > from.y() ) - ( p.y() < from.y() );
     hit.flash = pack_rgba( curses_color_to_color( color ) );
+    hit.attacker_uid = attacker_uid;
+    hit.target_uid = target_uid;
+    hit.kind = kind;
+    push_hit( hit );
+}
 
-    std::lock_guard<std::mutex> lock( mutex_ );
-    hit.id = static_cast<int32_t>( ++hit_seq_ );
-    hits_.push_back( hit );
-    if( hits_.size() > max_recent_hits ) {
-        hits_.erase( hits_.begin(), hits_.end() - max_recent_hits );
-    }
+void AnimSnapshot::add_death( const tripoint_bub_ms &p, const int32_t target_uid )
+{
+    anim_hit hit;
+    hit.x = p.x();
+    hit.y = p.y();
+    hit.z = p.z();
+    hit.target_uid = target_uid;
+    hit.kind = 1;
+    // No direction and no flash: how a death looks belongs to the mesh, and a
+    // zero flash is what tells the sprite path this event is not a blow to tint.
+    push_hit( hit );
+}
+
+void AnimSnapshot::add_swing( const tripoint_bub_ms &attacker_pos,
+                              const int32_t attacker_uid, const int32_t target_uid )
+{
+    anim_hit hit;
+    hit.x = attacker_pos.x();
+    hit.y = attacker_pos.y();
+    hit.z = attacker_pos.z();
+    hit.attacker_uid = attacker_uid;
+    hit.target_uid = target_uid;
+    hit.kind = 2;
+    // No direction and no flash: the lunge and the flinch belong to hits. A
+    // swing is the attacker's clip and nothing else -- which is also why it is
+    // published whether or not the blow lands.
+    push_hit( hit );
 }
 
 godot::PackedInt32Array AnimSnapshot::copy_hits() const
@@ -84,6 +125,9 @@ godot::PackedInt32Array AnimSnapshot::copy_hits() const
         dst[i++] = h.dir_x;
         dst[i++] = h.dir_y;
         dst[i++] = h.flash;
+        dst[i++] = h.attacker_uid;
+        dst[i++] = h.target_uid;
+        dst[i++] = h.kind;
     }
     return out;
 }
@@ -203,6 +247,29 @@ uint64_t AnimSnapshot::generation() const
 {
     std::lock_guard<std::mutex> lock( mutex_ );
     return generation_;
+}
+
+void note_creature_death( const Creature &critter )
+{
+    // die() also runs while a game is being torn down or before one fully
+    // exists; the whole point of this helper is that its call sites never have
+    // to know that. Same guard publish_transient_visuals lives by.
+    if( !g ) {
+        return;
+    }
+    get_anim_snapshot().add_death( critter.pos_bub(), creature_uid( critter ) );
+}
+
+void note_creature_swing( const Creature &attacker, const Creature &target )
+{
+    // Same guard as note_creature_death, for the same reason: melee entry
+    // points should not need to know about uids or channels -- or whether a
+    // game exists -- exactly as die() does not.
+    if( !g ) {
+        return;
+    }
+    get_anim_snapshot().add_swing( attacker.pos_bub(), creature_uid( attacker ),
+                                   creature_uid( target ) );
 }
 
 void publish_transient_visuals()

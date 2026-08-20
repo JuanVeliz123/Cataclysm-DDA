@@ -127,6 +127,83 @@ std::string request_debug_spawn( const std::string &mtype );
  */
 std::string request_debug_spawn_npc();
 
+/**
+ * Scenario harness (BACKLOG.md VER-2 item 1): dress the world for verification.
+ *
+ * Every renderer question still open needs a scene the fresh evac-shelter spawn
+ * cannot offer: night for the light pass, a lamp for its gradient, fire for the
+ * glow, a forest for sway and occlusion, a staircase for the levels below. The
+ * debug menu has all of these behind uilist pickers, and a queued command must
+ * not open a blocking screen -- so these are the same primitives with the UI
+ * stripped off, callable from a fixture.
+ *
+ * Shared rules:
+ *  - ids are validated on the calling thread; game state is touched only inside
+ *    the queued lambda ("accepted != done", as for every command here);
+ *  - each command records its outcome in the scenario status (see
+ *    @ref get_scenario_status) -- a teleport that found nothing can only fail on
+ *    the game thread, so the caller polls the generation rather than the return;
+ *  - each command ends by rebuilding the map cache and republishing the map,
+ *    HUD and minimap snapshots. A mutation made at the input wait is otherwise
+ *    invisible until the next player action, and the published lighting reads
+ *    the map cache -- a fire lit by a command that skips the rebuild publishes
+ *    the light of the tile before the fire.
+ */
+
+/// Teleport the avatar to the closest overmap terrain whose id starts with
+/// @p omt_type ("forest", "basement", "house"...), searching @p search_range
+/// overmap tiles out. May generate new overmaps, which takes game-thread time.
+std::string request_scenario_teleport_omt( const std::string &omt_type, int search_range );
+
+/// Teleport the avatar @p dx, @p dy, @p dz tiles from where it stands.
+std::string request_scenario_teleport_rel( int dx, int dy, int dz );
+
+/// Move the avatar onto the nearest tile with terrain/furniture flag @p flag
+/// ("GOES_DOWN", "GOES_UP"...) within @p radius tiles. This is how a fixture
+/// stands at the top of a staircase without knowing where one is.
+std::string request_scenario_stand_on( const std::string &flag, int radius );
+
+/// Set the time of day, only ever moving forward (timed events fire on
+/// catch-up; moving backwards would replay them).
+std::string request_scenario_set_time( int hour, int minute );
+
+/// Force a weather pattern by id ("rain", "snowing"...), or clear the override
+/// with an empty string. Mirrors the debug menu's non-UI tail, EOCs included.
+std::string request_scenario_set_weather( const std::string &weather_id );
+
+/// Drop a field ("fd_fire", "fd_smoke"...) of @p intensity at the avatar's
+/// position plus (dx, dy).
+std::string request_scenario_spawn_field( const std::string &field_id, int intensity,
+        int dx, int dy );
+
+/// Spawn a vehicle by prototype id at the avatar's position plus (dx, dy),
+/// undamaged and fuelled, with every light part switched on -- the point of a
+/// scenario vehicle is its headlights at night.
+std::string request_scenario_spawn_vehicle( const std::string &vproto, int dx, int dy );
+
+/// Spawn one item ("atomic_lamp"...) at the avatar's position plus (dx, dy).
+std::string request_scenario_spawn_item( const std::string &itype, int dx, int dy );
+/// Set furniture at an offset from the avatar (3D-8d's fixture: worldgen owes
+/// no scene a bed, so the probe places its own).
+std::string request_scenario_spawn_furniture( const std::string &furn, int dx, int dy );
+
+/// Set the avatar's sex. The renderer publishes the avatar as
+/// player_male/player_female, so a fixture that verifies a specific creature
+/// mesh needs the roll to be a choice rather than a coin flip.
+std::string request_scenario_set_avatar_sex( bool male );
+
+/// Outcome of the most recent scenario command that finished on the game thread.
+struct scenario_status {
+    /// Increments when a scenario command finishes (well or badly). The caller
+    /// polls this the way it polls every other generation counter.
+    int generation = 0;
+    bool ok = false;
+    /// Which command, and what it has to say about how it went.
+    std::string last;
+    std::string detail;
+};
+scenario_status get_scenario_status();
+
 } // namespace godot_backend
 
 #endif // GODOT

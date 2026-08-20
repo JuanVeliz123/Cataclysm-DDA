@@ -900,10 +900,26 @@ func _maybe_screenshot(tag: String) -> void:
 	if DisplayServer.get_name() == "headless":
 		print("[shot] headless display server: nothing was rasterised, skipping")
 		return
+	await _maybe_screenshot_of(get_viewport(), tag)
+
+## Screenshot a specific viewport, under the same --screenshot gate.
+##
+## Exists because "the map" and "what players see" are different viewports here:
+## the probe's screenshots captured the root (the 2D MapView and the panels)
+## while the shipping renderer draws into a SubViewport that was never captured
+## -- so no screenshot showed the 3D backend, the tilt, or a creature mesh.
+func _maybe_screenshot_of(vp: Viewport, tag: String) -> void:
+	var args := OS.get_cmdline_user_args()
+	var at := args.find("--screenshot")
+	if at < 0 or at + 1 >= args.size():
+		return
+	if DisplayServer.get_name() == "headless":
+		print("[shot] headless display server: nothing was rasterised, skipping")
+		return
 	# One full frame has to complete before the viewport texture holds anything.
 	await RenderingServer.frame_post_draw
 	await RenderingServer.frame_post_draw
-	var img: Image = get_viewport().get_texture().get_image()
+	var img: Image = vp.get_texture().get_image()
 	if img == null:
 		print("[shot] no viewport image")
 		return
@@ -912,6 +928,18 @@ func _maybe_screenshot(tag: String) -> void:
 		path = path.get_basename() + "." + tag + "." + path.get_extension()
 	var err := img.save_png(path)
 	print("[shot] %s -> %s (%s, err=%d)" % [tag, path, str(img.get_size()), err])
+
+## Screenshot the 3D probe's SubViewport, then free it.
+##
+## A SubViewport nothing composites does not render on its own -- its update mode
+## waits for visibility that never comes -- so it is switched to UPDATE_ALWAYS for
+## the two frames the capture needs. Freed here rather than in the stage so the
+## stage can stay synchronous; under a headless display server the capture is
+## skipped and this is just a deferred free.
+func _finish_map_view_3d(sub: SubViewport) -> void:
+	sub.render_target_update_mode = SubViewport.UPDATE_ALWAYS
+	await _maybe_screenshot_of(sub, "map3d")
+	sub.queue_free()
 
 ## Screenshot one panel on its own.
 ##
@@ -1127,11 +1155,16 @@ func _probe_map_view_3d() -> void:
 	var cmds: PackedInt32Array = host.get_map_draw_list()
 	var want_instances := int(cmds.size() / 10)
 	var got_instances := int(stats.get("instances", 0))
-	print("[map3d] draw list holds %d commands, batches hold %d instances" % [
-		want_instances, got_instances])
-	if want_instances > 0 and got_instances != want_instances:
-		push_error("3D backend built %d instances for %d commands" % [
-			got_instances, want_instances])
+	# A command whose creature is drawn as a mesh is left undrawn on purpose
+	# (3D-7c), overlays included. Without this term the check reddened the moment
+	# the first committed mesh existed -- 73 instances for 88 commands, all 15 of
+	# them the meshed avatar's body and clothing.
+	var meshed := int(stats.get("suppressed", 0))
+	print("[map3d] draw list holds %d commands, batches hold %d instances (%d meshed)" % [
+		want_instances, got_instances, meshed])
+	if want_instances > 0 and got_instances != want_instances - meshed:
+		push_error("3D backend built %d instances for %d commands (%d left to meshes)" % [
+			got_instances, want_instances, meshed])
 
 	# The batching claim, which is the point of 3D-1b and is a number rather than an
 	# opinion: with the depth on each sprite instead of on each batch, the key is
@@ -1177,11 +1210,17 @@ func _probe_map_view_3d() -> void:
 	var cam: Camera3D = view.get_node_or_null("MapCamera")
 	if cam != null:
 		var ortho := cam.projection == Camera3D.PROJECTION_ORTHOGONAL
-		var flat := cam.rotation.is_equal_approx(Vector3.ZERO)
-		print("[map3d] camera orthogonal=%s, unrotated=%s (tilt is 3D-3, not now)" % [
-			str(ortho), str(flat)])
-		if not ortho or not flat:
-			push_error("3D backend camera is not a flat orthographic view")
+		# Flat at tilt 0, pitched down by exactly the tilt above it -- TILT_DEGREES
+		# defaults to 45 now, so "unrotated" stopped being the healthy state. The
+		# geometry itself is geometry_check.tscn's job; this only checks the camera
+		# is where the view says it is.
+		var tilt_now := float(stats.get("tilt", 0.0))
+		var want_rot := Vector3(-deg_to_rad(tilt_now), 0.0, 0.0)
+		var aimed := cam.rotation.is_equal_approx(want_rot)
+		print("[map3d] camera orthogonal=%s, pitched to tilt %.1f=%s" % [
+			str(ortho), tilt_now, str(aimed)])
+		if not ortho or not aimed:
+			push_error("3D backend camera is not the orthographic view its tilt asks for")
 		# The whole of what a viewport needs to render 3D at all, checked after the
 		# hide-then-show above because that is the sequence that breaks it.
 		#
@@ -1206,7 +1245,10 @@ func _probe_map_view_3d() -> void:
 	print("[map3d] tilt = %.1f degrees (geometry_check.tscn is what verifies it)"
 		% float(stats.get("tilt", 0.0)))
 	_stage("map_view_3d")
-	sub.queue_free()
+	# Detached, so this stage stays synchronous (see the comment at its top): the
+	# finisher screenshots the 3D world -- the one viewport no probe screenshot
+	# ever captured, though it is what players see -- and then frees it.
+	_finish_map_view_3d(sub)
 	# Put the extent back, so the fixtures after this one measure the map the probe
 	# asked for rather than the one this stage's viewport happened to fit. Requested
 	# without waiting for it to land: the key-drive fixtures run concurrently in
@@ -1670,6 +1712,12 @@ func _shutdown() -> void:
 	for row in _sct_seen:
 		print("[sct]   %s" % row)
 
+	# Register the exit code with the backend BEFORE quitting. Shutdown with a
+	# live session ends in std::_Exit from the game thread's input wait, which
+	# used to hard-code 0 -- so every failing run of this probe exited green,
+	# and VER-0's "exit code, not a printed note" was a printed note after all.
+	if host.has_method("note_exit_code"):
+		host.note_exit_code(coverage)
 	# Order matters: request_quit first, so a game thread parked in a menu sees
 	# the shutdown flag and exits there instead of cancelling and running on into
 	# game logic while the extension is being torn down.

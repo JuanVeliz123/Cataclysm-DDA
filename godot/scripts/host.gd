@@ -75,7 +75,7 @@ const USE_CURSES_UI_OVERLAY := true
 ## is compiled, so running the two out of step shows the new UI filled with zeros
 ## for every field the old library does not emit -- which is indistinguishable
 ## from a bug unless we say so. Bump both sides together.
-const REQUIRED_API_VERSION := 22
+const REQUIRED_API_VERSION := 27
 
 var last_host_size: Vector2i = Vector2i(0, 0)
 var was_session_active: bool = false
@@ -106,6 +106,13 @@ func _ready() -> void:
 	# Bootstrap first so a UI script error cannot leave us stuck on the splash.
 	_check_api_version()
 	cdda_host.bootstrap_async()
+	# While the game thread loads its data: the committed creature sources are
+	# .glb (and a generator script), but what the renderer loads are the derived,
+	# gitignored .scn/.res -- so a fresh checkout would silently play with no
+	# meshes at all. Deferred so the splash paints its first frame before the
+	# main thread spends a few seconds converting; a normal launch finds
+	# everything fresh and pays one file-stat per model.
+	call_deferred("_prepare_creature_assets")
 	_on_viewport_resized()
 	if world_pick.has_method("setup"):
 		world_pick.setup(cdda_host)
@@ -117,6 +124,22 @@ func _ready() -> void:
 		chargen_panel.confirmed.connect(_on_chargen_confirmed)
 	if chargen_panel.has_signal("cancelled"):
 		chargen_panel.cancelled.connect(_on_chargen_cancelled)
+
+## Build whatever derived creature assets are missing or stale. The converter and
+## the mannequin generator both no-op as scenes when embedded (they check
+## current_scene), so adding them as helper nodes runs none of their CLI paths.
+func _prepare_creature_assets() -> void:
+	var t0 := Time.get_ticks_msec()
+	var conv := Node.new()
+	conv.set_script(load("res://scripts/convert_creature_meshes.gd"))
+	# In the tree, because the converter measures global transforms and outside
+	# it they all come back identity -- its own header tells the story.
+	add_child(conv)
+	var r: Dictionary = conv.convert_missing()
+	conv.queue_free()
+	print("[host] creature assets ready: %d converted, %d fresh, %d failed (%d ms)" % [
+		int(r.get("converted", 0)), int(r.get("fresh", 0)), int(r.get("failed", 0)),
+		Time.get_ticks_msec() - t0])
 
 func _process(_delta: float) -> void:
 	if cdda_host.bootstrap_failed():
