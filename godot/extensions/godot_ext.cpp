@@ -411,6 +411,8 @@ class CDDAHost : public godot::Node
             godot::ClassDB::bind_method( godot::D_METHOD( "is_ready" ), &CDDAHost::is_ready );
             godot::ClassDB::bind_method( godot::D_METHOD( "is_session_active" ),
                                         &CDDAHost::is_session_active );
+            godot::ClassDB::bind_method( godot::D_METHOD( "session_content_ready" ),
+                                        &CDDAHost::session_content_ready );
             godot::ClassDB::bind_method( godot::D_METHOD( "is_loading" ),
                                         &CDDAHost::is_loading );
             godot::ClassDB::bind_method( godot::D_METHOD( "get_loading_context" ),
@@ -1533,6 +1535,11 @@ class CDDAHost : public godot::Node
             return session_active_.load();
         }
 
+        bool session_content_ready() const
+        {
+            return session_content_ready_.load();
+        }
+
         bool is_loading() const
         {
             return loading_ui::active();
@@ -2093,6 +2100,18 @@ class CDDAHost : public godot::Node
                 rng_set_engine_seed( 0 );
                 game_ui_init_ui();
                 game_load_static_data();
+                // Hoist the tileset load into bootstrap so it is not on the
+                // session-start critical path (which blocks the first world
+                // frame). It is idempotent and caches in g_tileset, so the
+                // later session-start call short-circuits. Wrapped so a failure
+                // does not abort bootstrap.
+                try {
+                    ensure_tileset_loaded( "UltimateCataclysm" );
+                } catch( const std::exception &err ) {
+                    godot::UtilityFunctions::printerr(
+                        "CDDA bootstrap: tileset preload failed (will retry at session start): ",
+                        err.what() );
+                }
                 cataimgui_init_colors();
                 loading_ui::done();
 
@@ -2144,6 +2163,11 @@ class CDDAHost : public godot::Node
                     }
 
                     session_active_ = true;
+                    // start_new_game/start_load_game do the actual (now-
+                    // parallelized) data/save loading and can run for seconds;
+                    // host.gd's splash stays up in the meantime instead of
+                    // handing off to an empty HUD/map/minimap.
+                    session_content_ready_ = false;
                     bool started = false;
                     if( cmd.type == host_command_type::new_game ) {
                         started = start_new_game( cmd.mode.empty() ? "custom" : cmd.mode );
@@ -2155,12 +2179,14 @@ class CDDAHost : public godot::Node
                         ensure_tileset_loaded( "UltimateCataclysm" );
                         update_map_snapshot();
                             update_hud_snapshot();
+                        session_content_ready_ = true;
                         event_bus_send_game_begin( "0.C-Godot" );
                         while( game_running_.load() && !game_do_turn() ) {
                             // Game loop
                         }
                     }
                     session_active_ = false;
+                    session_content_ready_ = true;
                 }
 
                 ::exit_handler( 0 );
@@ -2191,6 +2217,15 @@ class CDDAHost : public godot::Node
         std::atomic<bool> ready_{ false };
         std::atomic<bool> failed_{ false };
         std::atomic<bool> session_active_{ false };
+        // Distinct from session_active_: that flips true *before*
+        // start_new_game/start_load_game runs, so the game thread can keep
+        // servicing chargen/worldgen prompts through MapView. This flag only
+        // flips true once update_map_snapshot()/update_hud_snapshot() have
+        // actually published real data for the session, so host.gd's splash
+        // can stay up for the real load, not just the (now bootstrap-hoisted,
+        // near-instant) tileset wait. Left true otherwise -- the chargen/
+        // run_session paths do not gate on it.
+        std::atomic<bool> session_content_ready_{ true };
         std::atomic<bool> chargen_busy_{ false };
 
         std::mutex cmd_mutex_;

@@ -62,7 +62,7 @@ using namespace mapdata;
 
 /** @relates int_id */
 template<>
-inline bool int_id<ter_t>::is_valid() const
+bool int_id<ter_t>::is_valid() const
 {
     return terrain_data.is_valid( *this );
 }

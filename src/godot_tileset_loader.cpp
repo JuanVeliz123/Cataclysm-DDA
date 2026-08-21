@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <cctype>
@@ -17,6 +18,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <tuple>
 #include <unordered_map>
 #include <unordered_set>
@@ -273,6 +275,22 @@ pixel_rect compute_opaque_rect( const std::vector<uint8_t> &rgba, const int atla
     }
     return pixel_rect{ min_x, min_y, max_x - min_x + 1, max_y - min_y + 1 };
 }
+
+/// Result of the threaded per-atlas CPU prep: decode + color key + per-sprite
+/// opaque bounds + color filter. It holds no Godot objects so it can be built
+/// freely on a worker thread; the upload loop then builds the Godot
+/// Ref<ImageTexture> on the loading thread, which is main-thread-bound.
+struct atlas_prepared {
+    std::vector<uint8_t> base;
+    std::vector<std::vector<uint8_t>> filtered;
+    std::vector<pixel_rect> opaque_bounds;
+    int atlas_width = 0;
+    int atlas_height = 0;
+    int sprite_width = 0;
+    int sprite_height = 0;
+    int atlas_offset = 0;
+    int cols = 0;
+};
 
 } // namespace
 
@@ -1272,38 +1290,102 @@ void godot_tileset_loader::upload_atlases()
         }
     };
 
-    for( const atlas_descriptor &d : atlases_ ) {
-        cata_assert( d.sprite_width > 0 );
-        cata_assert( d.sprite_height > 0 );
-        cata_assert( d.image.is_valid() );
+    // Per-atlas CPU prep (decode + color key, opaque bounds, color filter) is
+    // fully independent across atlases, so fan it out across a worker pool. The
+    // Godot Ref<ImageTexture> creation in make_atlas_texture stays on the
+    // loading thread (main-thread-bound in many Godot builds), as does the
+    // per-sprite emit into ts->tile_values.
+    std::vector<std::string> filter_names;
+    filter_names.reserve( tile_values_data.size() );
+    for( const tiles_pixel_color_entry &entry : tile_values_data ) {
+        filter_names.push_back( std::get<1>( entry ) );
+    }
+
+    const auto prepare_one = [&]( const atlas_descriptor &d ) -> atlas_prepared {
+        atlas_prepared p;
+        p.sprite_width = d.sprite_width;
+        p.sprite_height = d.sprite_height;
+        p.atlas_offset = d.atlas_offset;
+        const int atlas_width = d.image->get_width();
+        const int atlas_height = d.image->get_height();
+        p.atlas_width = atlas_width;
+        p.atlas_height = atlas_height;
+        const int cols = atlas_width / d.sprite_width;
+        const int rows = atlas_height / d.sprite_height;
+        p.cols = cols;
 
         // Decode the atlas once, applying the transparency color key. The
         // color-filter variants preserve the alpha channel, so per-sprite
         // opaque bounds are computed once from this unfiltered data.
-        const std::vector<uint8_t> base = image_to_rgba( d.image, d.color_key_r,
-                                          d.color_key_g, d.color_key_b );
-        const int cols = d.image->get_width() / d.sprite_width;
+        p.base = image_to_rgba( d.image, d.color_key_r, d.color_key_g, d.color_key_b );
 
         const rect_range<pixel_rect> input_range( d.sprite_width, d.sprite_height,
-                point( d.image->get_width() / d.sprite_width,
-                       d.image->get_height() / d.sprite_height ) );
+                point( cols, rows ) );
         // Pre-size to accommodate the maximum index this chunk can produce.
         const size_t max_index = static_cast<size_t>( d.atlas_offset ) +
-                                 static_cast<size_t>( cols ) * ( d.image->get_height() / d.sprite_height );
+                                 static_cast<size_t>( cols ) * rows;
         std::vector<pixel_rect> opaque_bounds( max_index + cols, pixel_rect{ 0, 0, 0, 0 } );
         for( const pixel_rect rect : input_range ) {
             const size_t index = static_cast<size_t>( d.atlas_offset ) +
                                  ( rect.x / d.sprite_width ) + ( rect.y / d.sprite_height ) * cols;
             if( index < opaque_bounds.size() ) {
-                opaque_bounds[index] = compute_opaque_rect( base, d.image->get_width(), rect );
+                opaque_bounds[index] = compute_opaque_rect( p.base, atlas_width, rect );
             }
         }
+        p.opaque_bounds = std::move( opaque_bounds );
 
-        for( const tiles_pixel_color_entry &entry : tile_values_data ) {
+        // Pre-apply each color filter once (the unfiltered atlas needs none).
+        p.filtered.resize( filter_names.size() );
+        for( size_t i = 0; i < filter_names.size(); ++i ) {
+            const pixel_filter filter = get_color_pixel_function( filter_names[i] );
+            if( filter ) {
+                p.filtered[i] = apply_color_filter( p.base, filter );
+            }
+        }
+        return p;
+    };
+
+    const size_t atlas_count = atlases_.size();
+    std::vector<atlas_prepared> prepared( atlas_count );
+    if( atlas_count > 0 ) {
+        const unsigned int pool_size = std::max<unsigned int>( 1,
+                                    std::min<unsigned int>( std::thread::hardware_concurrency(),
+                                            static_cast<unsigned int>( atlas_count ) ) );
+        std::vector<std::thread> workers;
+        workers.reserve( pool_size );
+        std::atomic<size_t> next{ 0 };
+        const auto worker_fn = [&]() {
+            size_t i = 0;
+            while( ( i = next.fetch_add( 1 ) ) < atlas_count ) {
+                prepared[i] = prepare_one( atlases_[i] );
+            }
+        };
+        for( unsigned int t = 0; t < pool_size; ++t ) {
+            workers.emplace_back( worker_fn );
+        }
+        for( auto &w : workers ) {
+            w.join();
+        }
+    }
+
+    for( size_t ai = 0; ai < atlas_count; ++ai ) {
+        const atlas_descriptor &d = atlases_[ai];
+        const atlas_prepared &p = prepared[ai];
+        cata_assert( p.sprite_width > 0 );
+        cata_assert( p.sprite_height > 0 );
+        cata_assert( d.image.is_valid() );
+
+        const int cols = p.cols;
+        const int rows = p.atlas_height / p.sprite_height;
+        const rect_range<pixel_rect> input_range( p.sprite_width, p.sprite_height,
+                point( cols, rows ) );
+
+        for( size_t e = 0; e < tile_values_data.size(); ++e ) {
+            const tiles_pixel_color_entry &entry = tile_values_data[e];
             const pixel_filter filter = get_color_pixel_function( std::get<1>( entry ) );
+            const std::vector<uint8_t> &rgba = filter ? p.filtered[e] : p.base;
             const godot::Ref<godot::ImageTexture> atlas_texture =
-                filter ? make_atlas_texture( d.image, apply_color_filter( base, filter ) )
-                : make_atlas_texture( d.image, base );
+                make_atlas_texture( d.image, rgba );
             cata_assert( atlas_texture.is_valid() );
             // Keep the atlas texture alive for the lifetime of the tileset;
             // the sprites below only reference it through a source rect.
@@ -1312,12 +1394,12 @@ void godot_tileset_loader::upload_atlases()
             // Emit the per-sprite textures into the variant target.
             std::vector<godot_texture> &target = *std::get<0>( entry );
             for( const pixel_rect rect : input_range ) {
-                const size_t index = static_cast<size_t>( d.atlas_offset ) +
-                                     ( rect.x / d.sprite_width ) + ( rect.y / d.sprite_height ) * cols;
+                const size_t index = static_cast<size_t>( p.atlas_offset ) +
+                                     ( rect.x / p.sprite_width ) + ( rect.y / p.sprite_height ) * cols;
                 cata_assert( index < target.size() );
                 cata_assert( !target[index].is_valid() );
-                const pixel_rect &opaque = index < opaque_bounds.size()
-                                           ? opaque_bounds[index]
+                const pixel_rect &opaque = index < p.opaque_bounds.size()
+                                           ? p.opaque_bounds[index]
                                            : pixel_rect{ 0, 0, rect.w, rect.h };
                 target[index] = godot_texture( atlas_texture, rect.x, rect.y, rect.w, rect.h,
                                                opaque.x, opaque.y, opaque.w, opaque.h );

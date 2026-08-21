@@ -12,6 +12,7 @@
 #include "field.h"
 #include "field_type.h"
 #include "game.h"
+#include "worldfactory.h"
 #include "game_constants.h"
 #include "map_scale_constants.h"
 #include "enums.h"
@@ -1375,6 +1376,11 @@ godot::Array MapSnapshot::copy_avatar_overlays() const
 void MapSnapshot::update_from_game()
 {
     if( !g ) {
+        return;
+    }
+    // See HudSnapshot::update_from_game: game state is only valid once a world is
+    // active; querying it before a world is loaded dereferences null data.
+    if( !world_generator || !world_generator->active_world ) {
         return;
     }
     {

@@ -2007,14 +2007,14 @@ bool map::has_furn( const tripoint_bub_ms &p ) const
 furn_id map::furn( const tripoint_bub_ms p ) const
 {
     if( !inbounds( p ) ) {
-        return furn_str_id::NULL_ID();
+        return furn_id();
     }
 
     point_sm_ms l;
     const submap *const current_submap = unsafe_get_submap_at( p, l );
     if( current_submap == nullptr ) {
         debugmsg( "Tried process furniture at (%d,%d) but the submap is not loaded", l.x(), l.y() );
-        return furn_str_id::NULL_ID();
+        return furn_id();
     }
 
     return current_submap->get_furn( l );
@@ -2203,7 +2203,7 @@ std::string map::furnname( const tripoint_bub_ms &p )
 ter_id map::ter( const tripoint_bub_ms &p ) const
 {
     if( !inbounds( p ) ) {
-        return ter_str_id::NULL_ID().id();
+        return t_null;
     }
 
     point_sm_ms l;
@@ -2211,7 +2211,7 @@ ter_id map::ter( const tripoint_bub_ms &p ) const
     if( current_submap == nullptr ) {
         debugmsg( "Tried to process terrain at (%d,%d) of submap of (%d,%d,%d) but the submap is not loaded.  my_MAPSIZE: %d",
                   l.x(), l.y(), p.x(), p.y(), p.z(), my_MAPSIZE );
-        return ter_str_id::NULL_ID().id();
+        return t_null;
     }
 
     return current_submap->get_ter( l );
@@ -3423,12 +3423,38 @@ bool map::can_put_items_ter_furn( const tripoint_bub_ms &p ) const
 
 bool map::has_flag_ter( const std::string &flag, const tripoint_bub_ms &p ) const
 {
-    return ter( p ).obj().has_flag( flag );
+    if( !inbounds( p ) ) {
+        return false;
+    }
+    point_sm_ms l;
+    const submap *const sm = unsafe_get_submap_at( p, l );
+    if( sm == nullptr ) {
+        // Submap not loaded yet (e.g. an HUD update during world load): treat as
+        // having no flags rather than aborting on a "submap not loaded" debugmsg.
+        return false;
+    }
+    const ter_id t = sm->get_ter( l );
+    if( !t.is_valid() ) {
+        return false;
+    }
+    return t.obj().has_flag( flag );
 }
 
 bool map::has_flag_furn( const std::string &flag, const tripoint_bub_ms &p ) const
 {
-    return furn( p ).obj().has_flag( flag );
+    if( !inbounds( p ) ) {
+        return false;
+    }
+    point_sm_ms l;
+    const submap *const sm = unsafe_get_submap_at( p, l );
+    if( sm == nullptr ) {
+        return false;
+    }
+    const furn_id f = sm->get_furn( l );
+    if( !f.is_valid() ) {
+        return false;
+    }
+    return f.obj().has_flag( flag );
 }
 
 bool map::has_flag_ter_or_furn( const std::string &flag, const tripoint_bub_ms &p ) const
@@ -3440,12 +3466,18 @@ bool map::has_flag_ter_or_furn( const std::string &flag, const tripoint_bub_ms &
     point_sm_ms l;
     const submap *const current_submap = unsafe_get_submap_at( p, l );
     if( current_submap == nullptr ) {
-        debugmsg( "Tried to process terrain at (%d,%d) but the submap is not loaded", l.x(), l.y() );
         return false;
     }
 
-    return current_submap->get_ter( l ).obj().has_flag( flag ) ||
-           current_submap->get_furn( l ).obj().has_flag( flag );
+    const ter_id t = current_submap->get_ter( l );
+    const furn_id f = current_submap->get_furn( l );
+    // Skip ids that don't resolve to a loaded object (e.g. an unloaded mod or a
+    // not-yet-ready map) instead of aborting on a failed id conversion.
+    if( !t.is_valid() && !f.is_valid() ) {
+        return false;
+    }
+    return ( t.is_valid() && t.obj().has_flag( flag ) ) ||
+           ( f.is_valid() && f.obj().has_flag( flag ) );
 }
 
 bool map::has_flag( const ter_furn_flag flag, const tripoint_bub_ms &p ) const
@@ -3455,12 +3487,36 @@ bool map::has_flag( const ter_furn_flag flag, const tripoint_bub_ms &p ) const
 
 bool map::has_flag_ter( const ter_furn_flag flag, const tripoint_bub_ms &p ) const
 {
-    return ter( p ).obj().has_flag( flag );
+    if( !inbounds( p ) ) {
+        return false;
+    }
+    point_sm_ms l;
+    const submap *const sm = unsafe_get_submap_at( p, l );
+    if( sm == nullptr ) {
+        return false;
+    }
+    const ter_id t = sm->get_ter( l );
+    if( !t.is_valid() ) {
+        return false;
+    }
+    return t.obj().has_flag( flag );
 }
 
 bool map::has_flag_furn( const ter_furn_flag flag, const tripoint_bub_ms &p ) const
 {
-    return furn( p ).obj().has_flag( flag );
+    if( !inbounds( p ) ) {
+        return false;
+    }
+    point_sm_ms l;
+    const submap *const sm = unsafe_get_submap_at( p, l );
+    if( sm == nullptr ) {
+        return false;
+    }
+    const furn_id f = sm->get_furn( l );
+    if( !f.is_valid() ) {
+        return false;
+    }
+    return f.obj().has_flag( flag );
 }
 
 bool map::has_flag_ter_or_furn( const ter_furn_flag flag, const tripoint_bub_ms &p ) const
@@ -3472,12 +3528,16 @@ bool map::has_flag_ter_or_furn( const ter_furn_flag flag, const tripoint_bub_ms 
     point_sm_ms l;
     const submap *const current_submap = unsafe_get_submap_at( p, l );
     if( current_submap == nullptr ) {
-        debugmsg( "Tried to process terrain at (%d,%d) but the submap is not loaded", l.x(), l.y() );
         return false;
     }
 
-    return current_submap->get_ter( l ).obj().has_flag( flag ) ||
-           current_submap->get_furn( l ).obj().has_flag( flag );
+    const ter_id t = current_submap->get_ter( l );
+    const furn_id f = current_submap->get_furn( l );
+    if( !t.is_valid() && !f.is_valid() ) {
+        return false;
+    }
+    return ( t.is_valid() && t.obj().has_flag( flag ) ) ||
+           ( f.is_valid() && f.obj().has_flag( flag ) );
 }
 
 bool map::on_matching_stairs( const tripoint_bub_ms &a, const tripoint_bub_ms &b ) const

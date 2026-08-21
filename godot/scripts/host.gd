@@ -468,6 +468,14 @@ func _session_present_ready() -> bool:
 		return false
 	if cdda_host.has_method("tileset_ready") and not cdda_host.tileset_ready():
 		return false
+	# The tileset is preloaded at bootstrap now, so tileset_ready() alone no
+	# longer covers the load: session_active flips true before
+	# start_new_game/start_load_game even runs, so without this the splash
+	# dismissed into an empty HUD/map/minimap while the save was still
+	# loading. session_content_ready() only flips once real data has been
+	# published.
+	if cdda_host.has_method("session_content_ready") and not cdda_host.session_content_ready():
+		return false
 	return true
 
 func _update_splash_progress(title: String) -> void:

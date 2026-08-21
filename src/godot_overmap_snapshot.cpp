@@ -6,6 +6,7 @@
 #include "cata_utility.h"
 #include "coordinates.h"
 #include "game.h"
+#include "worldfactory.h"
 #include "godot_tileset_loader.h"
 #include "map_extras.h"
 #include "enums.h"
@@ -279,6 +280,11 @@ void OvermapSnapshot::update_from_game( const tripoint_abs_omt &center,
         }
     }
     if( !g ) {
+        return;
+    }
+    // See HudSnapshot::update_from_game: game state is only valid once a world is
+    // active; querying it before a world is loaded dereferences null data.
+    if( !world_generator || !world_generator->active_world ) {
         return;
     }
 

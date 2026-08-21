@@ -8,6 +8,7 @@
 #include "creature.h"
 #include "display.h"
 #include "game.h"
+#include "worldfactory.h"
 #include "inventory.h"
 #include "item.h"
 #include "item_location.h"
@@ -99,6 +100,13 @@ void update_hud_snapshot()
 void HudSnapshot::update_from_game()
 {
     if( !g ) {
+        return;
+    }
+    // The HUD reads live game state (avatar, overmap, map). That state is only
+    // valid once a world is active; querying it during bootstrap/chargen (before a
+    // world has been chosen and loaded) dereferences null game data and crashes
+    // (e.g. overmapbuffer::get_existing touches world_generator->active_world).
+    if( !world_generator || !world_generator->active_world ) {
         return;
     }
     avatar &u = get_avatar();

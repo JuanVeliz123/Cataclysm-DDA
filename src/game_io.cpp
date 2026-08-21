@@ -11,6 +11,7 @@
 #include <ctime>
 #include <exception>
 #include <filesystem>
+#include <future>
 #include <functional>
 #include <iostream>
 #include <iterator>
@@ -490,6 +491,42 @@ bool game::load( const save_t &name )
             },
         }
     };
+
+    // Read phase: the per-save files above are independent and are only consumed
+    // by their own entry, so we read their raw bytes concurrently to overlap the
+    // disk I/O (the dominant cost on spinning disks / large saves). The serial
+    // parse loop below then re-reads them from the now-warm OS page cache. All
+    // game-state mutation still happens serially in the original order, so there
+    // is no concurrent mutation of shared state during this phase. "Finalizing"
+    // and every other entry still run strictly after these reads complete.
+    {
+        auto warm = []( const cata_path &p ) {
+            if( file_exist( p.get_unrelative_path() ) ) {
+                // Slurp the bytes to populate the OS page cache, then discard;
+                // the serial parse re-reads them from cache.
+                read_whole_file( p );
+            }
+        };
+
+        std::vector<std::future<void>> readers;
+        readers.emplace_back( std::async( std::launch::async, warm,
+                                          PATH_INFO::world_base_save_path() / SAVE_MASTER ) );
+        readers.emplace_back( std::async( std::launch::async, warm,
+                                          PATH_INFO::current_dimension_save_path() / SAVE_DIMENSION_DATA ) );
+        if( world_generator->active_world->has_compression_enabled() ) {
+            readers.emplace_back( std::async( std::launch::async, warm,
+                                              save_file_path + zzip_suffix ) );
+        } else {
+            readers.emplace_back( std::async( std::launch::async, warm,
+                                              save_file_path ) );
+        }
+        readers.emplace_back( std::async( std::launch::async, warm,
+                                          worldpath / ( name.base_path() + SAVE_EXTENSION_LOG ) ) );
+
+        for( std::future<void> &r : readers ) {
+            r.get();
+        }
+    }
 
     for( const named_entry &e : entries ) {
         loading_ui::show( _( "Loading the save…" ), e.first );

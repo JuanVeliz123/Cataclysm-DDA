@@ -43,8 +43,11 @@ flexbuffer_cache &user_cache()
 
 std::unordered_map<std::string, std::unique_ptr<flexbuffer_cache>> save_caches;
 
-// There's no measurable need to persist flatbuffers for save data, so just create a per-world 'cache' which parses
-// but doesn't disk-cache the parsed flatbuffer.
+// Disk-cache parsed save data per world so repeated loads skip re-parsing.
+// The empty-path cache_directory used to disable disk caching entirely; we now
+// point it at a real on-disk location under the world's save dir. Validity is
+// enforced by file mtime in flexbuffer_disk_cache, so saving (which bumps the
+// mtime) naturally invalidates the cached flatbuffer on the next load.
 flexbuffer_cache &cache_for_save( const cata_path &path )
 {
     // Assume lexically normal path
@@ -59,9 +62,12 @@ flexbuffer_cache &cache_for_save( const cata_path &path )
 
     auto it = save_caches.find( worldname_str );
     if( it == save_caches.end() ) {
+        std::filesystem::path world_root =
+            std::filesystem::u8path( PATH_INFO::savedir() ) / worldname_path;
+        std::filesystem::path world_cache = world_root / "cache";
         it = save_caches.emplace( worldname_str,
-                                  std::make_unique<flexbuffer_cache>( std::filesystem::path(),
-                                          std::filesystem::u8path( PATH_INFO::savedir() ) / worldname_path ) ).first;
+                                  std::make_unique<flexbuffer_cache>( world_cache,
+                                          world_root ) ).first;
     }
 
     return *it->second;
