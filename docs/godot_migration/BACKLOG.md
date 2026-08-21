@@ -445,6 +445,28 @@ before quitting; both probes register theirs. Diagnosed by three
 one-minute fixtures: a plain scene propagates `quit(3)`, a bootstrapped host
 propagates it, a live session turned it into 0.
 
+### OPEN CRASH — pixel minimap walks a freed vehicle (found 2026-08-19)
+
+SIGSEGV on the game thread, first caught by the scenario probe the moment two
+conditions finally co-occurred in a fixture: the minimap sized (it publishes
+nothing unsized, so no headless run before 2026-08-19 ever executed this code)
+and a melee fight next to a spawned car. Symbolicated:
+
+    game_do_turn -> update_pixel_minimap -> GodotPixelMinimap::draw
+      -> process_cache -> update_cache_at (godot_pixel_minimap.cpp:583)
+      -> get_map_color_at (:323) -> vehicle::get_display_of_tile
+      -> vehicle::part_displayed_at (vehicle.cpp:3521)
+      -> SEGV inside relative_parts.find()
+
+`get_map_color_at` uses a live `veh_at(p)`, so the dangling pointer is in the
+map's vehicle cache: something destroyed or split a vehicle without the cache
+hearing about it, and the minimap is merely the first reader per turn. Suspect
+window: zombies bashing the scenario car during the combat stage. Kills the
+whole game thread, so every later fixture times out -- a run that dies here
+looks like four unrelated failures. Not deterministic (three sized-minimap runs
+survived before one died). Needs its own investigation; the trace above is the
+starting point.
+
 ### Session-end and look-mode coverage (2026-08-18)
 
 Two player reports, both verified fixed by fixtures the same day:

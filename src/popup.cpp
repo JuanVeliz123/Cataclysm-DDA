@@ -442,6 +442,20 @@ query_popup::result query_popup::query()
             return result( false, "ANY_INPUT", evt );
         }
     }
+    // A cancel-only popup with no buttons -- popup( text, PF_NONE ), which is
+    // every bare-message notice in the game -- matched neither branch here and
+    // fell through to the legacy ImGui loop below. EOC "popup" messages (the
+    // lieutenant shadow warnings) open one with no player action at all, so
+    // that loop parked the game thread mid-session and starved the command
+    // queue behind any_window_shown(). Ride the same notice-plus-keypress
+    // channel as "press any key": the legacy loop's only exit is QUIT, so any
+    // dismissal maps to it.
+    if( cancel && options.empty() ) {
+        input_event evt;
+        if( godot_backend::run_anykey_popup_in_godot( get_message(), evt ) ) {
+            return result( false, "QUIT", evt );
+        }
+    }
     // Godot draws the prompt where it can; see godot_backend::run_popup_in_godot.
     std::string action;
     if( godot_backend::run_popup_in_godot( *this, action ) ) {

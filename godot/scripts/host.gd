@@ -46,6 +46,10 @@ var keybind_panel: Control
 var crafting_panel: Control
 var dialogue_panel: Control
 var surroundings_panel: Control
+## MENU-13's screens, one channel each.
+var martialarts_panel: Control
+var scores_panel: Control
+var medical_panel: Control
 
 ## Draw the world with the 3D backend (ADR-006, `BACKLOG.md` Part 4) instead of MapView.
 ##
@@ -75,7 +79,7 @@ const USE_CURSES_UI_OVERLAY := true
 ## is compiled, so running the two out of step shows the new UI filled with zeros
 ## for every field the old library does not emit -- which is indistinguishable
 ## from a bug unless we say so. Bump both sides together.
-const REQUIRED_API_VERSION := 27
+const REQUIRED_API_VERSION := 28
 
 var last_host_size: Vector2i = Vector2i(0, 0)
 var was_session_active: bool = false
@@ -183,6 +187,7 @@ func _process(_delta: float) -> void:
 	_update_crafting_panel()
 	_update_dialogue_panel()
 	_update_surroundings_panel()
+	_update_menu13_panels()
 
 	if session or world.visible or _pending_game_start:
 		_update_overmap_visibility()
@@ -381,6 +386,20 @@ func _setup_session_hud() -> void:
 	surroundings_panel.visible = false
 	add_child(surroundings_panel)
 	surroundings_panel.setup(cdda_host)
+
+	# MENU-13's screens. Above the dialogue panel deliberately: an NPC can ask
+	# the player to pick a style mid-conversation, and the picker has to be the
+	# thing on top when it does.
+	for spec in [["martialarts", "MartialArtsPanel"], ["scores", "ScoresPanel"],
+			["medical", "MedicalPanel"]]:
+		var panel := Control.new()
+		panel.set_script(load("res://scripts/%s_panel.gd" % spec[0]))
+		panel.name = str(spec[1])
+		panel.z_index = 18
+		panel.visible = false
+		add_child(panel)
+		panel.setup(cdda_host)
+		set(str(spec[0]) + "_panel", panel)
 	if character_panel.has_signal("closed"):
 		character_panel.closed.connect(_close_session_overlays)
 	_setup_minimap_panel()
@@ -750,6 +769,29 @@ func _update_surroundings_panel() -> void:
 func _surroundings_open() -> bool:
 	return surroundings_panel != null and surroundings_panel.visible
 
+## MENU-13's three screens share one shape, so they share one poller: show the
+## panel exactly while its channel says the game thread is waiting on it, and
+## refresh only while it is up. Reading the state is also what *attends* the
+## takeover -- a panel that never refreshes lets the 1.5s timeout expire and the
+## screen falls back to ImGui, which looks like the migration never happened.
+func _update_menu13_panels() -> void:
+	for spec in [["martialarts", martialarts_panel], ["scores", scores_panel],
+			["medical", medical_panel]]:
+		var panel: Control = spec[1]
+		if panel == null or not cdda_host.has_method(str(spec[0]) + "_active"):
+			continue
+		var want: bool = cdda_host.call(str(spec[0]) + "_active")
+		if want:
+			panel.refresh()
+		if want != panel.visible:
+			panel.visible = want
+
+func _menu13_open() -> bool:
+	for panel in [martialarts_panel, scores_panel, medical_panel]:
+		if panel != null and panel.visible:
+			return true
+	return false
+
 func _popup_modal() -> bool:
 	return popup_panel != null and popup_panel.prompt_open()
 
@@ -809,7 +851,7 @@ func _is_session_hotkey(event: InputEvent) -> bool:
 func _handle_session_hotkey(event: InputEvent) -> bool:
 	if (_popup_modal() or _textwin_open() or _uilist_open() or _options_open()
 			or _keybind_open() or _crafting_open() or _dialogue_open()
-			or _surroundings_open()):
+			or _surroundings_open() or _menu13_open()):
 		return false
 	# A notice on screen means the game thread is mid-prompt and waiting on a key
 	# -- "grab what?", "examine where?". Those are answered with a direction or
@@ -852,7 +894,7 @@ func _forward_input(event: InputEvent) -> void:
 	# them as well would drive the game underneath the menu.
 	if (_popup_modal() or _textwin_open() or _uilist_open() or _options_open()
 			or _keybind_open() or _crafting_open() or _dialogue_open()
-			or _surroundings_open() or _session_overlay_open()):
+			or _surroundings_open() or _menu13_open() or _session_overlay_open()):
 		return
 	if world.visible or terminal_view.visible:
 		cdda_host.push_input_event(event)

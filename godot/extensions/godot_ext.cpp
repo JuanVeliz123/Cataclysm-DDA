@@ -20,6 +20,9 @@
 #include "godot_backend.h"
 #include "godot_crafting_snapshot.h"
 #include "godot_dialogue_snapshot.h"
+#include "godot_martialarts_snapshot.h"
+#include "godot_medical_snapshot.h"
+#include "godot_scores_snapshot.h"
 #include "godot_surroundings_snapshot.h"
 #include "godot_keybind_snapshot.h"
 #include "godot_options_snapshot.h"
@@ -339,6 +342,41 @@ class CDDAHost : public godot::Node
                                         &CDDAHost::crafting_select_tab );
             godot::ClassDB::bind_method( godot::D_METHOD( "crafting_select_subtab", "index" ),
                                         &CDDAHost::crafting_select_subtab );
+            // MENU-13's screens: martial arts, scores, medical.
+            godot::ClassDB::bind_method( godot::D_METHOD( "martialarts_active" ),
+                                        &CDDAHost::martialarts_active );
+            godot::ClassDB::bind_method( godot::D_METHOD( "martialarts_generation" ),
+                                        &CDDAHost::martialarts_generation );
+            godot::ClassDB::bind_method( godot::D_METHOD( "get_martialarts_state" ),
+                                        &CDDAHost::get_martialarts_state );
+            godot::ClassDB::bind_method( godot::D_METHOD( "martialarts_action", "action" ),
+                                        &CDDAHost::martialarts_action );
+            godot::ClassDB::bind_method( godot::D_METHOD( "martialarts_move_to", "index" ),
+                                        &CDDAHost::martialarts_move_to );
+            godot::ClassDB::bind_method( godot::D_METHOD( "martialarts_select", "index" ),
+                                        &CDDAHost::martialarts_select );
+            godot::ClassDB::bind_method( godot::D_METHOD( "scores_active" ),
+                                        &CDDAHost::scores_active );
+            godot::ClassDB::bind_method( godot::D_METHOD( "scores_generation" ),
+                                        &CDDAHost::scores_generation );
+            godot::ClassDB::bind_method( godot::D_METHOD( "get_scores_state" ),
+                                        &CDDAHost::get_scores_state );
+            godot::ClassDB::bind_method( godot::D_METHOD( "scores_action", "action" ),
+                                        &CDDAHost::scores_action );
+            godot::ClassDB::bind_method( godot::D_METHOD( "scores_select_tab", "index" ),
+                                        &CDDAHost::scores_select_tab );
+            godot::ClassDB::bind_method( godot::D_METHOD( "medical_active" ),
+                                        &CDDAHost::medical_active );
+            godot::ClassDB::bind_method( godot::D_METHOD( "medical_generation" ),
+                                        &CDDAHost::medical_generation );
+            godot::ClassDB::bind_method( godot::D_METHOD( "get_medical_state" ),
+                                        &CDDAHost::get_medical_state );
+            godot::ClassDB::bind_method( godot::D_METHOD( "medical_action", "action" ),
+                                        &CDDAHost::medical_action );
+            godot::ClassDB::bind_method( godot::D_METHOD( "medical_select_limb", "index" ),
+                                        &CDDAHost::medical_select_limb );
+            godot::ClassDB::bind_method( godot::D_METHOD( "medical_select_tab", "index" ),
+                                        &CDDAHost::medical_select_tab );
             godot::ClassDB::bind_method( godot::D_METHOD( "dialogue_active" ),
                                         &CDDAHost::dialogue_active );
             godot::ClassDB::bind_method( godot::D_METHOD( "dialogue_generation" ),
@@ -1193,6 +1231,80 @@ class CDDAHost : public godot::Node
             godot_backend::get_crafting_snapshot().request_subtab( index );
         }
 
+        // --- the martial-arts style picker (MENU-13) ------------------------
+        bool martialarts_active() const
+        {
+            return godot_backend::get_martialarts_snapshot().active();
+        }
+        int64_t martialarts_generation() const
+        {
+            return static_cast<int64_t>( godot_backend::get_martialarts_snapshot().generation() );
+        }
+        godot::Dictionary get_martialarts_state() const
+        {
+            return godot_backend::get_martialarts_snapshot().copy_state();
+        }
+        void martialarts_action( const godot::String &action )
+        {
+            godot_backend::get_martialarts_snapshot().request_action( action.utf8().get_data() );
+        }
+        void martialarts_move_to( int index )
+        {
+            godot_backend::get_martialarts_snapshot().request_move_to( index );
+        }
+        void martialarts_select( int index )
+        {
+            godot_backend::get_martialarts_snapshot().request_select( index );
+        }
+
+        // --- the scores screen (MENU-13) -----------------------------------
+        bool scores_active() const
+        {
+            return godot_backend::get_scores_snapshot().active();
+        }
+        int64_t scores_generation() const
+        {
+            return static_cast<int64_t>( godot_backend::get_scores_snapshot().generation() );
+        }
+        godot::Dictionary get_scores_state() const
+        {
+            return godot_backend::get_scores_snapshot().copy_state();
+        }
+        void scores_action( const godot::String &action )
+        {
+            godot_backend::get_scores_snapshot().request_action( action.utf8().get_data() );
+        }
+        void scores_select_tab( int index )
+        {
+            godot_backend::get_scores_snapshot().request_tab( index );
+        }
+
+        // --- the medical screen (MENU-13) ----------------------------------
+        bool medical_active() const
+        {
+            return godot_backend::get_medical_snapshot().active();
+        }
+        int64_t medical_generation() const
+        {
+            return static_cast<int64_t>( godot_backend::get_medical_snapshot().generation() );
+        }
+        godot::Dictionary get_medical_state() const
+        {
+            return godot_backend::get_medical_snapshot().copy_state();
+        }
+        void medical_action( const godot::String &action )
+        {
+            godot_backend::get_medical_snapshot().request_action( action.utf8().get_data() );
+        }
+        void medical_select_limb( int index )
+        {
+            godot_backend::get_medical_snapshot().request_select( index );
+        }
+        void medical_select_tab( int index )
+        {
+            godot_backend::get_medical_snapshot().request_tab( index );
+        }
+
         // --- NPC conversation ----------------------------------------------
         bool dialogue_active() const
         {
@@ -1311,13 +1423,18 @@ class CDDAHost : public godot::Node
         /// host.gd says so instead of leaving the reader to guess.
         int api_version() const
         {
-            // 27: rot_flags bits 16-30 carry the interned tile id and
-            // get_map_ident_table() resolves them (3D-8d); 26 added cmd_shape
-            // in bits 13-15 (3D-8c). An old library leaves both zero, which
-            // reads as "no claim" and quietly costs shapes and meshes alike --
-            // exactly the mixed state the handshake turns into a loud boot
-            // error.
-            return 27;
+            // 28: MENU-13's first three screens have channels -- martial arts,
+            // scores, medical. An old library answers has_method() false for
+            // all of them, so their panels never attend, and every one of those
+            // screens falls back to the ImGui overlay after its 1.5s timeout:
+            // playable, silently unmigrated, and indistinguishable from work
+            // that was never done. 27: rot_flags bits 16-30 carry the interned
+            // tile id and get_map_ident_table() resolves them (3D-8d); 26 added
+            // cmd_shape in bits 13-15 (3D-8c). An old library leaves both zero,
+            // which reads as "no claim" and quietly costs shapes and meshes
+            // alike -- exactly the mixed state the handshake turns into a loud
+            // boot error.
+            return 28;
         }
 
         /// Whether a C++ screen is currently drawn in the overlay.

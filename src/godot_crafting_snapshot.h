@@ -67,10 +67,14 @@ class CraftingSnapshot
             bool caveat = false;
             /// A folder rather than a recipe.
             bool nested = false;
+            /// Never looked at -- the panel's counterpart of the "NEW!" marker.
+            bool unread = false;
         };
         struct tab {
             std::string id;
             std::string name;
+            /// Something under this tab is unread -- the "+" marker.
+            bool unread = false;
         };
         /// One line of the detail pane. `text` may carry CDDA colour tags.
         struct detail_line {
@@ -78,13 +82,44 @@ class CraftingSnapshot
             /// A heading rather than body text.
             bool header = false;
         };
+        /// One tool group inside a step. The player picks one of the variants
+        /// at craft time; here they are browsed, coloured by availability, and
+        /// the group expands and collapses exactly like the ImGui pane's
+        /// "or N more" / "show less" labels.
+        struct step_group {
+            /// The requirement's display name; empty means an anonymous "One of".
+            std::string label;
+            /// The group's index in crafting_ui_impl's numbering. Send it back
+            /// as "STEPTOOLS:<index>" to expand or collapse the group.
+            int index = 0;
+            bool expanded = false;
+            /// Colour-tagged variant texts, available ones first.
+            std::vector<std::string> variants;
+        };
+        /// One step of a step recipe, mirroring the ImGui expanded-steps view.
+        struct step {
+            std::string name;
+            /// This step's budgeted duration, already formatted.
+            std::string time;
+            /// " (xN, saves ...)" when batching shortens the step, else empty.
+            std::string batch_note;
+            /// Colour-tagged activity level.
+            std::string activity;
+            bool unattended = false;
+            /// Colour-tagged proficiency names, required ones marked.
+            std::vector<std::string> proficiencies;
+            /// Colour-tagged "A OR B" quality lines.
+            std::vector<std::string> qualities;
+            std::vector<step_group> groups;
+        };
 
         void publish_list( const std::vector<tab> &tabs, int tab_index,
                            const std::vector<tab> &subtabs, int subtab_index,
                            const std::vector<row> &rows, int selected,
                            const std::string &filter, size_t hidden, bool batch_mode,
-                           int batch_size );
-        void publish_detail( const std::vector<detail_line> &lines );
+                           int batch_size, bool highlight_unread, bool unread_first );
+        void publish_detail( const std::vector<detail_line> &lines,
+                             const std::vector<step> &steps, bool steps_expanded );
         /// Move the cursor without republishing the list. The selection changes on
         /// every arrow key; the rows do not, and rebuilding them would cost the
         /// panel its scroll position.
@@ -104,12 +139,16 @@ class CraftingSnapshot
         std::vector<tab> subtabs_;
         std::vector<row> rows_;
         std::vector<detail_line> detail_;
+        std::vector<step> steps_;
         std::vector<std::string> actions_;
         int tab_index_ = 0;
         int subtab_index_ = 0;
         int selected_ = 0;
         int batch_size_ = 1;
         bool batch_mode_ = false;
+        bool steps_expanded_ = false;
+        bool highlight_unread_ = false;
+        bool unread_first_ = false;
         size_t hidden_ = 0;
         std::string filter_;
         uint64_t list_generation_ = 0;

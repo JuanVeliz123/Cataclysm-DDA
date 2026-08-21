@@ -599,6 +599,61 @@ func _run_scenarios() -> void:
 					"the zombie may simply have survived: %s" % str(played))
 		await _shot("05c_combat_night")
 
+	# --- The surroundings list (MENU-12), observed at last. The screen was
+	# committed and building for days without one run ever reaching it: the
+	# headless probe's attempt shares an avatar with nine other stages and was
+	# starved by the soliloquy window. Here the queue is healthy, the watchdogs
+	# run, and the ground is rich -- a zombie (or its corpse), a car, a fire and
+	# whatever the fight dropped. The attend contract matters: reading the state
+	# is what attends, and an unattended takeover falls back to legacy ImGui
+	# after 1.5s -- so the state is read the moment active flips, not politely
+	# later.
+	if host.has_method("get_surroundings_state"):
+		# Capital V -- the binding is keyboard_char "V", and a lowercased press
+		# is the single letter that kept this screen unobserved through eight
+		# fixture runs across two probes.
+		_press_shifted(KEY_V, "V")
+		var opened := false
+		var waited_v := 0.0
+		while waited_v < 8.0:
+			await get_tree().create_timer(0.2).timeout
+			waited_v += 0.2
+			if host.surroundings_active():
+				opened = true
+				break
+		if not opened:
+			# One retry: the first press can be eaten by a soliloquy window the
+			# watchdog is still escaping.
+			_press_shifted(KEY_V, "V")
+			while waited_v < 16.0:
+				await get_tree().create_timer(0.2).timeout
+				waited_v += 0.2
+				if host.surroundings_active():
+					opened = true
+					break
+		_check("surroundings opened", opened, true, "after %.1fs" % waited_v)
+		if opened:
+			var sd: Dictionary = host.get_surroundings_state()
+			var s_tabs: Array = sd.get("tabs", [])
+			var s_rows: Array = sd.get("rows", [])
+			print("[scn] [surr] tabs=%d rows=%d selected=%d" % [s_tabs.size(),
+				s_rows.size(), int(sd.get("selected", -1))])
+			for i in mini(4, s_rows.size()):
+				print("[scn] [surr]   %s" % str(s_rows[i].get("text", "")).substr(0, 50))
+			_check("surroundings has tabs", s_tabs.size() >= 3, true,
+				"%d tabs" % s_tabs.size())
+			_check("surroundings lists something", s_rows.size() >= 1, true,
+				"%d rows (a zombie and a car stand right there)" % s_rows.size())
+			var tab_before := int(sd.get("tab", -1))
+			host.surroundings_action("NEXT_TAB")
+			await get_tree().create_timer(1.0).timeout
+			var tab_after := int((host.get_surroundings_state() as Dictionary).get("tab", -2))
+			_check("surroundings NEXT_TAB round trip", tab_after != tab_before, true,
+				"tab %d -> %d" % [tab_before, tab_after])
+			host.surroundings_action("QUIT")
+			await get_tree().create_timer(1.0).timeout
+			_check("surroundings closed", not host.surroundings_active(), true, "after QUIT")
+
 	# --- Volumetric fog, the default since 3D-8/3D-9 made it honest and affordable:
 	# 06 is the night as shipped, 06b the same frame with the fog drained, so every
 	# run carries its own A/B for the density number. The default comes back on

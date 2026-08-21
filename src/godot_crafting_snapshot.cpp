@@ -29,7 +29,18 @@ godot::Array tabs_to_array( const std::vector<CraftingSnapshot::tab> &tabs )
         godot::Dictionary d;
         d["id"] = gs( tabs[i].id );
         d["name"] = gs( tabs[i].name );
+        d["unread"] = tabs[i].unread;
         out[static_cast<int64_t>( i )] = d;
+    }
+    return out;
+}
+
+godot::Array strings_to_array( const std::vector<std::string> &strings )
+{
+    godot::Array out;
+    out.resize( static_cast<int64_t>( strings.size() ) );
+    for( size_t i = 0; i < strings.size(); ++i ) {
+        out[static_cast<int64_t>( i )] = gs( strings[i] );
     }
     return out;
 }
@@ -75,6 +86,8 @@ godot::Dictionary CraftingSnapshot::copy_list() const
     d["hidden"] = static_cast<int64_t>( hidden_ );
     d["batch_mode"] = batch_mode_;
     d["batch_size"] = batch_size_;
+    d["highlight_unread"] = highlight_unread_;
+    d["unread_first"] = unread_first_;
     godot::Array rows;
     rows.resize( static_cast<int64_t>( rows_.size() ) );
     for( size_t i = 0; i < rows_.size(); ++i ) {
@@ -84,6 +97,7 @@ godot::Dictionary CraftingSnapshot::copy_list() const
         r["craftable"] = rows_[i].craftable;
         r["caveat"] = rows_[i].caveat;
         r["nested"] = rows_[i].nested;
+        r["unread"] = rows_[i].unread;
         rows[static_cast<int64_t>( i )] = r;
     }
     d["rows"] = rows;
@@ -104,6 +118,34 @@ godot::Dictionary CraftingSnapshot::copy_detail() const
         lines[static_cast<int64_t>( i )] = l;
     }
     d["lines"] = lines;
+    d["steps_expanded"] = steps_expanded_;
+    godot::Array steps;
+    steps.resize( static_cast<int64_t>( steps_.size() ) );
+    for( size_t i = 0; i < steps_.size(); ++i ) {
+        const step &st = steps_[i];
+        godot::Dictionary s;
+        s["name"] = gs( st.name );
+        s["time"] = gs( st.time );
+        s["batch_note"] = gs( st.batch_note );
+        s["activity"] = gs( st.activity );
+        s["unattended"] = st.unattended;
+        s["proficiencies"] = strings_to_array( st.proficiencies );
+        s["qualities"] = strings_to_array( st.qualities );
+        godot::Array groups;
+        groups.resize( static_cast<int64_t>( st.groups.size() ) );
+        for( size_t gi = 0; gi < st.groups.size(); ++gi ) {
+            const step_group &grp = st.groups[gi];
+            godot::Dictionary g;
+            g["label"] = gs( grp.label );
+            g["index"] = grp.index;
+            g["expanded"] = grp.expanded;
+            g["variants"] = strings_to_array( grp.variants );
+            groups[static_cast<int64_t>( gi )] = g;
+        }
+        s["groups"] = groups;
+        steps[static_cast<int64_t>( i )] = s;
+    }
+    d["steps"] = steps;
     return d;
 }
 
@@ -165,7 +207,8 @@ void CraftingSnapshot::publish_list( const std::vector<tab> &tabs, const int tab
                                      const std::vector<tab> &subtabs, const int subtab_index,
                                      const std::vector<row> &rows, const int selected,
                                      const std::string &filter, const size_t hidden,
-                                     const bool batch_mode, const int batch_size )
+                                     const bool batch_mode, const int batch_size,
+                                     const bool highlight_unread, const bool unread_first )
 {
     std::lock_guard<std::mutex> lock( mutex_ );
     active_ = true;
@@ -179,6 +222,8 @@ void CraftingSnapshot::publish_list( const std::vector<tab> &tabs, const int tab
     hidden_ = hidden;
     batch_mode_ = batch_mode;
     batch_size_ = batch_size;
+    highlight_unread_ = highlight_unread;
+    unread_first_ = unread_first;
     ++list_generation_;
 }
 
@@ -194,10 +239,13 @@ void CraftingSnapshot::publish_selection( const int selected )
     selected_ = selected;
 }
 
-void CraftingSnapshot::publish_detail( const std::vector<detail_line> &lines )
+void CraftingSnapshot::publish_detail( const std::vector<detail_line> &lines,
+                                       const std::vector<step> &steps, const bool steps_expanded )
 {
     std::lock_guard<std::mutex> lock( mutex_ );
     detail_ = lines;
+    steps_ = steps;
+    steps_expanded_ = steps_expanded;
     ++detail_generation_;
 }
 
@@ -210,8 +258,12 @@ void CraftingSnapshot::clear()
         subtabs_.clear();
         rows_.clear();
         detail_.clear();
+        steps_.clear();
         actions_.clear();
         selected_ = 0;
+        steps_expanded_ = false;
+        highlight_unread_ = false;
+        unread_first_ = false;
         ++list_generation_;
         ++detail_generation_;
     }

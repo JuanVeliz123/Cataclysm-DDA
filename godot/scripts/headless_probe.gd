@@ -576,9 +576,18 @@ func _dump_options() -> void:
 ## screen three times, and whether the check lands on an open one is luck. Both
 ## the overmap and the surroundings list were reported as never opening for
 ## exactly this reason -- they had opened, and been closed again by the retry.
-func _open_screen(key: int, active_probe: String, label: String) -> bool:
+## @p shifted_char: when non-empty, the key is pressed as Shift + key producing
+## this character. It exists because _press lowercases -- correct for most keys,
+## and the exact reason the surroundings list "never opened" through EIGHT
+## observation runs: its binding is capital 'V', and this helper was pressing 'v'
+## at it the whole time. One case letter, eight failed fixtures.
+func _open_screen(key: int, active_probe: String, label: String,
+		shifted_char: String = "") -> bool:
 	for attempt in 3:
-		_press(key)
+		if shifted_char.is_empty():
+			_press(key)
+		else:
+			_press_shifted(key, shifted_char)
 		# Generous: the game thread can be seconds behind under load, and being
 		# slow to notice costs nothing next to pressing the key again.
 		for tick in 24:
@@ -608,7 +617,7 @@ func _probe_surroundings() -> void:
 	# command runs inside the input wait, so opening a modal screen from one
 	# parks the game thread in that screen's loop, and nothing in a fixture run
 	# ever dismisses it. The clock stops and every later stage fails.
-	if not await _open_screen(KEY_V, "surroundings_active", "the surroundings list"):
+	if not await _open_screen(KEY_V, "surroundings_active", "the surroundings list", "V"):
 		print("[surr] FAILED: the surroundings list never opened")
 		return
 	if _panels.size() > 11:

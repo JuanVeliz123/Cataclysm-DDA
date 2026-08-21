@@ -20,6 +20,16 @@ var _detail_generation: int = -1
 
 var _rows: Array = []
 var _selected: int = -1
+# The step table of the selected recipe, kept for the keyboard cycling: the
+# panel needs to know which group to open next without asking C++ again.
+var _steps: Array = []
+var _steps_expanded := false
+# What the detail pane was showing when it was last rebuilt. A rebuild for the
+# same row of the same list is an in-place change -- a step group expanding --
+# and keeps its scroll; anything else is a new recipe and starts at the top,
+# which is when the ImGui pane resets its scroll too.
+var _detail_row := -1
+var _detail_list_gen := -1
 
 var _tab_row: HBoxContainer
 var _subtab_row: HBoxContainer
@@ -119,7 +129,8 @@ func _build() -> void:
 
 	col.add_child(N.micro_label(
 		"↑↓ move · ←→ subcat · Tab cat · Enter craft · b/+/- batch · / filter · "
-		+ "r related · c crafter · ? help · Esc close",
+		+ "r related · c crafter · s steps · v variants · u/U read · n unread first · "
+		+ "? help · Esc close",
 		N.NEUTRAL_700))
 
 # --- update -------------------------------------------------------------------
@@ -162,6 +173,8 @@ func _update_status(d: Dictionary) -> void:
 		bits.append("%d hidden" % hidden)
 	if bool(d.get("batch_mode", false)):
 		bits.append("batch x%d" % int(d.get("batch_size", 1)))
+	if bool(d.get("unread_first", false)):
+		bits.append("unread first")
 	_status.text = " · ".join(bits).to_upper()
 
 func _rebuild_tabs(d: Dictionary) -> void:
@@ -180,7 +193,10 @@ func _fill_tab_row(row: HBoxContainer, tabs: Array, current: int,
 	for i in tabs.size():
 		var idx := i
 		var btn := Button.new()
-		btn.text = str(tabs[i].get("name", ""))
+		# The same " +" marker the curses tabs carry: something under this
+		# tab has never been looked at.
+		btn.text = str(tabs[i].get("name", "")) \
+			+ (" +" if bool(tabs[i].get("unread", false)) else "")
 		btn.focus_mode = Control.FOCUS_NONE
 		btn.pressed.connect(func() -> void: on_click.call(idx))
 		var on := i == current
@@ -246,6 +262,14 @@ func _rebuild_list() -> void:
 			label.add_theme_color_override("font_color", N.NEUTRAL_200)
 		line.add_child(label)
 
+		if bool(entry.get("unread", false)):
+			var marker := Label.new()
+			marker.text = "NEW!"
+			marker.add_theme_font_size_override("font_size", 10)
+			marker.add_theme_color_override("font_color", N.GOOD)
+			marker.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+			line.add_child(marker)
+
 		holder.set_meta("label", label)
 		holder.set_meta("base_color", label.get_theme_color("font_color"))
 		_row_nodes.append(holder)
@@ -268,10 +292,19 @@ func _highlight() -> void:
 		_ensure_visible(_row_nodes[_selected])
 
 func _rebuild_detail(d: Dictionary) -> void:
+	var keep_scroll := _detail_row == _selected and _detail_list_gen == _list_generation
+	var old_scroll := _detail_scroll.scroll_vertical
+	_detail_row = _selected
+	_detail_list_gen = _list_generation
 	for child in _detail.get_children():
 		_detail.remove_child(child)
 		child.queue_free()
-	_detail_scroll.scroll_vertical = 0
+	if keep_scroll:
+		# Deferred: the container has not laid the new children out yet, and an
+		# immediate set would be clamped against the old, empty height.
+		_restore_detail_scroll.call_deferred(old_scroll)
+	else:
+		_detail_scroll.scroll_vertical = 0
 	for entry in d.get("lines", []):
 		var text := str(entry.get("text", ""))
 		if bool(entry.get("header", false)):
@@ -293,6 +326,127 @@ func _rebuild_detail(d: Dictionary) -> void:
 		body.add_theme_color_override("default_color", N.NEUTRAL_300)
 		body.add_theme_font_size_override("normal_font_size", 12)
 		_detail.add_child(body)
+	_steps = d.get("steps", [])
+	_steps_expanded = bool(d.get("steps_expanded", false))
+	if not _steps.is_empty():
+		_add_steps_section()
+
+# --- the step table -------------------------------------------------------------
+
+## A detail-pane rich text line whose [url] spans send their url back to C++ as
+## an action string, the way every other request from this panel travels.
+func _detail_rtl(bb: String) -> RichTextLabel:
+	var body := RichTextLabel.new()
+	body.bbcode_enabled = true
+	body.fit_content = true
+	body.text = bb
+	body.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	body.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	body.add_theme_color_override("default_color", N.NEUTRAL_300)
+	body.add_theme_font_size_override("normal_font_size", 12)
+	body.meta_underlined = true
+	body.meta_clicked.connect(func(meta: Variant) -> void: _act(str(meta)))
+	_detail.add_child(body)
+	return body
+
+const _CYAN := "#7fd0d6"
+const _GREEN := "#a9e0c2"
+const _YELLOW := "#dcc57e"
+const _DIM := "#75798c"
+
+## The per-step breakdown, mirroring the ImGui pane's expanded-steps view: each
+## step's name, budgeted time, activity and proficiencies, and its tool groups
+## with the variants the crafter will pick between at craft time. The expand
+## state lives in C++ (shared with the ImGui pane); the panel only asks for it
+## to change.
+func _add_steps_section() -> void:
+	var head := Label.new()
+	head.text = "STEPS (%d)" % _steps.size() if _steps.size() > 1 else "STEP"
+	head.add_theme_font_size_override("font_size", 12)
+	head.add_theme_color_override("font_color", N.ACCENT_300)
+	_detail.add_child(head)
+
+	if _steps.size() > 1:
+		var toggle := "- steps -" if _steps_expanded else "+ steps +"
+		_detail_rtl("[url=STEPS:TOGGLE][color=%s]%s[/color][/url]" % [_CYAN, toggle])
+		if not _steps_expanded:
+			return
+
+	var num := 0
+	for s in _steps:
+		num += 1
+		var hdr := "[b]%s[/b]" % TAGS.to_bbcode("%d. %s" % [num, str(s.get("name", ""))])
+		var t := str(s.get("time", ""))
+		if t != "":
+			hdr += "  [color=%s]%s[/color]" % [_CYAN, TAGS.to_bbcode(t)]
+		var note := str(s.get("batch_note", ""))
+		if note != "":
+			hdr += "[color=%s]%s[/color]" % [_GREEN, TAGS.to_bbcode(note)]
+		var act := str(s.get("activity", ""))
+		if act != "":
+			hdr += "  " + TAGS.to_bbcode(act)
+		if bool(s.get("unattended", false)):
+			hdr += "  [color=%s][lb]unattended[rb][/color]" % _YELLOW
+		_detail_rtl(hdr)
+
+		var profs: Array = s.get("proficiencies", [])
+		if not profs.is_empty():
+			var lines: Array[String] = ["    Proficiencies:"]
+			for p in profs:
+				lines.append("      " + TAGS.to_bbcode(str(p)))
+			_detail_rtl("\n".join(lines))
+		for q in s.get("qualities", []):
+			_detail_rtl("    • " + TAGS.to_bbcode(str(q)))
+		for g in s.get("groups", []):
+			_detail_rtl(_group_bb(g))
+
+## One tool group as BBCode. Collapsed shows the best variant plus an
+## "or N more" link; expanded lists them all plus "show less" -- the same two
+## shapes the ImGui pane draws, with the link sending the group's index back.
+func _group_bb(g: Dictionary) -> String:
+	var label := str(g.get("label", ""))
+	if label == "":
+		label = "One of"
+	var variants: Array = g.get("variants", [])
+	var action := "STEPTOOLS:%d" % int(g.get("index", 0))
+	if bool(g.get("expanded", false)):
+		var lines: Array[String] = ["    • %s:" % TAGS.to_bbcode(label)]
+		for v in variants:
+			lines.append("      " + TAGS.to_bbcode(str(v)))
+		lines.append("      [url=%s][color=%s]show less[/color][/url]" % [action, _DIM])
+		return "\n".join(lines)
+	var line := "    • %s: " % TAGS.to_bbcode(label)
+	if not variants.is_empty():
+		line += TAGS.to_bbcode(str(variants[0]))
+	if variants.size() > 1:
+		line += " [url=%s][color=%s]or %d more[/color][/url]" % [action, _CYAN, variants.size() - 1]
+	return line
+
+## Keyboard access to the step table, in the panel's own idiom: each press of
+## the cycle key opens the steps, then the next closed variant group, and once
+## everything is open closes the groups again. Derived purely from the
+## published state, so it can never disagree with what is on screen.
+func _cycle_variants() -> void:
+	if _steps.is_empty():
+		return
+	if _steps.size() > 1 and not _steps_expanded:
+		_act("STEPS:TOGGLE")
+		return
+	var expanded: Array[int] = []
+	for s in _steps:
+		for g in s.get("groups", []):
+			var idx := int(g.get("index", 0))
+			if bool(g.get("expanded", false)):
+				expanded.append(idx)
+			elif (g.get("variants", []) as Array).size() > 1:
+				_act("STEPTOOLS:%d" % idx)
+				return
+	for idx in expanded:
+		_act("STEPTOOLS:%d" % idx)
+
+func _restore_detail_scroll(v: int) -> void:
+	if _detail_scroll != null:
+		_detail_scroll.scroll_vertical = v
 
 func _ensure_visible(node: Control) -> void:
 	if _list_scroll == null or node == null:
@@ -361,7 +515,20 @@ func _unhandled_input(event: InputEvent) -> void:
 			_act("PRIORITIZE_MISSING_COMPONENTS" if not event.shift_pressed
 				else "DEPRIORITIZE_COMPONENTS")
 		KEY_U:
-			_act("TOGGLE_RECIPE_UNREAD")
+			_act("MARK_ALL_RECIPES_READ" if event.shift_pressed
+				else "TOGGLE_RECIPE_UNREAD")
+		KEY_N:
+			_act("TOGGLE_UNREAD_RECIPES_FIRST")
+		KEY_S:
+			# The "+ steps +" clickable, from the keyboard. Only meaningful when
+			# the selected recipe has a step table to expand; the flag is shared
+			# with the ImGui pane, so an idle toggle would still change it.
+			if _steps.size() > 1:
+				_act("STEPS:TOGGLE")
+			else:
+				return
+		KEY_V:
+			_cycle_variants()
 		KEY_SLASH:
 			_act("FILTER")
 		KEY_H:
