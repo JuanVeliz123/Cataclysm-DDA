@@ -126,15 +126,51 @@ func _cancel_uilists() -> void:
 
 var _legacy_ui_since := 0.0
 var _legacy_ui_dumped := false
+## Escapes spent on a stuck legacy screen, and whether we have given up. Bounded
+## because an unbounded watchdog is a key generator: 49 Escapes went into one run
+## before this cap existed, and the screen it was fighting was a Godot panel.
+const MAX_LEGACY_ESCAPES := 6
+var _legacy_escapes := 0
+var _legacy_gave_up := false
 
 ## The watchdog for the C++ screen nobody opened. Some legacy ImGui window
 ## appears mid-session (it took the baseline headless run's stages 7..12 with it
 ## too), and while any_window_shown() is true the command queue starves -- which
 ## reads as unrelated timeouts two checks later. Name it once, from the cell
 ## overlay it draws into, then keep pressing Escape until it goes.
+## Godot takeovers that are legitimately up. While one is, the overlay's opinion
+## is not evidence of anything: `legacy_ui_active()` is `any_content()` over the
+## curses cells, and a *blank* cell still claims the overlay (see AGENT_HANDOFF's
+## note about an erased full-screen window becoming an opaque sheet nothing
+## releases). Escaping into a migrated screen closes the very thing the fixture
+## just opened -- which is exactly what this watchdog did to the surroundings
+## list for two runs, reported as "never opened". MENU-12's own history is the
+## same lesson: suspect the fixture before the feature.
+func _takeover_active() -> bool:
+	for probe in ["surroundings_active", "martialarts_active", "medical_active",
+			"scores_active", "uilist_active", "popup_active", "textwin_active",
+			"crafting_active", "options_active", "keybind_active", "dialogue_active"]:
+		if host.has_method(probe) and host.call(probe):
+			return true
+	return false
+
 func _heal_legacy_ui(delta: float) -> void:
 	if not (host.has_method("legacy_ui_active") and host.legacy_ui_active()):
 		_legacy_ui_since = 0.0
+		return
+	if _takeover_active():
+		# A Godot panel owns this screen; the overlay's leftover cells are not a
+		# legacy window and Escape here would close a migrated screen.
+		_legacy_ui_since = 0.0
+		return
+	if _legacy_escapes >= MAX_LEGACY_ESCAPES:
+		# Said once, then never again: a screen that survives six Escapes is not
+		# going to yield to a seventh, and a watchdog that keeps pressing keys
+		# into the game is worse than one that admits defeat.
+		if not _legacy_gave_up:
+			_legacy_gave_up = true
+			print("[scn] legacy UI will not clear after %d Escapes; leaving it alone"
+				% _legacy_escapes)
 		return
 	_legacy_ui_since += delta
 	if _legacy_ui_since < 1.5:
@@ -142,7 +178,9 @@ func _heal_legacy_ui(delta: float) -> void:
 	if not _legacy_ui_dumped:
 		_legacy_ui_dumped = true
 		_dump_overlay_rows()
-	print("[scn] legacy C++ screen is up; pressing Escape")
+	_legacy_escapes += 1
+	print("[scn] legacy C++ screen is up; pressing Escape (%d of %d)" % [
+		_legacy_escapes, MAX_LEGACY_ESCAPES])
 	_press(KEY_ESCAPE)
 	_legacy_ui_since = 0.0
 
@@ -370,6 +408,77 @@ func _run_scenarios() -> void:
 	print("[scn] sway commands in view = %d (grass only sways when it overhangs)"
 		% _sway_commands())
 	await _shot("01_field_day")
+
+	# Screens first, while the world is calm. The order matters and was paid
+	# for: run after night, fire, rain and a melee and the game thread has had a
+	# dozen chances to park somewhere -- one starved command then times out every
+	# later stage, and a screen that "never opened" is really a queue that never
+	# drained. The headless probe's own comment says it: quietest first.
+	# --- The surroundings list (MENU-12), observed at last. The screen was
+	# committed and building for days without one run ever reaching it: the
+	# headless probe's attempt shares an avatar with nine other stages and was
+	# starved by the soliloquy window. Here the queue is healthy, the watchdogs
+	# run, and the ground is rich -- a zombie (or its corpse), a car, a fire and
+	# whatever the fight dropped. The attend contract matters: reading the state
+	# is what attends, and an unattended takeover falls back to legacy ImGui
+	# after 1.5s -- so the state is read the moment active flips, not politely
+	# later.
+	if host.has_method("get_surroundings_state"):
+		# Capital V -- the binding is keyboard_char "V", and a lowercased press
+		# is the single letter that kept this screen unobserved through eight
+		# fixture runs across two probes.
+		_press_shifted(KEY_V, "V")
+		# ATTEND while polling. `surroundings_active()` only reports; the thing
+		# that marks the takeover attended is `copy_state()` -- so a fixture that
+		# polls the flag and nothing else lets the 1.5s attend timeout expire,
+		# the screen falls back to legacy ImGui, and the flag it was waiting for
+		# never stays true. Eight historical observation attempts died here; the
+		# screen was never broken, the fixture never answered the door.
+		var opened := false
+		var waited_v := 0.0
+		while waited_v < 8.0:
+			await get_tree().create_timer(0.2).timeout
+			waited_v += 0.2
+			var probe_state: Dictionary = host.get_surroundings_state()
+			if host.surroundings_active() or bool(probe_state.get("active", false)):
+				opened = true
+				break
+		if not opened:
+			# One retry: the first press can be eaten by whatever the watchdog is
+			# still clearing.
+			_press_shifted(KEY_V, "V")
+			while waited_v < 16.0:
+				await get_tree().create_timer(0.2).timeout
+				waited_v += 0.2
+				var retry_state: Dictionary = host.get_surroundings_state()
+				if host.surroundings_active() or bool(retry_state.get("active", false)):
+					opened = true
+					break
+		_check("surroundings opened", opened, true, "after %.1fs" % waited_v)
+		if opened:
+			var sd: Dictionary = host.get_surroundings_state()
+			var s_tabs: Array = sd.get("tabs", [])
+			var s_rows: Array = sd.get("rows", [])
+			print("[scn] [surr] tabs=%d rows=%d selected=%d" % [s_tabs.size(),
+				s_rows.size(), int(sd.get("selected", -1))])
+			for i in mini(4, s_rows.size()):
+				print("[scn] [surr]   %s" % str(s_rows[i].get("text", "")).substr(0, 50))
+			_check("surroundings has tabs", s_tabs.size() >= 3, true,
+				"%d tabs" % s_tabs.size())
+			_check("surroundings lists something", s_rows.size() >= 1, true,
+				"%d rows (a fresh field still has terrain and furniture to list)" % s_rows.size())
+			var tab_before := int(sd.get("tab", -1))
+			host.surroundings_action("NEXT_TAB")
+			await get_tree().create_timer(1.0).timeout
+			var tab_after := int((host.get_surroundings_state() as Dictionary).get("tab", -2))
+			_check("surroundings NEXT_TAB round trip", tab_after != tab_before, true,
+				"tab %d -> %d" % [tab_before, tab_after])
+			host.surroundings_action("QUIT")
+			await get_tree().create_timer(1.0).timeout
+			_check("surroundings closed", not host.surroundings_active(), true, "after QUIT")
+
+	await _probe_menu13()
+
 
 	# --- Look mode. Pressing 'x' used to read as the game freezing: the snapshot
 	# centred on the avatar alone (ignoring view_offset, which is all the look
@@ -599,60 +708,7 @@ func _run_scenarios() -> void:
 					"the zombie may simply have survived: %s" % str(played))
 		await _shot("05c_combat_night")
 
-	# --- The surroundings list (MENU-12), observed at last. The screen was
-	# committed and building for days without one run ever reaching it: the
-	# headless probe's attempt shares an avatar with nine other stages and was
-	# starved by the soliloquy window. Here the queue is healthy, the watchdogs
-	# run, and the ground is rich -- a zombie (or its corpse), a car, a fire and
-	# whatever the fight dropped. The attend contract matters: reading the state
-	# is what attends, and an unattended takeover falls back to legacy ImGui
-	# after 1.5s -- so the state is read the moment active flips, not politely
-	# later.
-	if host.has_method("get_surroundings_state"):
-		# Capital V -- the binding is keyboard_char "V", and a lowercased press
-		# is the single letter that kept this screen unobserved through eight
-		# fixture runs across two probes.
-		_press_shifted(KEY_V, "V")
-		var opened := false
-		var waited_v := 0.0
-		while waited_v < 8.0:
-			await get_tree().create_timer(0.2).timeout
-			waited_v += 0.2
-			if host.surroundings_active():
-				opened = true
-				break
-		if not opened:
-			# One retry: the first press can be eaten by a soliloquy window the
-			# watchdog is still escaping.
-			_press_shifted(KEY_V, "V")
-			while waited_v < 16.0:
-				await get_tree().create_timer(0.2).timeout
-				waited_v += 0.2
-				if host.surroundings_active():
-					opened = true
-					break
-		_check("surroundings opened", opened, true, "after %.1fs" % waited_v)
-		if opened:
-			var sd: Dictionary = host.get_surroundings_state()
-			var s_tabs: Array = sd.get("tabs", [])
-			var s_rows: Array = sd.get("rows", [])
-			print("[scn] [surr] tabs=%d rows=%d selected=%d" % [s_tabs.size(),
-				s_rows.size(), int(sd.get("selected", -1))])
-			for i in mini(4, s_rows.size()):
-				print("[scn] [surr]   %s" % str(s_rows[i].get("text", "")).substr(0, 50))
-			_check("surroundings has tabs", s_tabs.size() >= 3, true,
-				"%d tabs" % s_tabs.size())
-			_check("surroundings lists something", s_rows.size() >= 1, true,
-				"%d rows (a zombie and a car stand right there)" % s_rows.size())
-			var tab_before := int(sd.get("tab", -1))
-			host.surroundings_action("NEXT_TAB")
-			await get_tree().create_timer(1.0).timeout
-			var tab_after := int((host.get_surroundings_state() as Dictionary).get("tab", -2))
-			_check("surroundings NEXT_TAB round trip", tab_after != tab_before, true,
-				"tab %d -> %d" % [tab_before, tab_after])
-			host.surroundings_action("QUIT")
-			await get_tree().create_timer(1.0).timeout
-			_check("surroundings closed", not host.surroundings_active(), true, "after QUIT")
+
 
 	# --- Volumetric fog, the default since 3D-8/3D-9 made it honest and affordable:
 	# 06 is the night as shipped, 06b the same frame with the fog drained, so every
@@ -746,6 +802,80 @@ func _run_scenarios() -> void:
 		"%d creature sprite commands left to meshes" % meshes_drawn)
 
 	_report()
+
+## MENU-13's screens, opened by their real keys and read back (2026-08-21).
+##
+## Each is a takeover with a 1.5s attend timeout, which is the trap worth naming:
+## an unattended screen falls back to the ImGui overlay and *plays fine*, so a
+## migration that never happened looks exactly like one that did. Only a
+## published state with rows in it distinguishes them -- MENU-12 spent days as a
+## committed screen nobody had watched, and this is that lesson applied early.
+func _probe_menu13() -> void:
+	# The scores screen is deliberately absent from this table: nothing opens it
+	# with a key. Its only callers are the death screen and a row inside the
+	# diary UI (diary_ui.cpp), and the diary is itself still an ImGui screen --
+	# so scores cannot be observed until the diary is migrated too. Its channel
+	# is checked for existence below and no more; claiming otherwise would be
+	# the "committed but never watched" failure MENU-12 already paid for.
+	if not host.has_method("get_scores_state"):
+		_check("scores channel exists", false, true, "no binding (old library?)")
+	else:
+		print("[scn] [scores] channel present; the screen opens only from the "
+			+ "death screen or the diary (still ImGui), so it is unobservable here")
+
+	# key, the shifted character (empty for a plain press), name, the row-ish
+	# key to count, an action to round-trip, and the field it must change.
+	for spec in [
+			[KEY_MINUS, "_", "martialarts", "rows", "UP", "selection"],
+			[KEY_N, "N", "medical", "limbs", "NEXT_TAB", "tab"]]:
+		var name: String = str(spec[2])
+		if not host.has_method("get_%s_state" % name):
+			_check("%s channel exists" % name, false, true, "no binding (old library?)")
+			continue
+		if str(spec[1]).is_empty():
+			_press(int(spec[0]))
+		else:
+			_press_shifted(int(spec[0]), str(spec[1]))
+		# Attend while polling, for the reason the surroundings block spells out:
+		# reading the state is what keeps the takeover alive, and the active flag
+		# alone lets it time out into the ImGui fallback.
+		var opened := false
+		var waited := 0.0
+		while waited < 10.0:
+			await get_tree().create_timer(0.25).timeout
+			waited += 0.25
+			var polled: Dictionary = host.call("get_%s_state" % name)
+			if host.call("%s_active" % name) or bool(polled.get("active", false)):
+				opened = true
+				break
+		_check("%s screen opened" % name, opened, true, "after %.1fs" % waited)
+		if not opened:
+			continue
+		var d: Dictionary = host.call("get_%s_state" % name)
+		var rows: Array = d.get(str(spec[3]), [])
+		print("[scn] [%s] %s=%d gen=%d title='%s'" % [name, str(spec[3]), rows.size(),
+			int(host.call("%s_generation" % name)), str(d.get("title", ""))])
+		_check("%s published content" % name, rows.size() >= 1, true,
+			"%d %s" % [rows.size(), str(spec[3])])
+		# The round trip: send one action and demand the published field move.
+		# A panel echoing its own guess would pass anything weaker.
+		var field: String = str(spec[5])
+		var before := int(d.get(field, -1))
+		host.call("%s_action" % name, str(spec[4]))
+		await get_tree().create_timer(1.0).timeout
+		var after := int((host.call("get_%s_state" % name) as Dictionary).get(field, -99))
+		_check("%s %s round trip" % [name, str(spec[4])], after != before, true,
+			"%s %d -> %d" % [field, before, after])
+		host.call("%s_action" % name, "QUIT")
+		var closed := false
+		var shut := 0.0
+		while shut < 6.0:
+			await get_tree().create_timer(0.25).timeout
+			shut += 0.25
+			if not host.call("%s_active" % name):
+				closed = true
+				break
+		_check("%s screen closed" % name, closed, true, "after QUIT")
 
 func _report() -> void:
 	print("")

@@ -267,7 +267,8 @@ highest-traffic item and among the smallest.
 >
 > What is left for MENU-12 is ordinary: open it by keypress in a run that plays,
 > and read back tabs, rows and a NEXT_TAB round trip.
-| MENU-13 | M | The mid-sized panels, one channel each (`request_debug_spawn_npc()` gives the NPC-dependent ones something to talk to): `medical_ui`, `mission_ui`, `faction_ui`, `npctalk_rules`, `scores_ui`, `study_zone_ui`, `martialarts` | those files | Six more screens off the overlay |
+| MENU-13 | M | The mid-sized panels, one channel each (`request_debug_spawn_npc()` gives the NPC-dependent ones something to talk to). **Three done (2026-08-21, API 28): `martialarts`, `scores_ui`, `medical_ui`** -- snapshots, panels, loop splits and bindings, each with the attend contract. Remaining: `mission_ui`, `faction_ui`, `study_zone_ui`, `npctalk_rules` | those files | Six more screens off the overlay |
+| MENU-13a | S | **The diary** (`diary_ui.cpp`), which turns out to gate `scores_ui`: nothing opens the scores screen with a key -- its only callers are the death screen and a row inside the diary, and the diary is still ImGui. So the scores channel exists and is verified only by construction; **it cannot be observed until the diary is migrated**. Do that one next if scores parity matters | `diary_ui.cpp` | The scores screen is reachable, and its probe stage can assert rows |
 
 ### The remaining ImGui screens, sorted by where their state lives
 

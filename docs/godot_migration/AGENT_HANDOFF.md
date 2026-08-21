@@ -464,6 +464,39 @@ So, two rules:
 
 Found jointly while migrating the menus and repairing the animation overlay.
 
+## Reading the state is what *attends* a takeover
+
+Every migrated screen publishes, then waits ~1.5s for a panel to attend before
+falling back to the legacy ImGui path. **The thing that marks it attended is
+`copy_state()`** -- `note_attended()` is called from inside it. So a fixture (or
+a panel) that polls only `*_active()` and reads the state later never answers the
+door: the timeout expires, the screen quietly runs its ImGui self, and the flag
+the poller was waiting for goes false again. From outside that is
+indistinguishable from "the screen never opened".
+
+This is almost certainly what defeated **eight** attempts to observe the
+surroundings list (MENU-12) across two probes, and it was misfiled twice on the
+way -- once as a wedged game thread, once as a lowercase keypress. A poll loop
+must call the state getter every tick:
+
+```gdscript
+while waited < 8.0:
+    await get_tree().create_timer(0.2).timeout
+    var state: Dictionary = host.get_surroundings_state()   # this attends
+    if host.surroundings_active() or bool(state.get("active", false)):
+        break
+```
+
+The same rule binds the real panels, and they get it right only because
+`host.gd` calls `refresh()` (which reads the state) while a channel says active.
+A panel that refreshes lazily would break the screen it belongs to.
+
+Corollary for watchdogs: `legacy_ui_active()` is `any_content()` over the curses
+cells, and a *blank* cell still claims the overlay -- so it goes true and stays
+true after a legacy screen closes. A watchdog that presses Escape at it will
+close whatever migrated screen opens next. Bound the retries, and skip healing
+entirely while any Godot takeover is active.
+
 ## A queued command must not open a blocking screen
 
 `post_game_command` runs its work inside `drain_game_commands()`, which runs
@@ -488,7 +521,6 @@ back to itself.
 
 - Do **not** change `catacurses` public API in `cursesdef.h`.
 - Do **not** touch protected game-logic files unless a task explicitly requires it.
-- Keep `TILES` (SDL) and curses builds working; GODOT is additive until cleanup.
 - Use `make GODOT=1`. The CMake `GODOT=ON` target is unsupported.
 - Commit prefix: `[godot-mig] …` on `godot-mig`; push to fork remote `juan` only when asked.
 

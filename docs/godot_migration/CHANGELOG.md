@@ -24,7 +24,7 @@ and no `godot::Ref` is ever held by game-side code (see *Teardown* below for why
 that second rule exists).
 
 **An API version handshake.** `CDDAHost::api_version()` must equal `host.gd`'s
-`REQUIRED_API_VERSION`, currently **24**. The GDExtension is compiled but the
+`REQUIRED_API_VERSION`, currently **28**. The GDExtension is compiled but the
 scripts are read from disk every run, so a stale library against new scripts
 otherwise *looks* like it works — the layout appears and every field the old
 library does not emit reads back as zero or empty. Bump it whenever the
@@ -221,6 +221,51 @@ where it always blocked.
 | Options | `godot_options_snapshot.*` | `options_panel.gd` |
 | Keybindings | `godot_keybind_snapshot.*` | `keybind_panel.gd` |
 | Crafting | `godot_crafting_snapshot.*` | `crafting_panel.gd` |
+| NPC conversation | `godot_dialogue_snapshot.*` | `dialogue_panel.gd` |
+| The surroundings list | `godot_surroundings_snapshot.*` | `surroundings_panel.gd` |
+| Martial arts styles | `godot_martialarts_snapshot.*` | `martialarts_panel.gd` |
+| The medical screen | `godot_medical_snapshot.*` | `medical_panel.gd` |
+| Scores, achievements, conducts, kills | `godot_scores_snapshot.*` | `scores_panel.gd` |
+
+### MENU-13's first three (2026-08-21, API 28)
+
+`martialarts`, `medical_ui` and `scores_ui`, one channel each, all three built on
+the options screen's loop split: `show()` becomes `show_legacy()` plus a shared
+epilogue, and the Godot path stands in for exactly the loop, publishing a
+snapshot and polling for actions.
+
+Two things worth carrying forward:
+
+- **The styles list was never in `martialarts.cpp`.** It lived in
+  `character.cpp` as a `uilist` whose row 0 is the keep-hands-free toggle, with
+  the ImGui window only ever the *detail* pane. Both halves fold into one
+  list+detail panel, and the detail is built by the same `gather_ma_details()`
+  the ImGui pane uses, so the two front ends cannot drift.
+- **Two of the three needed a tab lifted out of ImGui first.** `BeginTabItem`
+  returning true is how those screens chose a tab, so there was no
+  `selected_tab` to publish until one existed -- a small, shape-preserving
+  refactor the SDL build still uses, kept separate from the migration exactly as
+  BACKLOG asked.
+
+And one honest gap: **nothing opens the scores screen with a key.** Its only
+callers are the death screen and a row inside the diary, and the diary is still
+ImGui -- so the scores channel is verified by construction and cannot be
+observed until `diary_ui` is migrated too (filed as MENU-13a). Saying so beats
+the alternative this branch has paid for twice: a committed screen nobody
+watched.
+
+### Ambient popups stop parking the game thread
+
+A zero-option `popup( text )` -- the shape every snippet-driven monologue uses,
+including the Shadow-warning EOCs that fire unprompted at night in a fresh world
+-- fell between both Godot popup branches: the anykey path wants `anykey`, and
+`run_popup_in_godot` declines popups with no buttons. So it reached
+`query_popup_impl`, a `cataimgui::window`, and parked the game thread in its own
+input loop. While it stood, `any_window_shown()` refused the command drain, which
+is why menu quits "sometimes worked" and why two verification probes died
+mid-run. Those bare messages now ride the existing notice channel. The fix is one
+branch in `query_popup::query()` and it covers every such popup in the game, not
+only the monologue.
 
 ### The takeover contract
 
