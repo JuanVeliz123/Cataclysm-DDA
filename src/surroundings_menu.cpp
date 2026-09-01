@@ -1,5 +1,9 @@
 #include "surroundings_menu.h"
 
+#if defined(GODOT)
+#include "godot_backend.h"
+#endif
+
 #include <algorithm>
 #include <cfloat>
 #include <functional>
@@ -758,6 +762,15 @@ cataimgui::bounds surroundings_menu::get_bounds()
 
 void surroundings_menu::draw_controls()
 {
+#if defined(GODOT)
+    // The Godot panel is showing this, so the ImGui window must not draw it too.
+    // Only once a panel has actually attended, so the screen is never left with
+    // neither -- the same rule as the overmap sidebar.
+    hide_ui = godot_backend::get_surroundings_snapshot().attended();
+    if( hide_ui ) {
+        return;
+    }
+#endif
     hide_if_hidden();
     if( ImGui::BeginTabBar( "surroundings tabs" ) ) {
         draw_item_tab();
@@ -1192,6 +1205,50 @@ void surroundings_menu::draw_examine_info()
     }
 }
 
+#if defined(GODOT)
+namespace
+{
+/// Shared by all three tabs: they differ only in what the stacks hold.
+template<typename T>
+std::vector<godot_backend::SurroundingsSnapshot::row> collect_godot_rows(
+    const std::vector<map_entity_stack<T>*> &list, const map_entity_stack<T> *selected_entry,
+    int &selected )
+{
+    std::vector<godot_backend::SurroundingsSnapshot::row> out;
+    out.reserve( list.size() );
+    selected = -1;
+    for( map_entity_stack<T> *entry : list ) {
+        if( entry == selected_entry ) {
+            selected = static_cast<int>( out.size() );
+        }
+        godot_backend::SurroundingsSnapshot::row r;
+        r.text = entry->get_selected_name();
+        r.distance = entry->get_selected_distance_string();
+        r.color = string_from_color( entry->get_selected_color() );
+        r.category = entry->get_category();
+        r.count = entry->get_selected_count();
+        out.push_back( std::move( r ) );
+    }
+    return out;
+}
+} // namespace
+
+std::vector<godot_backend::SurroundingsSnapshot::row> item_tab_data::godot_rows( int &selected )
+{
+    return collect_godot_rows( filtered_list, selected_entry, selected );
+}
+
+std::vector<godot_backend::SurroundingsSnapshot::row> monster_tab_data::godot_rows( int &selected )
+{
+    return collect_godot_rows( filtered_list, selected_entry, selected );
+}
+
+std::vector<godot_backend::SurroundingsSnapshot::row> terfurn_tab_data::godot_rows( int &selected )
+{
+    return collect_godot_rows( filtered_list, selected_entry, selected );
+}
+#endif // GODOT
+
 void surroundings_menu::execute()
 {
     while( true ) {
@@ -1201,10 +1258,32 @@ void surroundings_menu::execute()
         ui_manager::redraw();
 
         std::string action;
-        if( has_button_action() ) {
-            action = get_button_action();
-        } else {
-            action = get_selected_data()->ctxt.handle_input();
+#if defined(GODOT)
+        // Only the source of the action moves; every branch below is untouched.
+        // Publishing here rather than in the draw functions is deliberate: the
+        // rows come from the entity stacks, which is where the drawing gets them
+        // too, so there is no second version of the list to keep in step.
+        int godot_pick = -1;
+        publish_to_godot();
+        action = godot_backend::get_surroundings_snapshot().next_action( godot_pick );
+        if( action == "GODOT_SELECT" ) {
+            // The tab data offers no set-by-index, only a relative move, so a
+            // clicked row is applied as the difference from where we are.
+            int current = -1;
+            get_selected_data()->godot_rows( current );
+            if( current >= 0 && godot_pick >= 0 ) {
+                get_selected_data()->move_selection( godot_pick - current );
+            }
+            continue;
+        }
+        if( action.empty() )
+#endif
+        {
+            if( has_button_action() ) {
+                action = get_button_action();
+            } else {
+                action = get_selected_data()->ctxt.handle_input();
+            }
         }
 
         if( action == "UP" ) {
@@ -1220,11 +1299,17 @@ void surroundings_menu::execute()
         } else if( action == "SCROLL_ITEM_INFO_DOWN" ) {
             info_scroll = cataimgui::scroll::page_down;
         } else if( action == "NEXT_TAB" ) {
+            // switch_tab alone only takes effect inside draw_item_tab() /
+            // draw_monster_tab() / draw_terfurn_tab(), which draw_controls()
+            // skips once the Godot panel has attended (see draw_controls()).
+            // Move selected_tab directly, same fix as mission_ui/faction_ui;
+            // switch_tab is kept in step so the ImGui tab bar still follows
+            // it on the rare frame draw_controls() does run.
+            ++selected_tab;
             switch_tab = selected_tab;
-            ++switch_tab;
         } else if( action == "PREV_TAB" ) {
+            --selected_tab;
             switch_tab = selected_tab;
-            --switch_tab;
         } else if( action == "fire" ) {
             tab_data *data = get_selected_data();
             if( data->fire_at_selected( you, max_gun_range, stored_view_offset ) ) {
@@ -1273,6 +1358,11 @@ void surroundings_menu::execute()
     }
 
     uistate.vmenu_tab = selected_tab;
+#if defined(GODOT)
+    // Take the panel down with the loop. Nothing else clears this, and a channel
+    // left active keeps a closed screen on the player's map.
+    godot_backend::get_surroundings_snapshot().clear();
+#endif
 }
 
 void surroundings_menu::get_filter()
@@ -1387,6 +1477,34 @@ tab_data *surroundings_menu::get_tab_data( surroundings_menu_tab_enum tab )
             return &item_data;
     }
 }
+
+#if defined(GODOT)
+void surroundings_menu::publish_to_godot()
+{
+    using snapshot = godot_backend::SurroundingsSnapshot;
+    std::vector<snapshot::tab> tabs;
+    // Not the `operator++( surroundings_menu_tab_enum & )` above: that one
+    // wraps num_tabs back to 0 for cyclic NEXT_TAB/PREV_TAB navigation, so a
+    // loop bounded by `t != num_tabs` never sees that value and never
+    // terminates. Walk the underlying ints instead, which is what every call
+    // site that actually wants "each real tab, once" needs.
+    for( int i = 0; i < static_cast<int>( surroundings_menu_tab_enum::num_tabs ); ++i ) {
+        tab_data *data = get_tab_data( static_cast<surroundings_menu_tab_enum>( i ) );
+        if( data == nullptr ) {
+            continue;
+        }
+        tabs.push_back( snapshot::tab{ data->title,
+                                       static_cast<int>( data->get_filtered_list_size() ) } );
+    }
+    int selected = -1;
+    tab_data *current = get_selected_data();
+    std::vector<snapshot::row> rows = current ? current->godot_rows( selected )
+                                      : std::vector<snapshot::row>();
+    godot_backend::get_surroundings_snapshot().publish(
+        tabs, static_cast<int>( selected_tab ), rows, selected,
+        current && current->has_filter() ? std::string( "on" ) : std::string() );
+}
+#endif // GODOT
 
 tab_data *surroundings_menu::get_selected_data()
 {

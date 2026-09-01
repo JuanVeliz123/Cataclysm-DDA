@@ -49,6 +49,10 @@
 #include "cata_tiles.h"
 #endif // TILES
 
+#if defined(GODOT)
+#include "godot_options_snapshot.h"
+#endif // GODOT
+
 #if defined(__ANDROID__)
 #include <jni.h>
 #endif
@@ -3407,7 +3411,20 @@ struct string_col {
 };
 } // namespace
 
-std::string options_manager::show( bool ingame, const bool world_options_only, bool with_tabs )
+/**
+ * The curses options screen: draws the pages, runs its own input loop, and edits
+ * the option objects in place. Split out of show() so a backend that draws its
+ * own options UI can stand in for exactly this part -- everything show() does
+ * afterwards (working out what changed, asking whether to save, applying) is
+ * shared and must run either way.
+ *
+ * Returns "" normally. A non-empty return is the worldgen escape hatch: when the
+ * screen is embedded in world creation, NEXT_TAB/PREV_TAB/QUIT belong to the
+ * creation flow, and show() hands them straight back to it without running the
+ * epilogue -- which is what the original code did by returning from show().
+ */
+std::string options_manager::show_legacy( bool ingame, const bool world_options_only,
+        bool with_tabs, options_container &OPTIONS_OLD, options_container &WOPTIONS_OLD )
 {
     const int iWorldOptPage = std::find_if( pages_.begin(), pages_.end(), [&]( const Page & p ) {
         return p.id_ == "world_default";
@@ -3418,12 +3435,6 @@ std::string options_manager::show( bool ingame, const bool world_options_only, b
     options_container &ACTIVE_WORLD_OPTIONS = world_options.has_value() ?
             *world_options.value() :
             OPTIONS;
-
-    options_container OPTIONS_OLD = OPTIONS;
-    options_container WOPTIONS_OLD = ACTIVE_WORLD_OPTIONS;
-    if( world_generator->active_world == nullptr ) {
-        ingame = false;
-    }
 
     size_t sel_worldgen_tab = 1;
     std::map<size_t, inclusive_rectangle<point>> worldgen_tab_map;
@@ -3913,6 +3924,43 @@ std::string options_manager::show( bool ingame, const bool world_options_only, b
             }
         } else if( action == "QUIT" ) {
             break;
+        }
+    }
+    return "";
+}
+
+std::string options_manager::show( bool ingame, const bool world_options_only, bool with_tabs )
+{
+    // temporary alias so the code below does not need to be changed
+    options_container &OPTIONS = options;
+    options_container &ACTIVE_WORLD_OPTIONS = world_options.has_value() ?
+            *world_options.value() :
+            OPTIONS;
+
+    options_container OPTIONS_OLD = OPTIONS;
+    options_container WOPTIONS_OLD = ACTIVE_WORLD_OPTIONS;
+    if( world_generator->active_world == nullptr ) {
+        ingame = false;
+    }
+
+#if defined(GODOT)
+    // The Godot panel edits the same option objects the curses loop does, so the
+    // change detection below works identically either way. It declines when no
+    // panel is attending, and then the legacy screen runs.
+    //
+    // The worldgen-embedded variant stays on the legacy path: world_options_only
+    // draws a second row of tabs that belongs to the world creation flow, not to
+    // the options screen. This takes the plain screen the game menu opens.
+    const bool drawn_by_godot = !world_options_only &&
+                                godot_backend::run_options_in_godot( *this, OPTIONS, ACTIVE_WORLD_OPTIONS,
+                                        ingame, with_tabs );
+    if( !drawn_by_godot )
+#endif
+    {
+        const std::string early = show_legacy( ingame, world_options_only, with_tabs,
+                                               OPTIONS_OLD, WOPTIONS_OLD );
+        if( !early.empty() ) {
+            return early;
         }
     }
 

@@ -1,5 +1,9 @@
 #include "dialogue_imgui.h"
 
+#if defined(GODOT)
+#include "godot_dialogue_snapshot.h"
+#endif
+
 #include <algorithm>
 #include <imgui/imgui_internal.h>
 #include <string>
@@ -228,6 +232,12 @@ void dialogue_imgui::draw_dialogue_imgui( bool is_computer, bool is_not_conversa
             conversation->add_topic( next );
         }
     }
+#if defined(GODOT)
+    // The conversation is over; take the panel down. Nothing else clears this,
+    // and a channel left active keeps a finished conversation on screen -- the
+    // same way the notice ribbon used to outlive its prompt.
+    godot_backend::get_dialogue_snapshot().clear();
+#endif
 }
 
 void dialogue_imgui_impl::draw_dialogue_sidebar() const
@@ -354,6 +364,24 @@ void dialogue_imgui_impl::set_responses( const std::vector<talk_data> &responses
 {
     response_list = responses;
 }
+
+#if defined(GODOT)
+void dialogue_imgui_impl::publish_to_godot( const std::string &header ) const
+{
+    using snapshot = godot_backend::DialogueSnapshot;
+    std::vector<snapshot::line> lines;
+    lines.reserve( history.size() );
+    for( const history_message &msg : history ) {
+        lines.push_back( snapshot::line{ msg.text, string_from_color( msg.color ) } );
+    }
+    std::vector<snapshot::response> options;
+    options.reserve( response_list.size() );
+    for( const talk_data &r : response_list ) {
+        options.push_back( snapshot::response{ r.text, r.hotkey_desc, string_from_color( r.color ) } );
+    }
+    godot_backend::get_dialogue_snapshot().publish( header, lines, options, sel_response );
+}
+#endif // GODOT
 
 void dialogue_imgui_impl::draw_responses()
 {

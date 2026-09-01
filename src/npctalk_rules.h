@@ -33,7 +33,17 @@ class follower_rules_ui_impl : public cataimgui::window
 
         void set_npc_pointer_to( npc *new_guy );
 
+#if defined(GODOT)
+        /// Show this screen as a Godot panel and block until it is dismissed.
+        /// @return false when no panel attended, so the caller must run the
+        ///         legacy ImGui loop instead.
+        bool run_in_godot();
+#endif
+
     private:
+#if defined(GODOT)
+        void publish_to_godot();
+#endif
         npc *guy = nullptr;
         std::string get_parsed( std::string initial_string );
         void print_hotkey( input_event &hotkey );

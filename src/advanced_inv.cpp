@@ -37,6 +37,9 @@
 #include "enums.h"
 #include "game.h"
 #include "game_constants.h"
+#if defined(GODOT)
+#include "godot_advanced_inv_snapshot.h"
+#endif
 #include "imgui/imgui.h"
 #include "input.h"
 #include "input_context.h"
@@ -2091,6 +2094,16 @@ void advanced_inventory::display()
         } );
     }
 
+#if defined(GODOT)
+    // The Godot panel drives the same process_action() this loop drives --
+    // both panes, the row cursor, sort/filter/move -- so the screen behaves
+    // identically either way. It declines when no panel is attending, and
+    // then the legacy loop below runs.
+    if( run_in_godot() ) {
+        return;
+    }
+#endif
+
     while( !exit ) {
         if( player_character.get_moves() < 0 ) {
             do_return_entry();
@@ -2455,6 +2468,239 @@ void advanced_inventory::swap_panes()
     // Recalculation required for weight & volume
     recalc = true;
 }
+
+#if defined(GODOT)
+
+void advanced_inventory::select_row( const side p_side, const int index )
+{
+    if( index < 0 || index >= static_cast<int>( panes[p_side].items.size() ) ) {
+        return;
+    }
+    src = p_side;
+    dest = src == left ? right : left;
+    panes[p_side].index = index;
+}
+
+namespace
+{
+/// A row's amount/weight/volume columns, formatted the same way
+/// print_items() does, minus its column-alignment padding.
+void format_columns( const advanced_inv_listitem &sitem, std::string &amount, std::string &weight,
+                     std::string &volume )
+{
+    if( sitem.stacks > 1 ) {
+        amount = std::to_string( std::min( sitem.stacks, 9999 ) );
+    }
+    weight = string_format( "%.*f", convert_weight( sitem.weight ) >= 100.0 ? 1 : 2,
+                            convert_weight( sitem.weight ) );
+    volume = format_volume( sitem.volume );
+}
+} // namespace
+
+void advanced_inventory::publish_to_godot()
+{
+    using snapshot = godot_backend::AdvancedInvSnapshot;
+    snapshot::data d;
+    d.title = _( "Advanced Inventory Manager" );
+    d.category_mode = inCategoryMode;
+
+    Character &player_character = get_player_character();
+    for( side p_side : { left, right } ) {
+        advanced_inventory_pane &pane = panes[p_side];
+        snapshot::pane_data pd;
+        pd.active = p_side == src;
+        pd.selected = pane.index;
+        pd.filter = pane.get_filter();
+        pd.sort_label = get_sortname( pane.sortby );
+
+        const advanced_inv_area &square = squares[pane.get_area()];
+        bool car = square.can_store_in_vehicle() && pane.in_vehicle() && square.id != AIM_DRAGGED;
+        pd.area_name = car ? square.veh->name : square.name;
+        pd.area_desc = pane.container ? pane.container->tname( 1, false ) : square.desc[car];
+        pd.max_count = square.max_size;
+        pd.item_count = square.get_item_count();
+
+        if( pane.get_area() == AIM_INVENTORY || pane.get_area() == AIM_WORN ||
+            ( pane.get_area() == AIM_CONTAINER && pane.container ) ) {
+            double weight_carried;
+            double weight_capacity;
+            units::volume volume_carried;
+            units::volume volume_capacity;
+            if( pane.get_area() == AIM_CONTAINER ) {
+                weight_carried = convert_weight( pane.container->get_total_contained_weight() );
+                weight_capacity = convert_weight( pane.container->get_total_weight_capacity() );
+                volume_carried = pane.container->get_contents_volume();
+                volume_capacity = pane.container->get_volume_capacity();
+            } else {
+                weight_carried = convert_weight( player_character.weight_carried() );
+                weight_capacity = convert_weight( player_character.weight_capacity() );
+                volume_carried = player_character.volume_capacity() - player_character.free_space();
+                volume_capacity = player_character.volume_capacity();
+            }
+            pd.capacity = string_format( "%.1f/%.1f %s  %s/%s %s", weight_carried, weight_capacity,
+                                         weight_units(), format_volume( volume_carried ),
+                                         format_volume( volume_capacity ), volume_units_abbr() );
+        } else if( pane.get_area() == AIM_ALL ) {
+            pd.capacity = string_format( "%3.1f %s  %s %s", convert_weight( squares[AIM_ALL].weight ),
+                                         weight_units(), format_volume( squares[AIM_ALL].volume ), volume_units_abbr() );
+        } else {
+            units::volume maxvolume = 0_ml;
+            if( pane.get_area() == AIM_CONTAINER && pane.container ) {
+                maxvolume = pane.container->get_volume_capacity();
+            } else if( pane.in_vehicle() ) {
+                maxvolume = square.get_vehicle_stack().max_volume();
+            } else {
+                maxvolume = get_map().max_volume( square.pos );
+            }
+            pd.capacity = string_format( "%3.1f %s  %s/%s %s",
+                                         convert_weight( pane.in_vehicle() ? square.weight_veh : square.weight ),
+                                         weight_units(), format_volume( pane.in_vehicle() ? square.volume_veh : square.volume ),
+                                         format_volume( maxvolume ), volume_units_abbr() );
+        }
+
+        const item_category *prev_cat = nullptr;
+        pd.rows.reserve( pane.items.size() );
+        for( const advanced_inv_listitem &sitem : pane.items ) {
+            snapshot::row r;
+            const item &it = *sitem.items.front();
+            r.name = it.is_money()
+                     ? it.display_money( sitem.items.size(), [&]() {
+                unsigned int total = 0;
+                for( const item_location &loc : sitem.items ) {
+                    total += loc->ammo_remaining();
+                }
+                return total;
+            }() )
+            : it.display_name( 1, true );
+            if( !it.is_owned_by( player_character, true ) ) {
+                r.name = "<color_light_red>!</color> " + r.name;
+            }
+            format_columns( sitem, r.amount, r.weight, r.volume );
+            r.favorite = it.is_favorite;
+            r.autopickup = sitem.autopickup;
+            if( pane.sortby == SORTBY_CATEGORY && sitem.cat != prev_cat ) {
+                r.category = sitem.cat->name_header();
+                prev_cat = sitem.cat;
+            }
+            pd.rows.push_back( std::move( r ) );
+        }
+        if( p_side == left ) {
+            d.left = std::move( pd );
+        } else {
+            d.right = std::move( pd );
+        }
+    }
+
+    d.areas.reserve( NUM_AIM_LOCATIONS );
+    for( const advanced_inv_area &s : squares ) {
+        if( s.id == AIM_PARENT && s.name.empty() ) {
+            // Only meaningful while inside a container; the ImGui grid skips
+            // it the same way by leaving its label blank.
+            continue;
+        }
+        snapshot::area_button ab;
+        ab.action = s.actionname;
+        ab.key = s.minimapname;
+        ab.name = s.name;
+        ab.enabled = s.canputitems();
+        d.areas.push_back( std::move( ab ) );
+    }
+
+    godot_backend::get_advanced_inv_snapshot().publish( d );
+}
+
+bool advanced_inventory::run_in_godot()
+{
+    godot_backend::AdvancedInvSnapshot &snap = godot_backend::get_advanced_inv_snapshot();
+    snap.clear();
+    avatar &player_character = get_avatar();
+
+    // Prime pane.items the same way the first redraw would. recalc_pane()
+    // is pure data -- no window drawing -- and is public for exactly this:
+    // calling it directly (rather than through ui_manager::redraw_invalidated(),
+    // which the legacy loop uses) gets the same fresh item list without
+    // painting anything into the curses windows this panel sits above, which
+    // would otherwise ghost through the dim beneath it.
+    for( side p_side : { left, right } ) {
+        if( recalc || panes[p_side].recalc ) {
+            recalc_pane( p_side );
+        }
+        panes[p_side].fix_index();
+    }
+    publish_to_godot();
+
+    while( true ) {
+        if( player_character.get_moves() < 0 ) {
+            do_return_entry();
+            break;
+        }
+        if( !is_processing() && move_all_items_and_waiting_to_quit ) {
+            break;
+        }
+
+        std::string action;
+        if( is_processing() ) {
+            // A queued MOVE_ALL_ITEMS activity is still draining; process_action()
+            // forces this action regardless of input while that is true, exactly
+            // as the legacy loop's own action substitution does.
+            action = "MOVE_ALL_ITEMS";
+        } else {
+            int side = -1;
+            int index = -1;
+            action = snap.next_action( side, index );
+            if( action.empty() ) {
+                // No panel attended; the caller runs the legacy loop.
+                snap.clear();
+                return false;
+            }
+            if( action == "GODOT_SELECT" ) {
+                select_row( side == 1 ? right : left, index );
+                action.clear();
+            } else if( action == "QUIT" ) {
+                exit = true;
+            }
+        }
+
+        if( !action.empty() ) {
+            // These open a nested screen of their own -- a filter box, a
+            // uilist, the item-info window, an amount prompt -- that
+            // process_action() blocks on synchronously. Suspended so this
+            // panel is not what sits on top of whichever one opens.
+            const bool nested = action == "FILTER" || action == "SORT" ||
+                                action == "MOVE_SINGLE_ITEM" || action == "MOVE_VARIABLE_ITEM" ||
+                                action == "MOVE_ITEM_STACK" || action == "MOVE_ALL_ITEMS" ||
+                                action == "EXAMINE" || action == "EXAMINE_CONTENTS" ||
+                                action == "UNLOAD_CONTAINER" || action == "TOGGLE_VEH" ||
+                                action == "SAVE_DEFAULT";
+            if( nested ) {
+                snap.set_suspended( true );
+            }
+            process_action( action );
+            if( nested ) {
+                snap.set_suspended( false );
+            }
+        }
+
+        if( exit ) {
+            break;
+        }
+        if( player_character.get_moves() < 0 ) {
+            do_return_entry();
+            break;
+        }
+        for( side p_side : { left, right } ) {
+            if( recalc || panes[p_side].recalc ) {
+                recalc_pane( p_side );
+            }
+            panes[p_side].fix_index();
+        }
+        publish_to_godot();
+    }
+    snap.clear();
+    return true;
+}
+
+#endif // GODOT
 
 void advanced_inventory::do_return_entry()
 {

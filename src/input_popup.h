@@ -60,6 +60,18 @@ class input_popup : public cataimgui::window
         cataimgui::bounds get_bounds() override;
 
         bool handle_custom_callbacks( const std::string &action );
+        /// The descriptive text above the field, and the window title. Protected
+        /// so a subclass can hand them to a backend that renders the popup
+        /// itself; the title otherwise survives only inside the ImGui window id.
+        const std::string &get_description() const {
+            return description;
+        }
+        const std::string &get_title() const {
+            return title;
+        }
+        bool has_custom_callbacks() const {
+            return !callbacks.empty();
+        }
 
         input_context ctxt;
         std::string label;
@@ -71,6 +83,7 @@ class input_popup : public cataimgui::window
         std::vector<std::pair<callback_input, std::function<bool()>>> callbacks;
 
     private:
+        std::string title;
         std::string description;
         nc_color description_default_color = c_green;
 

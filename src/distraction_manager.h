@@ -9,6 +9,15 @@ class distraction_manager_gui
 {
     public:
         void show();
+
+#if defined(GODOT)
+    private:
+        /// Show this screen as a Godot panel and block until it is dismissed.
+        /// @return false when no panel attended, so the caller must run the
+        ///         legacy ImGui loop instead.
+        bool run_in_godot();
+        void publish_to_godot();
+#endif
 };
 
 } // namespace distraction_manager

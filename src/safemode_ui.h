@@ -34,6 +34,16 @@ class safemode
             BOTH
         };
 
+        enum Columns : int {
+            COLUMN_RULE,
+            COLUMN_ATTITUDE,
+            COLUMN_PROXIMITY,
+            COLUMN_WHITE_BLACKLIST,
+            COLUMN_CATEGORY,
+            COLUMN_MOVEMENT_MODE,
+            MAX_COLUMN
+        };
+
         class rules_class
         {
             public:
@@ -85,8 +95,6 @@ class safemode
         std::vector<rules_class> global_rules;
         std::vector<rules_class> character_rules;
 
-        void test_pattern( int tab_in, int row_in );
-
         void load( bool is_character_in );
         bool save( bool is_character_in );
 
@@ -95,6 +103,37 @@ class safemode
         void create_rules();
         void add_rules( const std::vector<rules_class> &rules_in );
         void set_rule( const rules_class &rule_in, const std::string &name_in, rule_state rs_in );
+
+        /// The current tab, authoritative on the Godot side the same way
+        /// `auto_note_manager_gui::bCharacter` is -- row-only requests carry
+        /// no tab of their own, so this says which of `global_rules` /
+        /// `character_rules` they address.
+        int gui_tab = GLOBAL_TAB;
+        /// `show()`'s change flag, promoted from a local the same way
+        /// `color_manager::gui_stuff_changed` was, so the Godot takeover and
+        /// the shared "Save changes?" epilogue see the same value.
+        bool gui_changes_made = false;
+
+        /// The rule-text edit prompt, shared by the legacy loop and the Godot
+        /// takeover -- `string_input_popup_imgui` already routes itself
+        /// through the Godot text-prompt channel, so this needs no bespoke
+        /// panel, only a shared call site.
+        void gui_edit_rule_text( std::vector<rules_class> &current_tab, int row );
+        /// The proximity-distance edit prompt, shared the same way.
+        void gui_edit_proximity( std::vector<rules_class> &current_tab, int row );
+        /// TEST_RULE's match list, shared by both loops via a `uilist`
+        /// instead of a bespoke curses window -- `uilist` is already a
+        /// migrated Godot panel (the MENU-4 "drive the existing
+        /// implementation" insight), so this needs no bespoke channel either.
+        void gui_test_pattern( std::vector<rules_class> &current_tab, int row );
+
+#if defined(GODOT)
+        /// Show this screen as a Godot panel and block until it is dismissed.
+        /// @return false when no panel attended, so the caller must run the
+        ///         legacy ImGui loop instead.
+        bool gui_run_in_godot( const std::string &custom_name_in, bool is_safemode_in );
+        void gui_publish_to_godot( const std::string &custom_name_in, bool is_safemode_in );
+#endif
 
     public:
         std::string lastmon_whitelist; // NOLINT(cata-serialize)

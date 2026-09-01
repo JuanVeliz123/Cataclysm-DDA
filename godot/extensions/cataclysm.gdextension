@@ -1,0 +1,13 @@
+[configuration]
+
+entry_symbol = "godot_backend_extension_init"
+compatibility_minimum = "4.5"
+
+[libraries]
+
+macos.debug = "res://bin/libcataclysm-godot.dylib"
+macos.release = "res://bin/libcataclysm-godot.dylib"
+linux.debug.x86_64 = "res://bin/libcataclysm-godot.linux.debug.x86_64.so"
+linux.release.x86_64 = "res://bin/libcataclysm-godot.linux.release.x86_64.so"
+windows.debug.x86_64 = "res://bin/libcataclysm-godot.windows.debug.x86_64.dll"
+windows.release.x86_64 = "res://bin/libcataclysm-godot.windows.release.x86_64.dll"

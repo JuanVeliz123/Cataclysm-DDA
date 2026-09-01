@@ -1,5 +1,9 @@
 #include "popup.h"
 
+#if defined(GODOT)
+#include "godot_popup_snapshot.h"
+#endif
+
 #include <algorithm>
 #include <array>
 #include <memory>
@@ -272,6 +276,13 @@ std::vector<std::vector<std::string>> query_popup_impl::fold_query(
 
 void query_popup::invalidate_ui() const
 {
+#if defined(GODOT)
+    // A display-only popup changes by having its message rewritten -- that is how
+    // a progress popup counts up -- so this is where the Godot copy is refreshed.
+    if( godot_notice_ != 0 ) {
+        godot_backend::get_popup_snapshot().update_notice( godot_notice_, text );
+    }
+#endif
     std::shared_ptr<query_popup_impl> ui = p_impl.lock();
     if( ui ) {
         ui->mark_resized();
@@ -396,8 +407,61 @@ std::shared_ptr<query_popup_impl> query_popup::create_or_get_impl()
     }
     return impl;
 }
+const std::string &query_popup::get_message() const
+{
+    return text;
+}
+
+bool query_popup::cancel_allowed() const
+{
+    return cancel;
+}
+
+std::vector<std::pair<std::string, std::string>> query_popup::option_descriptions() const
+{
+    // Same derivation as fold_query: the visible label of an option is the
+    // input_context description of its action, not the action name.
+    input_context ctxt( category, pref_kbd_mode );
+    std::vector<std::pair<std::string, std::string>> out;
+    out.reserve( options.size() );
+    for( const query_option &opt : options ) {
+        const std::string &name = ctxt.get_action_name( opt.action );
+        out.emplace_back( opt.action, ctxt.get_desc( opt.action, name, opt.filter ) );
+    }
+    return out;
+}
+
 query_popup::result query_popup::query()
 {
+#if defined(GODOT)
+    // "Press any key" has no options to offer and its answer is the keypress
+    // itself, so it needs the capture path rather than the prompt one.
+    if( anykey && options.empty() ) {
+        input_event evt;
+        if( godot_backend::run_anykey_popup_in_godot( get_message(), evt ) ) {
+            return result( false, "ANY_INPUT", evt );
+        }
+    }
+    // A cancel-only popup with no buttons -- popup( text, PF_NONE ), which is
+    // every bare-message notice in the game -- matched neither branch here and
+    // fell through to the legacy ImGui loop below. EOC "popup" messages (the
+    // lieutenant shadow warnings) open one with no player action at all, so
+    // that loop parked the game thread mid-session and starved the command
+    // queue behind any_window_shown(). Ride the same notice-plus-keypress
+    // channel as "press any key": the legacy loop's only exit is QUIT, so any
+    // dismissal maps to it.
+    if( cancel && options.empty() ) {
+        input_event evt;
+        if( godot_backend::run_anykey_popup_in_godot( get_message(), evt ) ) {
+            return result( false, "QUIT", evt );
+        }
+    }
+    // Godot draws the prompt where it can; see godot_backend::run_popup_in_godot.
+    std::string action;
+    if( godot_backend::run_popup_in_godot( *this, action ) ) {
+        return result( false, action, input_event() );
+    }
+#endif
     std::shared_ptr<query_popup_impl> ui = create_or_get_impl();
 
     result res;
@@ -452,5 +516,39 @@ bool query_popup::button::contains( const point &p ) const
 
 static_popup::static_popup()
 {
+#if defined(GODOT)
+    // Takes no input and answers nothing: it is on screen for as long as this
+    // object lives. The "Saving game, this may take a while." popup is one of
+    // these, so this path runs on every autosave.
+    //
+    // The legacy curses/ImGui backing (`ui = create_or_get_impl()`) must NOT
+    // also be created here. It draws through the normal catacurses pipeline
+    // exactly once -- when this object is destroyed at the end of whatever
+    // "please wait" scope created it (world generation, most visibly) --
+    // and nothing ever erases its rect afterward: it is destroyed by plain
+    // RAII, not by an explicit werase()+refresh pass. ViewSnapshot has no
+    // "this window is gone" signal, only "these cells were painted", so its
+    // last frame stays marked occupied for the rest of the session.
+    // legacy_ui_active() (any_content() over those cells) then reports true
+    // forever, and the watchdogs built to recover from a *stuck* legacy
+    // screen have nothing to recover from -- there is no window, just a
+    // permanent ghost of one. Found 2026-08-29 chasing exactly that: every
+    // screen-opening check after the first static_popup in a session (the
+    // world-generation "please wait", in practice always the first one)
+    // failed identically, on machines and in fixtures that vary the timing
+    // enough to have not caught it before.
+    godot_notice_ = godot_backend::get_popup_snapshot().push_notice( get_message() );
+#else
     ui = create_or_get_impl();
+#endif
+}
+
+static_popup::~static_popup()
+{
+#if defined(GODOT)
+    if( godot_notice_ != 0 ) {
+        godot_backend::get_popup_snapshot().retire_notice( godot_notice_ );
+        godot_notice_ = 0;
+    }
+#endif
 }

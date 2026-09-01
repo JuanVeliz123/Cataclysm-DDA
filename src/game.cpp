@@ -114,6 +114,7 @@
 #include "gamemode.h"
 #include "gates.h"
 #include "get_version.h"
+#include "godot_look_snapshot.h"
 #include "harvest.h"
 #include "iexamine.h"
 #include "imgui/imgui_stdlib.h"
@@ -3238,6 +3239,19 @@ void game::draw_callback_t::operator()()
     }
 }
 
+void game::run_draw_callbacks()
+{
+    for( auto it = draw_callbacks.begin(); it != draw_callbacks.end(); ) {
+        shared_ptr_fast<draw_callback_t> cb = it->lock();
+        if( cb ) {
+            ( *cb )();
+            ++it;
+        } else {
+            it = draw_callbacks.erase( it );
+        }
+    }
+}
+
 void game::add_draw_callback( const shared_ptr_fast<draw_callback_t> &cb )
 {
     draw_callbacks.erase(
@@ -3360,15 +3374,7 @@ void game::draw( ui_adaptor &ui )
     werase( w_terrain );
     void_blink_curses();
     draw_ter();
-    for( auto it = draw_callbacks.begin(); it != draw_callbacks.end(); ) {
-        shared_ptr_fast<draw_callback_t> cb = it->lock();
-        if( cb ) {
-            ( *cb )();
-            ++it;
-        } else {
-            it = draw_callbacks.erase( it );
-        }
-    }
+    run_draw_callbacks();
     draw_async_anim_curses();
     // Only draw blinking symbols when in active phase
     if( blink_active_phase ) {
@@ -5833,6 +5839,16 @@ void game::draw_look_around_cursor( const tripoint_bub_ms &lp, const visibility_
             draw_cursor( lp );
             return;
         }
+#elif defined( GODOT )
+        // GODOT never defines TILES (see Makefile), so the branch above never
+        // fires here even though draw_cursor() has a real GODOT implementation
+        // (animation.cpp) that draws a marker through the anim overlay. Without
+        // this, the cursor calls below wrote into w_terrain, whose curses cells
+        // godot_curses_backend.cpp discards every frame -- so the look cursor
+        // was never shown at all, and panning it into unexplored darkness
+        // looked exactly like the player walking there blind.
+        draw_cursor( lp );
+        return;
 #endif
         const tripoint_bub_ms view_center = u.pos_bub() + u.view_offset;
         visibility_type visibility = visibility_type::HIDDEN;
@@ -6015,9 +6031,32 @@ look_around_result game::look_around(
             w_info = catacurses::newwin( la_h, la_w, point( la_x, la_y ) );
 
             ui.position_from_window( w_info );
+#if defined(GODOT)
+            // w_info draws through the normal catacurses -> ViewSnapshot
+            // pipeline and TerminalView (host.gd's USE_CURSES_UI_OVERLAY)
+            // already shows whatever's in that grid -- but draw_window()'s
+            // sidebar-erasure heuristic also matches w_info's shape, since it
+            // is deliberately drawn at the same rect the real sidebar
+            // occupies. This tells draw_window() which window is actually
+            // w_info, by identity rather than position, so only it is
+            // exempted and the real sidebar keeps being erased as before.
+            godot_backend::get_look_snapshot().publish( w_info.get<void>() );
+#endif
         } );
         ui->mark_resize();
     }
+#if defined(GODOT)
+    // Cleared on every exit path (QUIT/CONFIRM/SELECT/TRAVEL_TO/throw_blind/the
+    // "map" action's break), not just the bottom of the function.
+    struct look_snapshot_guard {
+        bool active = false;
+        ~look_snapshot_guard() {
+            if( active ) {
+                godot_backend::get_look_snapshot().clear();
+            }
+        }
+    } clear_look_snapshot_on_exit{ show_window };
+#endif
 
     dbg( D_PEDANTIC_INFO ) << ": calling handle_input()";
 

@@ -7,9 +7,11 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <set>
 #include <string>
 #include <utility>
 
+#include "bionics.h"
 #include "bodypart.h"
 #include "cata_imgui.h"
 #include "cata_utility.h"
@@ -28,6 +30,9 @@
 #include "flexbuffer_json.h"
 #include "game_constants.h"
 #include "generic_factory.h"
+#if defined(GODOT)
+#include "godot_martialarts_snapshot.h"
+#endif
 #include "input_context.h"
 #include "item.h"
 #include "item_factory.h"
@@ -2231,6 +2236,175 @@ std::string ma_technique::get_description() const
 
 namespace
 {
+/**
+ * Everything the details screen says about one style, gathered once and
+ * formatted twice: the ImGui window draws it section by section, and the Godot
+ * panel (godot_martialarts_snapshot) flattens it into colour-tagged lines.
+ */
+struct ma_details_blocks {
+    std::vector<std::string> general_info;
+    /// Buff category ("Passive buffs") -> description lines.
+    std::map<std::string, std::vector<std::string>> buffs;
+    /// Technique name -> description lines.
+    std::map<std::string, std::vector<std::string>> techniques;
+    /// Weapon category -> enumerated weapon names.
+    std::map<std::string, std::string> weapons;
+    int buffs_total = 0;
+    int weapons_total = 0;
+};
+
+ma_details_blocks gather_ma_details( const matype_id &style )
+{
+    ma_details_blocks out;
+    if( style.str().empty() ) {
+        return out;
+    }
+
+    const martialart &ma = style.obj();
+
+    if( ma.force_unarmed ) {
+        out.general_info.emplace_back(
+            _( "This style <bold>forces you to use unarmed strikes</bold>, even if wielding a weapon." ) );
+    } else if( ma.allow_all_weapons ) {
+        out.general_info.emplace_back( _( "This style can be used with <bold>all</bold> weapons." ) );
+    } else if( ma.strictly_melee ) {
+        out.general_info.emplace_back( _( "This is an <bold>armed</bold> combat style." ) );
+    }
+
+    if( ma.arm_block_with_bio_armor_arms || ma.arm_block != 99 ||
+        ma.leg_block_with_bio_armor_legs || ma.leg_block != 99 ||
+        ma.nonstandard_block != 99 ) {
+        Character &u = get_player_character();
+        int unarmed_skill = u.get_skill_level( skill_unarmed );
+        if( u.has_active_bionic( bio_cqb ) ) {
+            unarmed_skill = BIO_CQB_LEVEL;
+        }
+        if( ma.arm_block_with_bio_armor_arms ) {
+            out.general_info.emplace_back(
+                _( "You can <info>arm block</info> by installing the <info>Arms Alloy Plating CBM</info>" ) );
+        } else if( ma.arm_block != 99 ) {
+            out.general_info.emplace_back( string_format(
+                                               _( "You can <info>arm block</info> at %s" ),
+                                               required_skill_as_string( skill_unarmed, ma.arm_block, unarmed_skill ) ) );
+        }
+
+        if( ma.leg_block_with_bio_armor_legs ) {
+            out.general_info.emplace_back(
+                _( "You can <info>leg block</info> by installing the <info>Legs Alloy Plating CBM</info>" ) );
+        } else if( ma.leg_block != 99 ) {
+            out.general_info.emplace_back( string_format(
+                                               _( "You can <info>leg block</info> at %s" ),
+                                               required_skill_as_string( skill_unarmed, ma.leg_block, unarmed_skill ) ) );
+            if( ma.nonstandard_block != 99 ) {
+                out.general_info.emplace_back( string_format(
+                                                   _( "You can <info>block with mutated limbs</info> at %s" ),
+                                                   required_skill_as_string( skill_unarmed, ma.nonstandard_block, unarmed_skill ) ) );
+            }
+        }
+    }
+    for( std::string &entry : out.general_info ) {
+        entry = replace_colors( entry );
+    }
+
+    auto buff_desc = [&out]( const std::string & title, const std::vector<mabuff_id> &buffs,
+    bool passive = false ) {
+        if( !buffs.empty() ) {
+            for( const auto &buff : buffs ) {
+                out.buffs_total++;
+                std::vector<std::string> buff_lines =
+                    string_split( replace_colors( buff->get_description( passive ) ), '\n' );
+                // Merge our accumulated text into the existing one. There might be more than one buff of this type, so we want to display all of them.
+                out.buffs[title].insert( out.buffs[title].end(), buff_lines.begin(), buff_lines.end() );
+            }
+        }
+    };
+
+    buff_desc( _( "Passive buffs" ), ma.static_buffs, true );
+    buff_desc( _( "Move buffs" ), ma.onmove_buffs );
+    buff_desc( _( "Pause buffs" ), ma.onpause_buffs );
+    buff_desc( _( "Hit buffs" ), ma.onhit_buffs );
+    buff_desc( _( "Miss buffs" ), ma.onmiss_buffs );
+    buff_desc( _( "Attack buffs" ), ma.onattack_buffs );
+    buff_desc( _( "Crit buffs" ), ma.oncrit_buffs );
+    buff_desc( _( "Kill buffs" ), ma.onkill_buffs );
+    buff_desc( _( "Dodge buffs" ), ma.ondodge_buffs );
+    buff_desc( _( "Block buffs" ), ma.onblock_buffs );
+    buff_desc( _( "Get hit buffs" ), ma.ongethit_buffs );
+
+    for( const auto &tech : ma.techniques ) {
+        std::vector<std::string> tehcnique_lines =
+            string_split( replace_colors( tech.obj().get_description() ), '\n' );
+        out.techniques[tech.obj().name.translated() ] = tehcnique_lines;
+    }
+
+    // Copy set to vector for sorting
+    std::vector<itype_id> valid_ma_weapons;
+    std::copy( ma.weapons.begin(), ma.weapons.end(), std::back_inserter( valid_ma_weapons ) );
+    for( const itype *itp : item_controller->all() ) {
+        const itype_id &weap_id = itp->get_id();
+        if( ma.has_weapon( weap_id ) ) {
+            valid_ma_weapons.emplace_back( weap_id );
+        }
+    }
+
+    if( !valid_ma_weapons.empty() ) {
+        Character &player = get_player_character();
+        std::map<weapon_category_id, std::vector<std::string>> weaps_by_cat;
+        std::sort( valid_ma_weapons.begin(), valid_ma_weapons.end(),
+        []( const itype_id & w1, const itype_id & w2 ) {
+            return localized_compare( item::nname( w1 ), item::nname( w2 ) );
+        } );
+        for( const itype_id &w : valid_ma_weapons ) {
+            bool carrying = player.has_item_with( [&w]( const item & it ) {
+                return it.typeId() == w;
+            } );
+            // Wielded weapon in cyan, weapons in player inventory in yellow
+            std::string wname = player.get_wielded_item() && player.get_wielded_item()->typeId() == w ?
+                                colorize( item::nname( w ) + _( " (wielded)" ), c_light_cyan ) :
+                                carrying ? colorize( item::nname( w ), c_yellow ) : item::nname( w );
+            bool cat_found = false;
+            for( const weapon_category_id &w_cat : w->weapon_category ) {
+                // If martial art does not define a weapon category, include all valid categories
+                // If martial art defines one or more weapon categories, only include those categories
+                if( ma.weapon_category.empty() || ma.weapon_category.count( w_cat ) > 0 ) {
+                    weaps_by_cat[w_cat].push_back( wname );
+                    cat_found = true;
+                }
+            }
+            if( !cat_found ) {
+                // Weapons that are uncategorized or not in the martial art's weapon categories
+                weaps_by_cat[weapon_category_OTHER_INVALID_WEAP_CAT].push_back( wname );
+            }
+            out.weapons_total++;
+        }
+
+        bool has_other_cat = false;
+        for( auto &weaps : weaps_by_cat ) {
+            if( weaps.first == weapon_category_OTHER_INVALID_WEAP_CAT ) {
+                // Print "OTHER" category at the end
+                has_other_cat = true;
+                continue;
+            }
+            weaps.second.erase( std::unique( weaps.second.begin(), weaps.second.end() ), weaps.second.end() );
+            std::string w_cat;
+            if( weaps.first.is_valid() ) {
+                w_cat = weaps.first->name().translated();
+            } else {
+                // MISSING JSON DEFINITION intentionally not translated
+                w_cat = weaps.first.str() + " - MISSING JSON DEFINITION";
+            }
+
+            out.weapons.emplace( w_cat, enumerate_as_string( weaps.second ) );
+        }
+        if( has_other_cat ) {
+            std::vector<std::string> &weaps = weaps_by_cat[weapon_category_OTHER_INVALID_WEAP_CAT];
+            weaps.erase( std::unique( weaps.begin(), weaps.end() ), weaps.end() );
+            out.weapons.emplace( _( "OTHER" ), enumerate_as_string( weaps ) );
+        }
+    }
+    return out;
+}
+
 class ma_details_ui
 {
         friend class ma_details_ui_impl;
@@ -2308,159 +2482,13 @@ void ma_details_ui::draw_ma_details_ui( const matype_id &style_selected )
 
 void ma_details_ui_impl::init_data()
 {
-    general_info_text.clear();
-    buffs_text.clear();
-    techniques_text.clear();
-    weapons_text.clear();
-
-    buffs_total = 0;
-    weapons_total = 0;
-
-    if( !ma_style.str().empty() ) {
-
-        const martialart &ma = ma_style.obj();
-
-        if( ma.force_unarmed ) {
-            general_info_text.emplace_back(
-                _( "This style <bold>forces you to use unarmed strikes</bold>, even if wielding a weapon." ) );
-        } else if( ma.allow_all_weapons ) {
-            general_info_text.emplace_back( _( "This style can be used with <bold>all</bold> weapons." ) );
-        } else if( ma.strictly_melee ) {
-            general_info_text.emplace_back( _( "This is an <bold>armed</bold> combat style." ) );
-        }
-
-        if( ma.arm_block_with_bio_armor_arms || ma.arm_block != 99 ||
-            ma.leg_block_with_bio_armor_legs || ma.leg_block != 99 ||
-            ma.nonstandard_block != 99 ) {
-            Character &u = get_player_character();
-            int unarmed_skill = u.get_skill_level( skill_unarmed );
-            if( u.has_active_bionic( bio_cqb ) ) {
-                unarmed_skill = BIO_CQB_LEVEL;
-            }
-            if( ma.arm_block_with_bio_armor_arms ) {
-                general_info_text.emplace_back(
-                    _( "You can <info>arm block</info> by installing the <info>Arms Alloy Plating CBM</info>" ) );
-            } else if( ma.arm_block != 99 ) {
-                general_info_text.emplace_back( string_format(
-                                                    _( "You can <info>arm block</info> at %s" ),
-                                                    required_skill_as_string( skill_unarmed, ma.arm_block, unarmed_skill ) ) );
-            }
-
-            if( ma.leg_block_with_bio_armor_legs ) {
-                general_info_text.emplace_back(
-                    _( "You can <info>leg block</info> by installing the <info>Legs Alloy Plating CBM</info>" ) );
-            } else if( ma.leg_block != 99 ) {
-                general_info_text.emplace_back( string_format(
-                                                    _( "You can <info>leg block</info> at %s" ),
-                                                    required_skill_as_string( skill_unarmed, ma.leg_block, unarmed_skill ) ) );
-                if( ma.nonstandard_block != 99 ) {
-                    general_info_text.emplace_back( string_format(
-                                                        _( "You can <info>block with mutated limbs</info> at %s" ),
-                                                        required_skill_as_string( skill_unarmed, ma.nonstandard_block, unarmed_skill ) ) );
-                }
-            }
-        }
-        for( std::string &entry : general_info_text ) {
-            entry = replace_colors( entry );
-        }
-
-        auto buff_desc = [&]( const std::string & title, const std::vector<mabuff_id> &buffs,
-        bool passive = false ) {
-            if( !buffs.empty() ) {
-                for( const auto &buff : buffs ) {
-                    buffs_total++;
-                    std::vector<std::string> buff_lines =
-                        string_split( replace_colors( buff->get_description( passive ) ), '\n' );
-                    // Merge our accumulated text into the existing one. There might be more than one buff of this type, so we want to display all of them.
-                    buffs_text[title].insert( buffs_text[title].end(), buff_lines.begin(), buff_lines.end() );
-                }
-            }
-        };
-
-        buff_desc( _( "Passive buffs" ), ma.static_buffs, true );
-        buff_desc( _( "Move buffs" ), ma.onmove_buffs );
-        buff_desc( _( "Pause buffs" ), ma.onpause_buffs );
-        buff_desc( _( "Hit buffs" ), ma.onhit_buffs );
-        buff_desc( _( "Miss buffs" ), ma.onmiss_buffs );
-        buff_desc( _( "Attack buffs" ), ma.onattack_buffs );
-        buff_desc( _( "Crit buffs" ), ma.oncrit_buffs );
-        buff_desc( _( "Kill buffs" ), ma.onkill_buffs );
-        buff_desc( _( "Dodge buffs" ), ma.ondodge_buffs );
-        buff_desc( _( "Block buffs" ), ma.onblock_buffs );
-        buff_desc( _( "Get hit buffs" ), ma.ongethit_buffs );
-
-        for( const auto &tech : ma.techniques ) {
-            std::vector<std::string> tehcnique_lines =
-                string_split( replace_colors( tech.obj().get_description() ), '\n' );
-            techniques_text[tech.obj().name.translated() ] = tehcnique_lines;
-        }
-
-        // Copy set to vector for sorting
-        std::vector<itype_id> valid_ma_weapons;
-        std::copy( ma.weapons.begin(), ma.weapons.end(), std::back_inserter( valid_ma_weapons ) );
-        for( const itype *itp : item_controller->all() ) {
-            const itype_id &weap_id = itp->get_id();
-            if( ma.has_weapon( weap_id ) ) {
-                valid_ma_weapons.emplace_back( weap_id );
-            }
-        }
-
-        if( !valid_ma_weapons.empty() ) {
-            Character &player = get_player_character();
-            std::map<weapon_category_id, std::vector<std::string>> weaps_by_cat;
-            std::sort( valid_ma_weapons.begin(), valid_ma_weapons.end(),
-            []( const itype_id & w1, const itype_id & w2 ) {
-                return localized_compare( item::nname( w1 ), item::nname( w2 ) );
-            } );
-            for( const itype_id &w : valid_ma_weapons ) {
-                bool carrying = player.has_item_with( [&w]( const item & it ) {
-                    return it.typeId() == w;
-                } );
-                // Wielded weapon in cyan, weapons in player inventory in yellow
-                std::string wname = player.get_wielded_item() && player.get_wielded_item()->typeId() == w ?
-                                    colorize( item::nname( w ) + _( " (wielded)" ), c_light_cyan ) :
-                                    carrying ? colorize( item::nname( w ), c_yellow ) : item::nname( w );
-                bool cat_found = false;
-                for( const weapon_category_id &w_cat : w->weapon_category ) {
-                    // If martial art does not define a weapon category, include all valid categories
-                    // If martial art defines one or more weapon categories, only include those categories
-                    if( ma.weapon_category.empty() || ma.weapon_category.count( w_cat ) > 0 ) {
-                        weaps_by_cat[w_cat].push_back( wname );
-                        cat_found = true;
-                    }
-                }
-                if( !cat_found ) {
-                    // Weapons that are uncategorized or not in the martial art's weapon categories
-                    weaps_by_cat[weapon_category_OTHER_INVALID_WEAP_CAT].push_back( wname );
-                }
-                weapons_total++;
-            }
-
-            bool has_other_cat = false;
-            for( auto &weaps : weaps_by_cat ) {
-                if( weaps.first == weapon_category_OTHER_INVALID_WEAP_CAT ) {
-                    // Print "OTHER" category at the end
-                    has_other_cat = true;
-                    continue;
-                }
-                weaps.second.erase( std::unique( weaps.second.begin(), weaps.second.end() ), weaps.second.end() );
-                std::string w_cat;
-                if( weaps.first.is_valid() ) {
-                    w_cat = weaps.first->name().translated();
-                } else {
-                    // MISSING JSON DEFINITION intentionally not translated
-                    w_cat = weaps.first.str() + " - MISSING JSON DEFINITION";
-                }
-
-                weapons_text.emplace( w_cat, enumerate_as_string( weaps.second ) );
-            }
-            if( has_other_cat ) {
-                std::vector<std::string> &weaps = weaps_by_cat[weapon_category_OTHER_INVALID_WEAP_CAT];
-                weaps.erase( std::unique( weaps.begin(), weaps.end() ), weaps.end() );
-                weapons_text.emplace( _( "OTHER" ), enumerate_as_string( weaps ) );
-            }
-        }
-    }
+    ma_details_blocks blocks = gather_ma_details( ma_style );
+    general_info_text = std::move( blocks.general_info );
+    buffs_text = std::move( blocks.buffs );
+    techniques_text = std::move( blocks.techniques );
+    weapons_text = std::move( blocks.weapons );
+    buffs_total = blocks.buffs_total;
+    weapons_total = blocks.weapons_total;
 }
 
 void ma_details_ui_impl::draw_ma_details_text()
@@ -2579,6 +2607,184 @@ bool ma_style_callback::key( const input_context &ctxt, const input_event &event
     }
 
     show_ma_details_ui( style_selected );
+
+    return true;
+}
+
+#if defined(GODOT)
+namespace godot_backend
+{
+
+std::vector<MartialArtsSnapshot::detail_line> ma_style_details_lines( const matype_id &style )
+{
+    std::vector<MartialArtsSnapshot::detail_line> lines;
+    const ma_details_blocks blocks = gather_ma_details( style );
+    const auto header = [&lines]( const std::string & text ) {
+        lines.push_back( { text, true } );
+    };
+    const auto body = [&lines]( const std::string & text ) {
+        lines.push_back( { text, false } );
+    };
+
+    // Same sections, same headers, in the ImGui window's order, so the two
+    // front ends cannot say different things about one style.
+    if( !blocks.general_info.empty() ) {
+        header( _( "General info" ) );
+        for( const std::string &entry : blocks.general_info ) {
+            body( entry );
+        }
+    }
+    if( !blocks.buffs.empty() ) {
+        header( string_format( _( "Buffs (%d in %d categories)" ),
+                               blocks.buffs_total, blocks.buffs.size() ) );
+        for( const auto &entry : blocks.buffs ) {
+            body( colorize( entry.first, c_header ) );
+            for( const std::string &buff_line : entry.second ) {
+                body( buff_line );
+            }
+        }
+    }
+    if( !blocks.techniques.empty() ) {
+        header( string_format( _( "Techniques (%d)" ), blocks.techniques.size() ) );
+        for( const auto &entry : blocks.techniques ) {
+            body( colorize( _( "Technique: " ), c_header ) + colorize( entry.first, c_bold ) );
+            for( const std::string &technique_line : entry.second ) {
+                body( technique_line );
+            }
+        }
+    }
+    if( !blocks.weapons.empty() ) {
+        header( string_format( _( "Weapons (%d in %d categories)" ),
+                               blocks.weapons_total, blocks.weapons.size() ) );
+        for( const auto &entry : blocks.weapons ) {
+            body( colorize( entry.first, c_header ) );
+            body( entry.second );
+        }
+    }
+    return lines;
+}
+
+} // namespace godot_backend
+#endif // GODOT
+
+namespace
+{
+// Row indices in the style-selection screen. Moved here with pick_style from
+// character.cpp; the Godot channel's row list mirrors the same layout, which is
+// what lets its answer feed the shared epilogue unchanged.
+enum style_selection : int {
+    KEEP_HANDS_FREE = 0,
+    STYLE_OFFSET
+};
+
+/// The legacy uilist query, verbatim from character.cpp -- the fallback when no
+/// Godot panel is attending (and the only path under TILES/curses).
+int pick_style_query_legacy( const Character &you,
+                             const std::vector<matype_id> &selectable_styles,
+                             const matype_id &current_style, const bool keep_hands_free,
+                             const int initial_selection )
+{
+    // Any other keys quit the menu
+    input_context ctxt( "MELEE_STYLE_PICKER", keyboard_mode::keycode );
+    ctxt.register_action( "SHOW_DESCRIPTION" );
+
+    uilist kmenu;
+    kmenu.title = _( "Select a style.\n" );
+    kmenu.text = string_format( _( "STR: <color_white>%d</color>, DEX: <color_white>%d</color>, "
+                                   "PER: <color_white>%d</color>, INT: <color_white>%d</color>\n"
+                                   "Press [<color_yellow>%s</color>] for technique details and compatible weapons.\n" ),
+                                you.get_str(), you.get_dex(), you.get_per(), you.get_int(),
+                                ctxt.get_desc( "SHOW_DESCRIPTION" ) );
+    ma_style_callback callback( static_cast<size_t>( STYLE_OFFSET ), selectable_styles );
+    kmenu.callback = &callback;
+    kmenu.input_category = "MELEE_STYLE_PICKER";
+    kmenu.additional_actions.emplace_back( "SHOW_DESCRIPTION", translation() );
+    kmenu.desc_enabled = true;
+    kmenu.addentry_desc( KEEP_HANDS_FREE, true, 'h',
+                         keep_hands_free ? _( "Keep hands free (on)" ) : _( "Keep hands free (off)" ),
+                         wrap60( _( "When this is enabled, player won't wield things unless explicitly told to." ) ) );
+
+    kmenu.selected = initial_selection;
+
+    for( size_t i = 0; i < selectable_styles.size(); i++ ) {
+        const martialart &style = selectable_styles[i].obj();
+        //Check if this style is currently selected
+        const bool selected = selectable_styles[i] == current_style;
+        std::string entry_text = style.name.translated();
+        if( selected ) {
+            entry_text = colorize( entry_text, c_pink );
+        }
+        kmenu.addentry_desc( i + STYLE_OFFSET, true, -1, entry_text,
+                             wrap60( style.description.translated() ) );
+    }
+
+    kmenu.query();
+    return kmenu.ret;
+}
+} // namespace
+
+// Style selection menu. Moved from character.cpp and split model / query /
+// epilogue so the Godot panel can stand in for exactly the query: both front
+// ends answer with the same row index and the epilogue below applies it.
+bool character_martial_arts::pick_style( const Character &you )
+{
+    // Check for martial art styles known from active bionics
+    std::set<matype_id> bio_styles;
+    for( const bionic &bio : *you.my_bionics ) {
+        const std::vector<matype_id> &bio_ma_list = bio.id->ma_styles;
+        if( !bio_ma_list.empty() && you.has_active_bionic( bio.id ) ) {
+            bio_styles.insert( bio_ma_list.begin(), bio_ma_list.end() );
+        }
+    }
+    std::vector<matype_id> selectable_styles;
+    if( bio_styles.empty() ) {
+        selectable_styles = ma_styles;
+    } else {
+        selectable_styles.insert( selectable_styles.begin(), bio_styles.begin(), bio_styles.end() );
+    }
+
+    // +1 to keep "No Style" at top
+    std::sort( selectable_styles.begin() + 1, selectable_styles.end(),
+    []( const matype_id & a, const matype_id & b ) {
+        return localized_compare( a->name.translated(), b->name.translated() );
+    } );
+
+    // If there is a style already, the cursor starts there;
+    // if no selected style, the cursor starts from no-style.
+    int initial_selection = STYLE_OFFSET;
+    for( size_t i = 0; i < selectable_styles.size(); i++ ) {
+        if( selectable_styles[i] == style_selected ) {
+            initial_selection = static_cast<int>( i ) + STYLE_OFFSET;
+        }
+    }
+
+    int selection = -1;
+    bool handled = false;
+#if defined(GODOT)
+    // The panel answers with the same row indices the uilist would return. It
+    // declines when nothing is attending, and then the legacy screen runs.
+    handled = godot_backend::run_martialarts_in_godot( you, selectable_styles, style_selected,
+              keep_hands_free, initial_selection, selection );
+#endif
+    if( !handled ) {
+        selection = pick_style_query_legacy( you, selectable_styles, style_selected,
+                                             keep_hands_free, initial_selection );
+    }
+
+    if( selection >= STYLE_OFFSET ) {
+        // If the currect style is selected, do not change styles
+
+        // Bizarre and unsafe casting const reference to non-const????????
+        Character &u = const_cast<Character &>( you );
+        clear_all_effects( u );
+        set_style( selectable_styles[selection - STYLE_OFFSET], true );
+        ma_static_effects( u );
+        martialart_use_message( you );
+    } else if( selection == KEEP_HANDS_FREE ) {
+        keep_hands_free = !keep_hands_free;
+    } else {
+        return false;
+    }
 
     return true;
 }

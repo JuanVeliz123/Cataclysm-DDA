@@ -51,6 +51,10 @@
 #include "weighted_list.h"
 #include "wound.h"
 
+#if defined(GODOT)
+#include "godot_medical_snapshot.h"
+#endif
+
 static const efftype_id effect_bite( "bite" );
 static const efftype_id effect_bleed( "bleed" );
 static const efftype_id effect_infected( "infected" );
@@ -101,6 +105,21 @@ class medical_ui : public cataimgui::window
 
         void draw_hint_section();
 
+        /// Apply one action to the members. Lifted out of draw_controls() so the
+        /// tab and the selected limb are decided here, in state the game thread
+        /// owns, rather than as the ImGui frame draws -- which nothing off the
+        /// ImGui thread could read or drive. The tab bar and list below follow
+        /// selected_tab and bp instead of electing them.
+        void process_action( const std::string &action );
+
+#if defined(GODOT)
+        /// Show this screen as a Godot panel and block until it is dismissed.
+        /// @param result what execute() should return when this handled it.
+        /// @return false when no panel attended, so the caller must run the
+        ///         legacy ImGui loop instead.
+        bool run_in_godot( bool &result );
+#endif
+
         std::string last_action;
     protected:
 
@@ -119,6 +138,12 @@ class medical_ui : public cataimgui::window
         }
 
     private:
+#if defined(GODOT)
+        void publish_to_godot();
+        void select_limb( int index );
+        void set_tab( int index );
+#endif
+
         Character *you;
         bodypart_id bp;
         input_context ctxt;
@@ -156,6 +181,18 @@ bool medical_ui::execute()
     ctxt.register_action( "QUIT" );
     ctxt.register_action( "HELP_KEYBINDINGS" );
     ctxt.set_timeout( 16 );
+
+#if defined(GODOT)
+    // The Godot panel drives the same members and the same process_action()
+    // this loop drives; only the source of the action moves. It declines when
+    // no panel is attending, and then the legacy ImGui loop below runs.
+    {
+        bool godot_result = false;
+        if( run_in_godot( godot_result ) ) {
+            return godot_result;
+        }
+    }
+#endif
 
     while( true ) {
         ui_manager::redraw_invalidated();
@@ -525,6 +562,26 @@ static std::string draw_stats_summary( Character &you )
     return desc;
 }
 
+// The summary tab's weight line, extracted so the Godot snapshot publishes the
+// same words the ImGui pane draws.
+static std::string draw_weight_summary( Character &you )
+{
+    const diag_value *last_weighting_time = you.maybe_get_value( "last_weighting_time" );
+    if( last_weighting_time == nullptr ) {
+        return colorize( _( "You do not remember the last time you weighed yourself." ),
+                         c_dark_gray );
+    }
+    const std::string last_weighting_weight = string_format( "%.0f %s",
+            convert_weight( units::from_kilogram( you.get_value( "last_weighting_weight_kg" ).dbl() ) ),
+            weight_units() );
+    const std::string last_weighted_time = string_format( _( "last weighed %s ago." ),
+                                           to_string_approx( calendar::turn - time_point( last_weighting_time->dbl() ) ) );
+    return string_format( "%s: %s (%s)",
+                          _( "Weight" ),
+                          colorize( last_weighting_weight, c_yellow ),
+                          colorize( last_weighted_time, c_dark_gray ) );
+}
+
 void medical_ui::draw_limbs_list( const std::vector<bodypart_id> &bodyparts )
 {
     if( ImGui::BeginListBox( "##LISTBOX", ImGui::GetContentRegionAvail() ) ) {
@@ -562,23 +619,7 @@ void medical_ui::summary_tab() const
 
     cataimgui::draw_colored_text( draw_stats_summary( *you ), col_width );
 
-    const diag_value *last_weighting_time = you->maybe_get_value( "last_weighting_time" );
-    if( last_weighting_time != nullptr ) {
-        const std::string last_weighting_weight = string_format( "%.0f %s",
-                convert_weight( units::from_kilogram( you->get_value( "last_weighting_weight_kg" ).dbl() ) ),
-                weight_units() );
-        const std::string last_weighted_time = string_format( _( "last weighed %s ago." ),
-                                               to_string_approx( calendar::turn - time_point( last_weighting_time->dbl() ) ) );
-        const std::string weight_desc = string_format(
-                                            "%s: %s (%s)",
-                                            _( "Weight" ),
-                                            colorize( last_weighting_weight, c_yellow ),
-                                            colorize( last_weighted_time, c_dark_gray ) );
-        cataimgui::draw_colored_text( weight_desc, col_width );
-    } else {
-        cataimgui::draw_colored_text( _( "You do not remember the last time you weighed yourself." ),
-                                      c_dark_gray, col_width );
-    }
+    cataimgui::draw_colored_text( draw_weight_summary( *you ), col_width );
 
     if( debug_mode ) {
         ImGui::NewLine();
@@ -650,15 +691,16 @@ void medical_ui::draw_hint_section()
     ImGui::Separator();
 }
 
-void medical_ui::draw_controls()
+// The action handling from draw_controls(), lifted so it works on members
+// instead of inside the draw. The tab moves on selected_tab directly, and the
+// limb cursor lands in bp, exactly as before -- draw_controls() now only
+// renders what this decided.
+void medical_ui::process_action( const std::string &action )
 {
-    // no need to draw anything if we are exiting
-    if( last_action == "QUIT" ) {
-        return;
-    } else if( last_action == "NEXT_TAB" || last_action == "RIGHT" ) {
+    if( action == "NEXT_TAB" || action == "RIGHT" ) {
         s = cataimgui::scroll::begin;
         ++selected_tab;
-    } else if( last_action == "PREV_TAB" || last_action == "LEFT" ) {
+    } else if( action == "PREV_TAB" || action == "LEFT" ) {
         s = cataimgui::scroll::begin;
         --selected_tab;
     }
@@ -670,19 +712,19 @@ void medical_ui::draw_controls()
     // initialize selected_limb either from already set bp, or from zero if not set
     auto it = std::find( bodyparts.begin(), bodyparts.end(), bp );
     int selected_limb = ( it != bodyparts.end() ) ? std::distance( bodyparts.begin(), it ) : 0;
-    if( last_action == "UP" ) {
+    if( action == "UP" ) {
         selected_limb--;
-    } else if( last_action == "DOWN" ) {
+    } else if( action == "DOWN" ) {
         selected_limb++;
     }
 
-    if( last_action == "PAGE_UP" || last_action == "SCROLL_UP" ) {
+    if( action == "PAGE_UP" || action == "SCROLL_UP" ) {
         s = cataimgui::scroll::page_up;
-    } else if( last_action == "PAGE_DOWN" || last_action == "SCROLL_DOWN" ) {
+    } else if( action == "PAGE_DOWN" || action == "SCROLL_DOWN" ) {
         s = cataimgui::scroll::page_down;
-    } else if( last_action == "HOME" ) {
+    } else if( action == "HOME" ) {
         s = cataimgui::scroll::begin;
-    } else if( last_action == "END" ) {
+    } else if( action == "END" ) {
         s = cataimgui::scroll::end;
     }
 
@@ -693,6 +735,17 @@ void medical_ui::draw_controls()
     };
 
     bp = bodyparts[selected_limb];
+}
+
+void medical_ui::draw_controls()
+{
+    // no need to draw anything if we are exiting
+    if( last_action == "QUIT" ) {
+        return;
+    }
+    process_action( last_action );
+
+    const std::vector<bodypart_id> bodyparts = you->get_all_body_parts( get_body_part_flags::sorted );
 
     draw_hint_section();
 
@@ -712,6 +765,114 @@ void medical_ui::draw_controls()
         ImGui::EndTabBar();
     }
 }
+
+#if defined(GODOT)
+
+void medical_ui::select_limb( const int index )
+{
+    const std::vector<bodypart_id> bodyparts = you->get_all_body_parts(
+                get_body_part_flags::sorted );
+    if( index >= 0 && index < static_cast<int>( bodyparts.size() ) ) {
+        bp = bodyparts[index];
+    }
+}
+
+void medical_ui::set_tab( const int index )
+{
+    if( index < 0 || index >= static_cast<int>( medical_tab_mode::last ) ) {
+        return;
+    }
+    selected_tab = static_cast<medical_tab_mode>( index );
+}
+
+void medical_ui::publish_to_godot()
+{
+    using snapshot = godot_backend::MedicalSnapshot;
+    snapshot::data d;
+    d.title = _( "Medical" );
+    d.tab_titles = { _( "Limbs" ), _( "Summary" ) };
+    d.selected_tab = static_cast<int>( selected_tab );
+
+    const std::vector<bodypart_id> bodyparts = you->get_all_body_parts(
+                get_body_part_flags::sorted );
+    d.limb_names.reserve( bodyparts.size() );
+    int index = 0;
+    for( const bodypart_id &part : bodyparts ) {
+        if( part == bp ) {
+            d.selected_limb = index;
+        }
+        d.limb_names.push_back( get_modified_limb_name( part ) );
+        ++index;
+    }
+    // Detail for the selected limb only, exactly as the ImGui pane shows it:
+    // get_limb_effects words its output against the selected part, so publishing
+    // every limb's detail would caption other limbs with this one's name.
+    d.detail_title = uppercase_first_letter( body_part_name( bp, 1 ) );
+    d.effects = get_limb_effects( bp );
+    d.wounds = get_limb_wounds( bp );
+    d.scores = get_limb_scores_and_modifiers( bp );
+
+    d.speed_summary = draw_speed_summary( *you );
+    d.stats_summary = draw_stats_summary( *you );
+    d.weight_line = draw_weight_summary( *you );
+    godot_backend::get_medical_snapshot().publish( d );
+}
+
+bool medical_ui::run_in_godot( bool &result )
+{
+    result = false;
+    godot_backend::MedicalSnapshot &snap = godot_backend::get_medical_snapshot();
+    snap.clear();
+    // Pick the initial limb the way the first ImGui draw would.
+    process_action( std::string() );
+    publish_to_godot();
+    while( true ) {
+        int pick = -1;
+        int tab = -1;
+        const std::string action = snap.next_action( pick, tab );
+        if( action.empty() ) {
+            // No panel attended; the caller runs the legacy ImGui loop.
+            snap.clear();
+            return false;
+        }
+        if( action == "QUIT" ) {
+            break;
+        }
+        if( action == "GODOT_SELECT" ) {
+            select_limb( pick );
+        } else if( action == "GODOT_TAB" ) {
+            set_tab( tab );
+        } else if( action == "CONFIRM" ) {
+            // Same as the loop in execute(): treating a wound may hand back an
+            // activity, which closes this screen with `true`. The pickers it
+            // opens (query_yn, uilist, popup) are all Godot panels already and
+            // draw on top of this one.
+            if( you->pick_wound_fix( bp ) ) {
+                result = true;
+                break;
+            }
+        } else if( action == "APPLY" ) {
+            if( you->is_avatar() ) {
+                // The item picker is still a legacy overlay screen. Hide this
+                // channel while it runs, or the panel keeps claiming the keys
+                // the picker needs -- the same move the dialogue takeover makes
+                // for the trade window.
+                snap.set_suspended( true );
+                avatar_action::use_item( *you->as_avatar() );
+                snap.set_suspended( false );
+            } else {
+                popup( _( "Applying not implemented for NPCs." ) );
+            }
+        } else {
+            process_action( action );
+        }
+        publish_to_godot();
+    }
+    snap.clear();
+    return true;
+}
+
+#endif // GODOT
 
 namespace
 {

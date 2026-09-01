@@ -619,6 +619,18 @@ class overmapbuffer
         //TODO: use display_description_at when converting UIs to ImGui
         std::string get_description_at( const tripoint_abs_sm &where, bool draw_origin = true );
 
+        /**
+         * The terrain description shown for a tile, as colour-tagged text: what
+         * it is, and where it is relative to the nearest known city.
+         *
+         * Split out of display_description_at so a backend that does not draw
+         * through ImGui can show the same sentence. Composing it twice would be
+         * two descriptions of one tile that eventually disagree.
+         *
+         * @return { description, origin } -- origin is the mod it came from, and
+         *         is empty when there is nothing to attribute.
+         */
+        std::pair<std::string, std::string> describe_at( const tripoint_abs_sm &where );
         void display_description_at( const tripoint_abs_sm &where, bool draw_origin = true );
 
         /**

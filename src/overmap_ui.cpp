@@ -82,6 +82,10 @@
 #include "ui_manager.h"
 #include "uilist.h"
 #include "uistate.h"
+
+#if defined(GODOT)
+#include "godot_overmap_snapshot.h"
+#endif
 #include "units.h"
 #include "units_utility.h"
 #include "vehicle.h"
@@ -130,8 +134,53 @@ static const int npm_height = 3;
 void overmap_sidebar::draw_sidebar_text( const std::string_view &original_text,
         const nc_color &color )
 {
+#if defined(GODOT)
+    if( recording_ ) {
+        recorded_.push_back( recorded_line{ std::string( original_text ),
+                                            string_from_color( color ),
+                                            record_indent_, record_join_, false } );
+        record_join_ = false;
+        return;
+    }
+#endif
     cataimgui::TextColoredParagraph( color, original_text );
     ImGui::NewLine();
+}
+
+// The three layout calls the content functions make. Wrapped because ImGui must
+// not be called outside a frame, and while recording there is no frame -- the
+// intent survives as flags on the recorded line instead.
+void overmap_sidebar::same_line()
+{
+#if defined(GODOT)
+    if( recording_ ) {
+        record_join_ = true;
+        return;
+    }
+#endif
+    ImGui::SameLine();
+}
+
+void overmap_sidebar::indent()
+{
+#if defined(GODOT)
+    if( recording_ ) {
+        ++record_indent_;
+        return;
+    }
+#endif
+    ImGui::Indent();
+}
+
+void overmap_sidebar::unindent()
+{
+#if defined(GODOT)
+    if( recording_ ) {
+        record_indent_ = std::max( 0, record_indent_ - 1 );
+        return;
+    }
+#endif
+    ImGui::Unindent();
 }
 
 overmap_sidebar::overmap_sidebar( overmap_ui::overmap_draw_data_t &data,
@@ -149,6 +198,16 @@ void overmap_sidebar::init()
 
 void overmap_sidebar::draw_controls()
 {
+#if defined(GODOT)
+    // The Godot panel is showing this text, so the ImGui window must not draw it
+    // as well -- OvermapView already owns the map underneath, and two sidebars
+    // over one map is what this task existed to fix. hide_ui is the same switch
+    // the dialogue window uses to get out of the way of the trade screen.
+    hide_ui = godot_backend::get_overmap_snapshot().sidebar_attended();
+    if( hide_ui ) {
+        return;
+    }
+#endif
     // This info is always shown at the top of the sidebar
     draw_tile_info();
     ImGui::Separator();
@@ -217,8 +276,25 @@ void overmap_sidebar::draw_tile_info()
             draw_sidebar_text( ter.get_symbol( center_vision ), ter.get_color( center_vision ) );
         }
 
-        ImGui::SameLine();
-        overmap_buffer.display_description_at( sm_pos, true );
+        same_line();
+#if defined(GODOT)
+        if( recording_ ) {
+            // display_description_at draws straight to ImGui, so during a
+            // recording pass it would both touch ImGui outside a frame and lose
+            // its text -- and its text is the most important line here, the one
+            // saying what the tile actually is. describe_at is the same
+            // composition without the drawing.
+            const std::pair<std::string, std::string> described =
+                overmap_buffer.describe_at( sm_pos );
+            draw_sidebar_text( described.first, c_light_gray );
+            if( !described.second.empty() ) {
+                draw_sidebar_text( described.second, c_light_gray );
+            }
+        } else
+#endif
+        {
+            overmap_buffer.display_description_at( sm_pos, true );
+        }
         if( center_vision != om_vision_level::full ) {
             std::string vision_level_string;
             switch( center_vision ) {
@@ -242,7 +318,7 @@ void overmap_sidebar::draw_tile_info()
 
         draw_sidebar_text( ter.get_symbol( om_vision_level::full ) + " ",
                            ter.get_color( om_vision_level::full ) );
-        ImGui::SameLine();
+        same_line();
         draw_sidebar_text( ter.get_name( om_vision_level::full ),
                            ter.get_color( om_vision_level::full ) );
     }
@@ -253,7 +329,7 @@ void overmap_sidebar::draw_tile_info()
                                         player_character.overmap_los( cursor_pos, sight_points * 2 );
         if( weather_is_visible ) {
             draw_sidebar_text( _( "Weather: " ), c_white );
-            ImGui::SameLine();
+            same_line();
             draw_sidebar_text( overmap_ui::get_weather_at_point( cursor_pos )->name.translated(),
                                overmap_ui::get_weather_at_point( cursor_pos )->color );
         } else {
@@ -394,13 +470,13 @@ void overmap_sidebar::draw_debug()
                 horde_size += horde->size();
                 for( std::pair<const tripoint_abs_ms, horde_entity> &entity : *horde ) {
                     const mtype *horde_type = entity.second.get_type();
-                    ImGui::Indent();
+                    indent();
                     draw_sidebar_text( string_format( "Species: %s", horde_type->nname() ), c_blue );
                     draw_sidebar_text( string_format( "Interest: %d", entity.second.tracking_intensity ),
                                        c_blue );
                     draw_sidebar_text( string_format( "Target: %s",
                                                       entity.second.destination.to_string() ), c_blue );
-                    ImGui::Unindent();
+                    unindent();
                     //mvwprintz(wbar, desc_pos + point(0, line_number++), c_red, "x"); ???
                 }
             }
@@ -452,6 +528,39 @@ void overmap_sidebar::draw_mission_info()
         draw_sidebar_text( _( "No mission selected." ), c_white );
     }
 }
+
+#if defined(GODOT)
+const std::vector<overmap_sidebar::recorded_line> &overmap_sidebar::record()
+{
+    recorded_.clear();
+    record_indent_ = 0;
+    record_join_ = false;
+    recording_ = true;
+
+    const auto header = [this]( const std::string & title ) {
+        recorded_.push_back( recorded_line{ title, "c_white", 0, false, true } );
+    };
+
+    // Same order as draw_controls, and the same functions -- only the framing
+    // differs. The collapsibles are always expanded here; whether to fold them
+    // is the panel's business, and a section the player collapsed is still
+    // something they may want back without a round trip.
+    draw_tile_info();
+    draw_settings_info();
+    draw_mission_info();
+    header( _( "Quick Reference" ) );
+    draw_quick_reference();
+    header( _( "Layers" ) );
+    draw_layer_info();
+    if( debug_mode || draw_data.debug_editor ) {
+        header( _( "Debug" ) );
+        draw_debug();
+    }
+
+    recording_ = false;
+    return recorded_;
+}
+#endif // GODOT
 
 cataimgui::bounds overmap_sidebar::get_bounds()
 {
@@ -1330,6 +1439,17 @@ static void draw( overmap_draw_data_t &data )
         return;
     }
 #endif // TILES
+#if defined( GODOT )
+    if( godot_backend::get_overmap_snapshot().tileset_ready() ) {
+        // OvermapView paints the sprites; publish the draw list and leave the
+        // curses window erased so the cell overlay does not double it in ASCII.
+        godot_backend::update_overmap_snapshot( data.cursor_pos, data.cursor_pos,
+                                                uistate.overmap_show_overlays );
+        werase( g->w_overmap );
+        wnoutrefresh( g->w_overmap );
+        return;
+    }
+#endif // GODOT
     draw_ascii( g->w_overmap, data );
 }
 
@@ -2077,6 +2197,11 @@ static tripoint_abs_omt display()
     map &here = get_map();
 
     overmap_draw_data_t &data = g->overmap_data;
+#if defined( GODOT )
+    // Tells the Godot host to show OvermapView for exactly as long as this loop
+    // runs, and to hide it again however the loop exits.
+    const godot_backend::overmap_active_guard godot_overmap_guard;
+#endif
     tripoint_abs_omt &orig = data.origin_pos;
     std::vector<tripoint_abs_omt> &display_path = data.display_path;
     tripoint_abs_omt &select = data.select;
@@ -2179,6 +2304,20 @@ static tripoint_abs_omt display()
     ui->on_redraw( [&]( ui_adaptor & ui ) {
         ( void )ui;
         draw( g->overmap_data );
+#if defined( GODOT )
+        // OvermapView already draws the map; the sidebar was still coming
+        // through the ImGui overlay on top of it. Record the same text it would
+        // have drawn and hand it to the panel. Publishing here rather than in
+        // draw() keeps it on the redraw the sidebar itself is tied to.
+        // Converted here rather than sharing a type, so the snapshot header does
+        // not have to include overmap_ui.h and with it all of cata_imgui.
+        std::vector<godot_backend::OvermapSnapshot::sidebar_line> published;
+        for( const overmap_sidebar::recorded_line &l : om_sidebar.record() ) {
+            published.push_back( godot_backend::OvermapSnapshot::sidebar_line{
+                l.text, l.color, l.indent, l.join, l.header } );
+        }
+        godot_backend::get_overmap_snapshot().publish_sidebar( published );
+#endif
     } );
 
     do {

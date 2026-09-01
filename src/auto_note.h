@@ -96,6 +96,26 @@ class auto_note_manager_gui
 
         bool charwasChanged{false};
         bool globalwasChanged{false};
+
+        /// true = character tab, false = global tab. A member (not a `show()`
+        /// local) so the Godot takeover and the post-loop epilogue see the
+        /// same value the legacy loop would have left it at.
+        bool bCharacter = true;
+        int currentLine = 0;
+
+        /// The CHANGE_MAPEXTRA_CHARACTER nested popups (a symbol prompt, then
+        /// a colour-pick uilist), shared by the legacy loop and the Godot
+        /// takeover below.
+        void change_symbol( const map_extra_id &currentItem,
+                            std::pair<const map_extra, bool> &entry );
+
+#if defined(GODOT)
+        /// Show this screen as a Godot panel and block until it is dismissed.
+        /// @return false when no panel attended, so the caller must run the
+        ///         legacy ImGui loop instead.
+        bool run_in_godot( bool char_emptyMode, bool global_emptyMode );
+        void publish_to_godot( bool char_emptyMode, bool global_emptyMode );
+#endif
 };
 
 /**

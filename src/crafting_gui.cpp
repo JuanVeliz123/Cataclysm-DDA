@@ -70,6 +70,14 @@
 #include "uistate.h"
 #include "vitamin.h"
 
+#if defined(GODOT)
+#include "godot_backend.h"
+#include "godot_crafting_snapshot.h"
+
+#include <chrono>
+#include <thread>
+#endif // GODOT
+
 static const efftype_id effect_contacts( "contacts" );
 static const json_character_flag json_flag_HYPEROPIC( "HYPEROPIC" );
 static const skill_id skill_electronics( "electronics" );
@@ -422,6 +430,27 @@ class crafting_ui_impl : public cataimgui::window
                           inventory *inventory_override );
 
         void process_action( const std::string &action_in, input_context &ctxt );
+#if defined(GODOT)
+        /**
+         * Run this screen as a Godot panel instead of an ImGui window.
+         *
+         * Only the drawing and the input source change: every request the panel
+         * makes is turned back into the action strings and pending intents that
+         * process_action already understands, so the two paths share one state
+         * machine rather than two that have to agree.
+         *
+         * @return false when no panel attended, so the caller must draw its own.
+         */
+        bool run_in_godot( input_context &ctxt );
+    private:
+        void publish_to_godot();
+        std::vector<godot_backend::CraftingSnapshot::detail_line> build_godot_detail() const;
+        std::vector<godot_backend::CraftingSnapshot::step> build_godot_steps() const;
+        bool handle_godot_step_action( const std::string &action );
+        std::string godot_list_sig;
+        std::string godot_detail_sig;
+    public:
+#endif
         void set_input_context( const input_context *ctxt ) {
             ctxt_ptr = ctxt;
         }
@@ -2967,6 +2996,501 @@ void crafting_ui_impl::process_action( const std::string &action_in,
 // Public entry point -- now uses crafting_ui_impl
 // ---------------------------------------------------------------------------
 
+#if defined(GODOT)
+
+// --- the crafting screen, drawn by Godot ------------------------------------
+
+std::vector<godot_backend::CraftingSnapshot::detail_line>
+crafting_ui_impl::build_godot_detail() const
+{
+    using detail_line = godot_backend::CraftingSnapshot::detail_line;
+    std::vector<detail_line> out;
+    if( current.empty() || line < 0 || line >= static_cast<int>( current.size() ) ) {
+        return out;
+    }
+    const recipe &recp = *current[line];
+    const availability &avail = available[line];
+    const int batch_size = get_batch_size();
+
+    const auto head = [&out]( const std::string & s ) {
+        out.push_back( detail_line{ s, true } );
+    };
+    const auto body = [&out]( const std::string & s ) {
+        if( !s.empty() ) {
+            out.push_back( detail_line{ s, false } );
+        }
+    };
+
+    head( batch_size > 1
+          ? string_format( "%s x%d", recp.result_name( true ), batch_size )
+          : recp.result_name( true ) );
+
+    if( recp.is_nested() ) {
+        body( _( "A group of recipes.  Open it to see what is inside." ) );
+        return out;
+    }
+
+    // The summary line, lifted from draw_recipe_info_panel so both screens say
+    // the same thing in the same words -- only the centring is dropped.
+    {
+        const int expected_turns = crafter->expected_time_to_craft( recp, batch_size )
+                                   / to_moves<int>( 1_turns );
+        const float success = 100.f * crafter->recipe_success_chance( recp );
+        const nc_color success_col = success < 25.f ? c_red :
+                                     success < 50.f ? c_yellow :
+                                     success < 75.f ? c_light_gray : c_green;
+        const nc_color activity_col = activity_level_color( recp.exertion_level() );
+        const std::string activity_lc = lowercase_first_letter( display::activity_level_str(
+                                            recp.exertion_level() ) );
+        const std::string chance_str = string_format( "~%.0f%%", success );
+        const std::string time_str = approx_craft_time( expected_turns );
+        const std::string activity_str = string_format( _( "%s activity" ), activity_lc );
+        const int total_yield = recp.makes_amount() * batch_size;
+        if( total_yield > 1 ) {
+            //~ %1$s: success chance, %2$s: yield count, %3$s: time, %4$s: activity level
+            body( string_format( _( "%1$s chance to yield %2$s in %3$s of %4$s" ),
+                                 colorize( chance_str, success_col ),
+                                 colorize( recp.result()->item_measure_prefix( total_yield ), c_light_blue ),
+                                 colorize( time_str, c_cyan ),
+                                 colorize( activity_str, activity_col ) ) );
+        } else {
+            //~ %1$s: success chance, %2$s: time, %3$s: activity level
+            body( string_format( _( "%1$s chance you can make it in %2$s of %3$s" ),
+                                 colorize( chance_str, success_col ),
+                                 colorize( time_str, c_cyan ),
+                                 colorize( activity_str, activity_col ) ) );
+        }
+    }
+
+    // Why it cannot be made, in the same order and wording as the ImGui pane.
+    if( !avail.can_craft && !avail.has_proficiencies ) {
+        std::vector<std::string> names;
+        for( const auto &prof : recp.required_proficiencies() ) {
+            names.push_back( prof->name() );
+        }
+        body( colorize( string_format( _( "Missing required proficiencies: %s" ),
+                                       string_join( names, _( ", " ) ) ), c_red ) );
+    }
+    if( !avail.crafter_has_primary_skill ) {
+        body( colorize( recp.is_practice()
+                        ? _( "Crafter lacks theoretical knowledge to practice this." )
+                        : _( "Crafter lacks theoretical knowledge for this recipe." ), c_red ) );
+    }
+    if( avail.can_craft && recp.deduped_requirements().is_too_complex() ) {
+        body( colorize( _( "Due to the complex overlapping requirements, this recipe "
+                           "may appear to be craftable when it is not." ), c_yellow ) );
+    }
+    std::string npc_reason;
+    const bool npc_cant = avail.crafter.is_npc() && !recp.npc_can_craft( npc_reason )
+                          && !avail.inv_override;
+    if( !avail.can_craft && avail.apparently_craftable && !npc_cant ) {
+        body( colorize( _( "Cannot be crafted because the same item is needed "
+                           "for multiple components." ), c_red ) );
+    }
+    if( !avail.can_craft && npc_cant ) {
+        body( colorize( npc_reason, c_red ) );
+    }
+    // Guarded on can_craft exactly as the ImGui pane guards them. Without that a
+    // recipe you have nothing for still warns that it "will use rotten
+    // ingredients", which is a statement about a craft that cannot happen.
+    if( avail.can_craft && avail.would_use_rotten ) {
+        body( colorize( _( "Will use rotten ingredients" ), c_red ) );
+    }
+    if( avail.can_craft && avail.would_use_favorite ) {
+        body( colorize( _( "Will use favorited ingredients" ), c_red ) );
+    }
+    if( batch_size > 1 ) {
+        const std::string savings = recp.batch_savings_string();
+        if( !savings.empty() ) {
+            body( string_format( _( "Batch time savings: %s" ), savings ) );
+        }
+    }
+
+    const std::string skills = recp.required_skills_string( *crafter );
+    if( !skills.empty() ) {
+        head( _( "Skills" ) );
+        body( skills );
+    }
+    const std::string profs = recp.required_proficiencies_string( crafter );
+    if( !profs.empty() ) {
+        head( _( "Proficiencies" ) );
+        body( profs );
+    }
+
+    // The components and tools panes come from requirement_data itself, which has
+    // already resolved each line against the crafting inventory and coloured it
+    // accordingly. Re-deriving that here would be a second opinion about what the
+    // player has, and the two would eventually disagree.
+    const inventory &inv = avail.inv_override ? *avail.inv_override : crafter->crafting_inventory();
+    const requirement_data &req = recp.simple_requirements();
+    const std::function<bool( const item & )> filter =
+        recp.get_component_filter( recipe_filter_flags::none );
+    // The merged tools list stands in for the per-step one exactly when the
+    // ImGui pane's does: a step recipe with the steps expanded shows each
+    // step's own tools instead (build_godot_steps), and drawing both would
+    // list every tool twice.
+    const bool steps_replace_tools = recp.has_steps() && recp.steps().size() > 1 &&
+                                     uistate.crafting_expand_steps;
+    if( !steps_replace_tools ) {
+        const std::vector<std::string> tools = req.get_folded_tools_list( crafter, 72, c_white, inv,
+                batch_size );
+        if( tools.size() > 1 ) {
+            head( _( "Tools" ) );
+            for( size_t i = 1; i < tools.size(); ++i ) {
+                body( tools[i] );
+            }
+        }
+    }
+    const std::vector<std::string> comps =
+        req.get_folded_components_list( crafter, 72, c_white, inv, filter, batch_size );
+    if( comps.size() > 1 ) {
+        head( _( "Components" ) );
+        for( size_t i = 1; i < comps.size(); ++i ) {
+            body( comps[i] );
+        }
+    }
+
+    return out;
+}
+
+// --- the step table, as data -------------------------------------------------
+
+std::vector<godot_backend::CraftingSnapshot::step>
+crafting_ui_impl::build_godot_steps() const
+{
+    using snapshot = godot_backend::CraftingSnapshot;
+    std::vector<snapshot::step> out;
+    if( current.empty() || line < 0 || line >= static_cast<int>( current.size() ) ) {
+        return out;
+    }
+    const recipe &recp = *current[line];
+    if( !recp.has_steps() || recp.is_nested() ) {
+        return out;
+    }
+    const availability &avail = available[line];
+    const int batch_size = get_batch_size();
+    const inventory &crafting_inv = avail.inv_override
+                                    ? *avail.inv_override : crafter->crafting_inventory();
+
+    // The same computations the ImGui pane's expanded-steps view makes, in the
+    // same order, so the two front ends never disagree about a step's cost.
+    const crafting_cost_context step_ctx{
+        crafter->book_bonuses_nearby(),
+        compute_tool_speeds( recp, *crafter )
+    };
+    // A single-step recipe only names its step; its tools are the merged list
+    // the detail pane already carries, exactly as the ImGui pane draws it.
+    const bool per_step_detail = recp.steps().size() > 1;
+
+    int tool_group_offset = 0;
+    for( size_t si = 0; si < recp.steps().size(); ++si ) {
+        const recipe_step &step = recp.steps()[si];
+        snapshot::step s;
+        s.name = step.name.translated();
+        s.unattended = step.attention == step_attention::unattended;
+
+        const double step_moves = recp.step_budget_moves( *crafter, si, batch_size, step_ctx );
+        s.time = to_string( time_duration::from_moves( static_cast<int64_t>( step_moves ) ) );
+        s.activity = colorize( display::activity_level_str( step.exertion ),
+                               activity_level_color( step.exertion ) );
+        if( batch_size > 1 ) {
+            const double single_moves = recp.step_budget_moves( *crafter, si, 1, step_ctx );
+            if( step_moves < single_moves * batch_size * 0.99 ) {
+                s.batch_note = string_format( _( " (x%d, saves %s)" ), batch_size,
+                                              to_string( time_duration::from_moves(
+                                                      static_cast<int64_t>( single_moves * batch_size - step_moves ) ) ) );
+            }
+        }
+
+        if( per_step_detail ) {
+            for( const recipe_proficiency &prof : step.proficiencies ) {
+                const bool known = crafter->has_proficiency( prof.id );
+                const nc_color pcol = prof.required ? ( known ? c_green : c_red ) :
+                                      ( known ? c_dark_gray : c_yellow );
+                s.proficiencies.push_back( colorize( prof.id->name() +
+                                                     ( prof.required && !known ? _( " (required)" ) : "" ), pcol ) );
+            }
+
+            const requirement_data &step_req = step.requirements;
+            for( const std::vector<quality_requirement> &qual_alts : step_req.get_qualities() ) {
+                bool any_has = false;
+                for( const quality_requirement &qr : qual_alts ) {
+                    if( qr.has( &get_player_character(), crafting_inv, return_true<item>, 1 ) ) {
+                        any_has = true;
+                        break;
+                    }
+                }
+                std::vector<std::string> alts;
+                for( const quality_requirement &qr : qual_alts ) {
+                    const nc_color col = qr.has( &get_player_character(), crafting_inv,
+                                                 return_true<item>, 1 ) ? c_green :
+                                         ( any_has ? c_dark_gray : c_red );
+                    alts.emplace_back( colorize( qr.to_string( 1 ), col ) );
+                }
+                s.qualities.push_back( string_join( alts, _( " OR " ) ) );
+            }
+
+            const requirement_data::alter_tool_comp_vector &tool_groups = step_req.get_tools();
+            for( size_t gi = 0; gi < tool_groups.size(); ++gi ) {
+                const std::vector<tool_comp> &alts = tool_groups[gi];
+                if( alts.empty() ) {
+                    continue;
+                }
+                snapshot::step_group grp;
+                grp.index = tool_group_offset + static_cast<int>( gi );
+                grp.label = find_tool_group_name( alts );
+                grp.expanded = expanded_tool_groups.count( grp.index ) > 0;
+
+                // Dedup by type and sort the variants the crafter has to the
+                // front, exactly as draw_requirement_tools prepares its line.
+                bool any_available = false;
+                std::set<itype_id> seen;
+                std::vector<const tool_comp *> unique_alts;
+                for( const tool_comp &tc : alts ) {
+                    if( seen.insert( tc.type ).second ) {
+                        unique_alts.push_back( &tc );
+                        if( tc.has( &get_player_character(), crafting_inv, return_true<item>,
+                                    batch_size ) ) {
+                            any_available = true;
+                        }
+                    }
+                }
+                std::stable_partition( unique_alts.begin(), unique_alts.end(),
+                [&]( const tool_comp * tc ) {
+                    return tc->has( &get_player_character(), crafting_inv, return_true<item>,
+                                    batch_size );
+                } );
+                for( const tool_comp *tc : unique_alts ) {
+                    const nc_color col = tc->has( &get_player_character(), crafting_inv,
+                                                  return_true<item>, batch_size ) ? c_green :
+                                         ( any_available ? c_dark_gray : c_red );
+                    grp.variants.push_back( colorize( tc->to_string( batch_size ), col ) );
+                }
+                s.groups.push_back( std::move( grp ) );
+            }
+        }
+        tool_group_offset += static_cast<int>( step.requirements.get_tools().size() );
+        out.push_back( std::move( s ) );
+    }
+    return out;
+}
+
+// The step table's own intents, which do not exist in the crafting input
+// context: they are what the ImGui pane's clickable labels write, sent back as
+// strings. They mutate the same expand state the ImGui pane mutates -- the
+// shared uistate flag and this instance's expanded_tool_groups -- not a copy of
+// it, so switching front ends mid-session keeps what was opened.
+bool crafting_ui_impl::handle_godot_step_action( const std::string &action )
+{
+    if( action == "STEPS:TOGGLE" ) {
+        uistate.crafting_expand_steps = !uistate.crafting_expand_steps;
+        return true;
+    }
+    const std::string prefix = "STEPTOOLS:";
+    if( string_starts_with( action, prefix ) ) {
+        const int gi = std::atoi( action.c_str() + prefix.size() );
+        if( expanded_tool_groups.count( gi ) > 0 ) {
+            expanded_tool_groups.erase( gi );
+        } else {
+            expanded_tool_groups.insert( gi );
+        }
+        return true;
+    }
+    return false;
+}
+
+void crafting_ui_impl::publish_to_godot()
+{
+    using snapshot = godot_backend::CraftingSnapshot;
+    snapshot &snap = godot_backend::get_crafting_snapshot();
+
+    // The unread maps are refreshed at the top of draw_controls(), which never
+    // runs under Godot -- the same trap as the tab intents. Consume the flag
+    // here or the "+" markers freeze at whatever the screen opened with.
+    if( recalc_unread ) {
+        recalculate_unread();
+    }
+
+    std::vector<snapshot::tab> tabs;
+    std::vector<snapshot::tab> subtabs;
+    int tab_index = 0;
+    int subtab_index = 0;
+    if( batch ) {
+        tabs.push_back( snapshot::tab{ "batch", _( "Batch" ), false } );
+    } else if( !filterstring.empty() ) {
+        tabs.push_back( snapshot::tab{ "searched", _( "Searched" ), is_filtered_unread } );
+    } else {
+        for( const std::string &cat : crafting_cats ) {
+            tabs.push_back( snapshot::tab{ cat, _( get_cat_unprefixed( cat ) ),
+                                           is_cat_unread[cat] } );
+        }
+        tab_index = tab.cur_index();
+        const crafting_category_id current_cat( tab.cur() );
+        for( const std::string &sub : current_cat->subcategories ) {
+            subtabs.push_back( snapshot::tab{ sub, _( get_subcat_unprefixed( tab.cur(), sub ) ),
+                                              is_subcat_unread[tab.cur()][sub] } );
+        }
+        subtab_index = subtab.cur_index();
+    }
+
+    std::vector<snapshot::row> rows;
+    rows.reserve( current.size() );
+    size_t unread_rows = 0;
+    for( size_t i = 0; i < current.size(); ++i ) {
+        const recipe &rec = *current[i];
+        snapshot::row r;
+        r.nested = rec.is_nested();
+        r.indent = i < indent_vec.size() ? indent_vec[i] : 0;
+        r.name = batch
+                 ? string_format( "%d x %s", static_cast<int>( i ) + 1, rec.result_name( true ) )
+                 : rec.result_name( true );
+        if( i < available.size() ) {
+            const availability &a = available[i];
+            r.craftable = a.can_craft;
+            r.caveat = a.would_use_rotten || a.would_use_favorite || !a.has_proficiencies;
+        }
+        r.unread = highlight_unread && !uistate.read_recipes.count( rec.ident() );
+        if( r.unread ) {
+            ++unread_rows;
+        }
+        rows.push_back( std::move( r ) );
+    }
+
+    // Republish only on a change. The list is a few hundred rows and the detail
+    // pane is rebuilt from scratch; doing either every frame would cost the panel
+    // its scroll position as well as the work.
+    //
+    // The unread markers move without anything else changing -- stepping off a
+    // recipe marks it read -- so the signature has to carry them too, as a count
+    // of unread rows plus the tab markers.
+    std::string unread_bits;
+    unread_bits.reserve( tabs.size() + subtabs.size() );
+    for( const snapshot::tab &t : tabs ) {
+        unread_bits += t.unread ? '1' : '0';
+    }
+    for( const snapshot::tab &t : subtabs ) {
+        unread_bits += t.unread ? '1' : '0';
+    }
+    const std::string list_sig = string_format( "%d|%d|%zu|%s|%d|%d|%zu|%zu|%s|%d",
+                                 tab_index, subtab_index,
+                                 rows.size(), filterstring, batch ? 1 : 0, manual_batch, num_hidden,
+                                 unread_rows, unread_bits, unread_recipes_first ? 1 : 0 );
+    if( list_sig != godot_list_sig || snap.list_generation() == 0 ) {
+        godot_list_sig = list_sig;
+        snap.publish_list( tabs, tab_index, subtabs, subtab_index, rows, line,
+                           filterstring, num_hidden, batch, manual_batch,
+                           highlight_unread, unread_recipes_first );
+    } else {
+        snap.publish_selection( line );
+    }
+
+    // The step table changes without the selection moving: its expand state is
+    // toggled in place, and invalidate_info_panels() clears the group set when
+    // the selection does move. Both belong in the signature.
+    std::string groups_sig;
+    for( const int gi : expanded_tool_groups ) {
+        groups_sig += std::to_string( gi );
+        groups_sig += ',';
+    }
+    const std::string detail_sig = string_format( "%s|%d|%d|%d|%s", list_sig, line, manual_batch,
+                                   uistate.crafting_expand_steps ? 1 : 0, groups_sig );
+    if( detail_sig != godot_detail_sig ) {
+        godot_detail_sig = detail_sig;
+        snap.publish_detail( build_godot_detail(), build_godot_steps(),
+                             uistate.crafting_expand_steps );
+    }
+}
+
+bool crafting_ui_impl::run_in_godot( input_context &ctxt )
+{
+    godot_backend::CraftingSnapshot &snap = godot_backend::get_crafting_snapshot();
+    snap.clear();
+    godot_list_sig.clear();
+    godot_detail_sig.clear();
+
+    if( recalc ) {
+        recalculate_recipes();
+    }
+    publish_to_godot();
+
+    // Same contract as the other takeovers: shutdown wins, and a screen nothing
+    // is drawing is handed back rather than blocking the game thread forever.
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds( 1500 );
+    while( !done ) {
+        if( godot_backend::is_shutdown_requested() ) {
+            snap.clear();
+            done = true;
+            chosen = nullptr;
+            return true;
+        }
+        if( !snap.attended() && std::chrono::steady_clock::now() > deadline ) {
+            snap.clear();
+            return false;
+        }
+
+        // A click on a row sets the same intent field the ImGui layer sets, and
+        // process_action consumes it exactly as it always has.
+        const int row = snap.take_selected_row();
+        if( row >= 0 ) {
+            pending_line_click = row;
+        }
+        // Tab and subtab intents are different: draw_controls() consumes those,
+        // not process_action, so under Godot nothing would ever act on them and a
+        // clicked tab would quietly do nothing. Apply them the same way it does,
+        // in the same order, so clicking a category still rebuilds its subcategory
+        // list before the recipes are recalculated.
+        const int want_tab = snap.take_selected_tab();
+        if( want_tab >= 0 && want_tab < static_cast<int>( crafting_cats.size() ) ) {
+            tab.set_index( want_tab );
+            subtab = tab_list( crafting_category_id( tab.cur() )->subcategories );
+            recalc = true;
+        }
+        const int want_subtab = snap.take_selected_subtab();
+        if( want_subtab >= 0 ) {
+            subtab.set_index( want_subtab );
+            recalc = true;
+        }
+
+        const std::vector<std::string> actions = snap.take_actions();
+        if( actions.empty() && row < 0 && want_tab < 0 && want_subtab < 0 ) {
+            std::this_thread::sleep_for( std::chrono::milliseconds( 4 ) );
+            continue;
+        }
+        if( actions.empty() ) {
+            process_action( std::string(), ctxt );
+        } else {
+            for( const std::string &action : actions ) {
+                // The step table's expand intents are the panel's own strings,
+                // not crafting context actions; process_action would shrug at
+                // them, so they are applied here and the republish below shows
+                // the result.
+                if( handle_godot_step_action( action ) ) {
+                    continue;
+                }
+                process_action( action, ctxt );
+                if( done ) {
+                    break;
+                }
+            }
+        }
+        // An action that changes the tab, the filter or the batch mode only sets
+        // recalc; the recipes are rebuilt at the *top* of the next
+        // process_action. The ImGui loop always has a next one because it runs
+        // every frame, and this loop does not -- it wakes only when the panel
+        // asks for something. Without this, switching category published the
+        // previous category's list and looked like an empty one.
+        if( recalc && !done ) {
+            recalculate_recipes();
+        }
+        publish_to_godot();
+    }
+
+    snap.clear();
+    return true;
+}
+
+#endif // GODOT
+
 std::pair<Character *, const recipe *> select_crafter_and_crafting_recipe( int &batch_size_out,
         const recipe_id &goto_recipe, Character *crafter, std::string filterstring, bool camp_crafting,
         inventory *inventory_override )
@@ -2982,13 +3506,23 @@ std::pair<Character *, const recipe *> select_crafter_and_crafting_recipe( int &
     ctxt.set_timeout( 10 );
     impl.set_input_context( &ctxt );
 
-    while( !impl.is_done() ) {
-        ui_manager::redraw_invalidated();
-        std::string action = ctxt.handle_input();
-        if( !impl.get_is_open() ) {
-            return { nullptr, nullptr };
+#if defined(GODOT)
+    // The Godot panel drives the same crafting_ui_impl the ImGui window does, so
+    // the screen behaves identically either way; only the drawing and the input
+    // source differ. It declines when no panel is attending.
+    const bool drawn_by_godot = impl.run_in_godot( ctxt );
+#else
+    const bool drawn_by_godot = false;
+#endif
+    if( !drawn_by_godot ) {
+        while( !impl.is_done() ) {
+            ui_manager::redraw_invalidated();
+            std::string action = ctxt.handle_input();
+            if( !impl.get_is_open() ) {
+                return { nullptr, nullptr };
+            }
+            impl.process_action( action, ctxt );
         }
-        impl.process_action( action, ctxt );
     }
 
     batch_size_out = impl.get_batch_size();

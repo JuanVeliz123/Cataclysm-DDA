@@ -1,0 +1,70 @@
+{
+  "//": [
+    "Palette-swap variants for the Godot renderer (SP-8).",
+    "",
+    "A sprite drawn through a palette is treated as a grayscale master: the",
+    "shader takes each texel's luminance and looks it up in a colour ramp. So a",
+    "creature that differs from another only in colour needs no sprite of its",
+    "own -- it needs a redirect and six hex values.",
+    "",
+    "That is not a hypothetical saving. UltimateCataclysm ships art for 134 of",
+    "the game's 195 zombie types, and a large share of the missing 61 are the",
+    "'dusted' and 'fungalize' families: the same creature, coated in fungal",
+    "spores. Before this they fell through the sprite chain to a generic",
+    "placeholder. Now they draw the creature they actually are, in the colour",
+    "the infection would make it.",
+    "",
+    "Fields:",
+    "  palettes[].id    referenced by variants[].palette",
+    "  palettes[].ramp  dark to light; sampled as a 1-D ramp, so entries are",
+    "                   interpolated and three is coarse where eight is smooth",
+    "  variants[].id      the tileset id being defined",
+    "  variants[].sprite  draw this id's sprite instead (optional)",
+    "  variants[].palette recolour through this palette (optional)",
+    "",
+    "A tileset may override this wholesale with its own godot_palettes.json in",
+    "its gfx directory; see godot_tileset_loader::load_palettes.",
+    "",
+    "This file is not game data. It sits beside data/shaders/ rather than under",
+    "data/json/, so the JSON loader never walks it and it needs no 'type'."
+  ],
+
+  "palettes": [
+    {
+      "//": "Dusted: coated in dry spores. Chalky, desaturated, slightly warm.",
+      "id": "fungal_dust",
+      "ramp": ["#171512", "#3b352c", "#655c4c", "#918673", "#bcb3a0", "#e4dfd2"]
+    },
+    {
+      "//": "Fungalizing: the bloom has taken hold. Grey-green, cold, damp.",
+      "id": "fungal_bloom",
+      "ramp": ["#111713", "#26362a", "#3f5a44", "#5e8462", "#8fb389", "#c6dcbb"]
+    },
+    {
+      "//": "Irradiated: sickly yellow-green with a hot highlight.",
+      "id": "irradiated",
+      "ramp": ["#14140a", "#33380f", "#5c661a", "#8f9a26", "#c3cc4a", "#eef29a"]
+    }
+  ],
+
+  "variants": [
+    { "id": "mon_zombie_dusted", "sprite": "mon_zombie", "palette": "fungal_dust" },
+    { "id": "mon_zombie_fungalize", "sprite": "mon_zombie", "palette": "fungal_bloom" },
+
+    { "id": "mon_zombie_acidic_dusted", "sprite": "mon_zombie_acidic", "palette": "fungal_dust" },
+    { "id": "mon_zombie_acidic_fungalize", "sprite": "mon_zombie_acidic", "palette": "fungal_bloom" },
+
+    { "id": "mon_zombie_brute_dusted", "sprite": "mon_zombie_brute", "palette": "fungal_dust" },
+    { "id": "mon_zombie_brute_fungal", "sprite": "mon_zombie_brute", "palette": "fungal_bloom" },
+    { "id": "mon_zombie_brute_fungalize", "sprite": "mon_zombie_brute", "palette": "fungal_bloom" },
+
+    { "id": "mon_zombie_child_dusted", "sprite": "mon_zombie_child", "palette": "fungal_dust" },
+    { "id": "mon_zombie_child_fungalize", "sprite": "mon_zombie_child", "palette": "fungal_bloom" },
+
+    { "id": "mon_zombie_crawler_dusted", "sprite": "mon_zombie_crawler", "palette": "fungal_dust" },
+    { "id": "mon_zombie_crawler_fungalize", "sprite": "mon_zombie_crawler", "palette": "fungal_bloom" },
+
+    { "id": "mon_zombie_fat_dusted", "sprite": "mon_zombie_fat", "palette": "fungal_dust" },
+    { "id": "mon_zombie_fat_fungalize", "sprite": "mon_zombie_fat", "palette": "fungal_bloom" }
+  ]
+}

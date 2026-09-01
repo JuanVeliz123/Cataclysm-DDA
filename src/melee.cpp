@@ -84,6 +84,10 @@
 #include "weakpoint.h"
 #include "weighted_list.h"
 
+#if defined(GODOT)
+#include "godot_anim_snapshot.h"
+#endif
+
 static const anatomy_id anatomy_human_anatomy( "human_anatomy" );
 
 static const bionic_id bio_cqb( "bio_cqb" );
@@ -700,6 +704,14 @@ bool Character::melee_attack_abstract( Creature &t, bool allow_special,
         }
     }
 
+#if defined(GODOT)
+    // After every return that means no attack happens -- unreachable target,
+    // broken legs, the mech branch (a mech's swing is the mounted monster's to
+    // publish), the unwieldy-weapon and slow-attack bail-outs. One event per
+    // call, re-entries included: the renderer restarts the clip, which is what
+    // repeated swings look like.
+    godot_backend::note_creature_swing( *this, t );
+#endif
     const bool hits = hit_spread >= 0;
 
     if( monster *m = t.as_monster() ) {

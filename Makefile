@@ -36,6 +36,12 @@
 #  make TILES=1
 # Sound (requires SDL, so TILES must be enabled)
 #  make TILES=1 SOUND=1
+# Godot GDExtension backend (mutually exclusive with TILES/SOUND)
+#  make GODOT=1                                  # macOS / Linux, native
+#  make GODOT=1 CROSS=x86_64-w64-mingw32-        # Windows, cross from Linux
+#  make GODOT=1 GODOT_CPP_DIR=/path/to/godot-cpp
+#  Build the bindings first: ./build-scripts/get-godot-cpp.sh
+#  See doc/c++/COMPILING-GODOT.md
 # Disable gettext, on some platforms the dependencies are hard to wrangle.
 #  make LOCALIZE=0
 # Disable backtrace support, not available on all platforms
@@ -225,6 +231,11 @@ ifndef TESTS
   TESTS = 1
 endif
 
+# Godot extension builds skip the normal test executable
+ifeq ($(GODOT), 1)
+  TESTS = 0
+endif
+
 # Disable running tests by default
 ifndef RUNTESTS
   RUNTESTS = 0
@@ -331,11 +342,12 @@ endif
 # when preprocessor defines change, but the source doesn't
 ODIR = $(BUILD_PREFIX)obj
 ODIRTILES = $(BUILD_PREFIX)obj/tiles
+ODIRGODOT = $(BUILD_PREFIX)obj/godot
 W32ODIR = $(BUILD_PREFIX)objwin
 W32ODIRTILES = $(W32ODIR)/tiles
 
 ifdef AUTO_BUILD_PREFIX
-  BUILD_PREFIX = $(if $(RELEASE),release-)$(if $(DEBUG_SYMBOLS),symbol-)$(if $(TILES),tiles-)$(if $(SOUND),sound-)$(if $(LOCALIZE),local-)$(if $(BACKTRACE),back-$(if $(LIBBACKTRACE),libbacktrace-))$(if $(SANITIZE),sanitize-)$(if $(USE_XDG_DIR),xdg-)$(if $(USE_HOME_DIR),home-)$(if $(DYNAMIC_LINKING),dynamic-)$(if $(MSYS2),msys2-)
+  BUILD_PREFIX = $(if $(RELEASE),release-)$(if $(DEBUG_SYMBOLS),symbol-)$(if $(TILES),tiles-)$(if $(GODOT),godot-)$(if $(SOUND),sound-)$(if $(LOCALIZE),local-)$(if $(BACKTRACE),back-$(if $(LIBBACKTRACE),libbacktrace-))$(if $(SANITIZE),sanitize-)$(if $(USE_XDG_DIR),xdg-)$(if $(USE_HOME_DIR),home-)$(if $(DYNAMIC_LINKING),dynamic-)$(if $(MSYS2),msys2-)
   export BUILD_PREFIX
 endif
 
@@ -405,12 +417,19 @@ else
     OS_LINKER := $(CXX)
   endif
   # Appears that the default value of $LD is unsuitable on most systems
+  # CC has to be set too, or it keeps make's built-in default of plain `cc`.
+  # Natively that is the same compiler, but under CROSS= it silently builds every
+  # C source (cata_allocator_c.c, the bundled zstd) with the *host* compiler, and
+  # the mismatch only surfaces as an unreadable pile of linker errors.
+  # The clang branch above already does this.
   ifeq ($(CCACHE), 1)
     CXX = $(CCACHEBIN) $(CROSS)$(OS_COMPILER)
     LD  = $(CCACHEBIN) $(CROSS)$(OS_LINKER)
+    CC  = $(CCACHEBIN) $(CROSS)$(subst g++,gcc,$(OS_COMPILER))
   else
     CXX = $(CROSS)$(OS_COMPILER)
     LD  = $(CROSS)$(OS_LINKER)
+    CC  = $(CROSS)$(subst g++,gcc,$(OS_COMPILER))
   endif
   CXX_WARNINGS += -Wno-unknown-warning
   WARNINGS += -Wno-unknown-warning
@@ -784,7 +803,149 @@ ifneq ($(MAKECMDGOALS),)
     override SDL = 0
     override TILES = 0
     override SOUND = 0
+    override GODOT = 0
   endif
+endif
+
+# Godot GDExtension shared library. Mutually exclusive with SDL tiles.
+# Supported targets: macOS (NATIVE=osx), Linux (NATIVE=linux64) and Windows
+# (CROSS=x86_64-w64-mingw32- or MSYS2=1). See doc/c++/COMPILING-GODOT.md.
+ifeq ($(GODOT), 1)
+  ifeq ($(TILES), 1)
+    $(error GODOT=1 and TILES=1 cannot be used together)
+  endif
+  ifeq ($(SOUND), 1)
+    $(error GODOT=1 and SOUND=1 cannot be used together)
+  endif
+  override TILES = 0
+  override SOUND = 0
+  override SDL = 0
+  override SDL3 = 0
+
+  # godot-cpp names its archives per platform and sets a matching platform macro.
+  # Both have to agree with the target this Makefile is building for, otherwise
+  # the headers describe a different ABI than the archive provides.
+  ifeq ($(NATIVE), osx)
+    GODOT_PLATFORM = macos
+  else ifeq ($(TARGETSYSTEM),WINDOWS)
+    GODOT_PLATFORM = windows
+  else ifeq ($(TARGETSYSTEM),LINUX)
+    GODOT_PLATFORM = linux
+  else
+    $(error GODOT=1 does not support this target \(TARGETSYSTEM=$(TARGETSYSTEM)\); use NATIVE=osx, NATIVE=linux64, or CROSS=x86_64-w64-mingw32-)
+  endif
+
+  ifndef GODOT_ARCH
+    ifeq ($(GODOT_PLATFORM),macos)
+      # Prefer Apple Silicon even when the shell is running under Rosetta, so we
+      # match a native godot-cpp archive (filenames are not always trustworthy).
+      ifeq ($(shell sysctl -n hw.optional.arm64 2>/dev/null),1)
+        GODOT_ARCH = arm64
+      endif
+    endif
+  endif
+  ifndef GODOT_ARCH
+    ifneq ($(findstring aarch64,$(CXX_TARGET_MACHINE))$(findstring arm64,$(CXX_TARGET_MACHINE)),)
+      GODOT_ARCH = arm64
+    else ifneq ($(findstring x86_64,$(CXX_TARGET_MACHINE)),)
+      GODOT_ARCH = x86_64
+    else
+      $(error Unsupported compiler target for GODOT build: $(CXX_TARGET_MACHINE))
+    endif
+  endif
+
+  # godot-cpp exports DEBUG_ENABLED and HOT_RELOAD_ENABLED from template_debug
+  # and neither from template_release. Those macros change header-inline code
+  # (wrapped.hpp swaps thread_local for plain statics, error_macros.hpp changes
+  # shape), so the extension must be compiled with the same set.
+  ifeq ($(RELEASE), 1)
+    GODOT_CPP_TARGET = template_release
+    GODOT_BUILD_KIND = release
+  else
+    GODOT_CPP_TARGET = template_debug
+    GODOT_BUILD_KIND = debug
+    DEFINES += -DDEBUG_ENABLED -DHOT_RELOAD_ENABLED
+  endif
+
+  DEFINES += -DGODOT -DGDEXTENSION
+  CXXFLAGS += -fPIC
+  CFLAGS += -fPIC
+
+  ifeq ($(GODOT_PLATFORM),macos)
+    DEFINES += -DMACOS_ENABLED -DUNIX_ENABLED
+    LDFLAGS += -framework SystemConfiguration
+    # -arch is Apple-clang only. Force the selected arch so Rosetta shells don't
+    # silently build x86_64.
+    CXXFLAGS += -arch $(GODOT_ARCH)
+    CFLAGS += -arch $(GODOT_ARCH)
+    LDFLAGS += -arch $(GODOT_ARCH)
+    GODOT_TARGET_NAME = libcataclysm-godot.dylib
+    GODOT_LINK_FLAGS = -dynamiclib
+  else ifeq ($(GODOT_PLATFORM),linux)
+    DEFINES += -DLINUX_ENABLED -DUNIX_ENABLED
+    GODOT_TARGET_NAME = libcataclysm-godot.linux.$(GODOT_BUILD_KIND).$(GODOT_ARCH).so
+    GODOT_LINK_FLAGS = -shared
+  else
+    DEFINES += -DWINDOWS_ENABLED
+    # The WINDOWS block above adds a bare -static for the executable link; that
+    # conflicts with -shared, so keep only the runtime libraries static (which is
+    # also how godot-cpp builds itself: GODOTCPP_USE_STATIC_CPP defaults to ON).
+    LDFLAGS := $(filter-out -static,$(LDFLAGS))
+    LDFLAGS += -static-libgcc -static-libstdc++
+    # mingw-w64 puts the POSIX shims CDDA uses (clock_gettime in
+    # WORLD::create_timestamp) in libwinpthread; nothing links it implicitly with
+    # the win32 thread model.
+    LDFLAGS += -lwinpthread
+    GODOT_TARGET_NAME = libcataclysm-godot.windows.$(GODOT_BUILD_KIND).$(GODOT_ARCH).dll
+    # -Bstatic first so the -l flags that follow prefer the static archives.
+    # Without it the DLL ends up needing libwinpthread-1.dll and zlib1.dll beside
+    # it; the Windows system libraries are import stubs in .a form either way.
+    GODOT_LINK_FLAGS = -shared -Wl,-Bstatic
+  endif
+
+  GODOT_CPP_DIR ?= $(HOME)/godot-cpp
+  GODOT_CPP_LIB_NAME = libgodot-cpp.$(GODOT_PLATFORM).$(GODOT_CPP_TARGET).$(GODOT_ARCH).a
+  # build-scripts/get-godot-cpp.sh builds native archives into build/ and
+  # cross-compiled ones into build-<platform>-<arch>/. Accept either, or an
+  # explicit GODOT_CPP_BUILD_DIR.
+  ifdef GODOT_CPP_BUILD_DIR
+    GODOT_CPP_BUILD_DIRS = $(GODOT_CPP_BUILD_DIR)
+  else
+    GODOT_CPP_BUILD_DIRS = $(GODOT_CPP_DIR)/build $(GODOT_CPP_DIR)/build-$(GODOT_PLATFORM)-$(GODOT_ARCH)
+  endif
+  GODOT_CPP_LIB := $(firstword $(wildcard $(foreach d,$(GODOT_CPP_BUILD_DIRS),$(d)/bin/$(GODOT_CPP_LIB_NAME))))
+  ifeq ($(GODOT_CPP_LIB),)
+    ifeq ($(GODOT_PLATFORM),macos)
+      # Accept a misnamed archive whose object files are actually GODOT_ARCH.
+      GODOT_CPP_LIB := $(shell \
+        for f in $(foreach d,$(GODOT_CPP_BUILD_DIRS),$(d)/bin/libgodot-cpp.macos.$(GODOT_CPP_TARGET).*.a); do \
+          [ -f "$$f" ] || continue; \
+          obj=$$(ar -t "$$f" 2>/dev/null | grep '\.o$$' | head -1); \
+          [ -n "$$obj" ] || continue; \
+          tmp=$$(mktemp -t godotcppXXXXXX.o); \
+          ar -p "$$f" "$$obj" > "$$tmp" 2>/dev/null || { rm -f "$$tmp"; continue; }; \
+          archs=$$(lipo -archs "$$tmp" 2>/dev/null); \
+          rm -f "$$tmp"; \
+          echo "$$archs" | grep -qw "$(GODOT_ARCH)" && { echo "$$f"; break; }; \
+        done)
+    endif
+  endif
+  # Generated headers live beside the archive we actually picked.
+  ifneq ($(GODOT_CPP_LIB),)
+    GODOT_CPP_BUILD_DIR := $(patsubst %/bin/,%,$(dir $(GODOT_CPP_LIB)))
+  else
+    GODOT_CPP_BUILD_DIR := $(firstword $(GODOT_CPP_BUILD_DIRS))
+  endif
+  CXXFLAGS += -isystem $(GODOT_CPP_DIR)/include \
+    -isystem $(GODOT_CPP_BUILD_DIR)/gen/include \
+    -isystem $(GODOT_CPP_DIR)/gdextension \
+    -Igodot/extensions
+  LDFLAGS += $(GODOT_CPP_LIB)
+  TARGET = $(BUILD_PREFIX)$(GODOT_TARGET_NAME)
+  # Per-platform object dir. A shared obj/godot would let a Linux build's ELF
+  # objects be reused verbatim by a MinGW link (make only compares timestamps),
+  # which fails deep in the linker with nothing pointing at the real cause.
+  ODIR = $(ODIRGODOT)-$(GODOT_PLATFORM)-$(GODOT_ARCH)
 endif
 
 # SDL2 support was removed; SDL3 is the only tiles backend. SDL3=1 stays a
@@ -882,7 +1043,10 @@ ifeq ($(TILES), 1)
     TARGET = $(TILESTARGET)
     ODIR = $(ODIRTILES)
   endif
-else
+else ifneq ($(GODOT), 1)
+  # GODOT also leaves TILES unset, but its catacurses backend is
+  # godot_curses_backend.cpp and its ImGui backend is ImTui's text renderer, so
+  # it links no curses library at all.
   NCURSES_PREFIX = ncursesw
   # ONLY when not cross-compiling, check for pkg-config or ncurses5-config
   # When doing a cross-compile, we can't rely on the host machine's -configs
@@ -950,7 +1114,11 @@ endif
 
 # Global settings for Windows targets (at end)
 ifeq ($(TARGETSYSTEM),WINDOWS)
-  LDFLAGS += -lgdi32 -lwinmm -limm32 -lole32 -loleaut32 -lversion -lWindowsApp -lmincore -lBcrypt
+  # All lowercase: MSYS2 resolves -lWindowsApp / -lBcrypt only because its
+  # filesystem is case-insensitive, while a Linux MinGW-w64 sysroot ships
+  # libwindowsapp.a / libbcrypt.a and fails to find the mixed-case spellings.
+  # Lowercase works on both.
+  LDFLAGS += -lgdi32 -lwinmm -limm32 -lole32 -loleaut32 -lversion -lwindowsapp -lmincore -lbcrypt
   ifeq ($(BACKTRACE),1)
     LDFLAGS += -ldbghelp
   endif
@@ -1069,6 +1237,14 @@ IMGUI_SOURCES = $(IMGUI_DIR)/imgui.cpp $(IMGUI_DIR)/imgui_demo.cpp $(IMGUI_DIR)/
 ifeq ($(SDL), 1)
 	IMGUI_SOURCES += $(IMGUI_DIR)/imgui_freetype.cpp
 	IMGUI_SOURCES += $(IMGUI_DIR)/imgui_impl_sdl3.cpp $(IMGUI_DIR)/imgui_impl_sdlrenderer3.cpp
+else ifeq ($(GODOT), 1)
+	# Match CMake: link ImTui for cata_imgui's TUI path, but do not define
+	# IMTUI globally (that would hide cursesport under GODOT).
+	# Only the text backend: cata_imgui.cpp's GODOT path never calls
+	# ImTui_ImplNcurses_*, so leaving that TU out keeps the Godot build free of
+	# any curses dependency (and needs no PDCurses on Windows).
+	IMTUI_SOURCES = $(IMTUI_DIR)/imtui-impl-text.cpp
+	IMGUI_SOURCES += $(IMTUI_SOURCES)
 else
 	IMGUI_SOURCES += $(IMTUI_DIR)/imtui-impl-ncurses.cpp $(IMTUI_DIR)/imtui-impl-text.cpp
 	DEFINES += -DIMTUI
@@ -1076,14 +1252,46 @@ endif
 
 SOURCES += $(IMGUI_SOURCES)
 
+ifeq ($(GODOT), 1)
+  # SDL renders nothing here -- the library links no SDL at all. These two were
+  # still being compiled and contributed empty objects: everything in them is
+  # behind #ifdef TILES, so they defined no symbols and nothing referenced them.
+  # The connection geometry the Godot backend did need from cata_tiles now lives
+  # in tile_connections.cpp, which both backends share.
+  GODOT_EXCLUDE_SOURCES = \
+    $(SRC_DIR)/main.cpp \
+    $(SRC_DIR)/sdltiles.cpp \
+    $(SRC_DIR)/sdl_font.cpp \
+    $(SRC_DIR)/sdl_geometry.cpp \
+    $(SRC_DIR)/sdl_wrappers.cpp \
+    $(SRC_DIR)/sdl_utils.cpp \
+    $(SRC_DIR)/sdl_gamepad.cpp \
+    $(SRC_DIR)/sdlsound.cpp \
+    $(SRC_DIR)/sound_backend_sdl2.cpp \
+    $(SRC_DIR)/sound_backend_sdl3.cpp \
+    $(SRC_DIR)/pixel_minimap.cpp \
+    $(SRC_DIR)/tileset_loader.cpp \
+    $(SRC_DIR)/cata_tiles.cpp \
+    $(SRC_DIR)/cata_shader.cpp
+  SOURCES := $(filter-out $(GODOT_EXCLUDE_SOURCES),$(SOURCES))
+  GODOT_EXT_SRC = godot/extensions/godot_ext.cpp
+endif
+
 CPP_SOURCES := $(filter %.cpp,$(SOURCES))
 CC_SOURCES := $(filter %.cc,$(SOURCES))
 _OBJS = $(CPP_SOURCES:$(SRC_DIR)/%.cpp=%.o)
 _OBJS += $(CC_SOURCES:$(SRC_DIR)/%.cc=%.o)
 _OBJS += $(C_SOURCES:$(SRC_DIR)/%.c=%.o)
+ifeq ($(GODOT), 1)
+  _OBJS += godot_ext.o
+endif
 ifeq ($(TARGETSYSTEM),WINDOWS)
-  RSRC = $(wildcard $(SRC_DIR)/*.rc)
-  _OBJS += $(RSRC:$(SRC_DIR)/%.rc=%.o)
+  # The icon/manifest resources describe an executable; a GDExtension DLL is
+  # loaded by the Godot host and has no use for them.
+  ifneq ($(GODOT), 1)
+    RSRC = $(wildcard $(SRC_DIR)/*.rc)
+    _OBJS += $(RSRC:$(SRC_DIR)/%.rc=%.o)
+  endif
 endif
 ifeq ($(HEADERPOPULARITY), 1)
 	OBJS = $(patsubst %,$(ODIR)/%,$(_OBJS))
@@ -1175,14 +1383,51 @@ endif
 
 LDFLAGS += -lz
 
+ifeq ($(GODOT), 1)
+all: version $(TARGET)
+	@
+else
 all: version prefix $(CHECKS) $(TARGET) $(L10N) $(TESTSTARGET) $(ZZIP_BIN) $(SHADERS_STAMP)
 	@
+endif
 
 ifeq ($(TILES), 1)
 $(SHADERS_STAMP): $(SHADERS_SRC) tools/build_shaders.py
 	python3 tools/build_shaders.py --shader-dir $(SHADERS_DIR) --formats $(BUILD_SHADER_FORMATS) --stamp $@
 endif
 
+.PHONY: check-godot-cpp
+check-godot-cpp:
+	@test -n "$(GODOT_CPP_LIB)" -a -f "$(GODOT_CPP_LIB)" || ( \
+	  echo "error: $(GODOT_CPP_LIB_NAME) not found under:"; \
+	  for d in $(GODOT_CPP_BUILD_DIRS); do echo "         $$d/bin/"; done; \
+	  echo "Build it with:"; \
+	  echo "  ./build-scripts/get-godot-cpp.sh --platform $(GODOT_PLATFORM) --arch $(GODOT_ARCH) --target $(GODOT_CPP_TARGET)"; \
+	  echo "or set GODOT_CPP_DIR / GODOT_CPP_BUILD_DIR / GODOT_ARCH."; \
+	  exit 1 )
+
+ifeq ($(GODOT), 1)
+$(TARGET): check-godot-cpp $(OBJS)
+	+$(LD) $(GODOT_LINK_FLAGS) -o $(TARGET) $(OBJS) $(LDFLAGS)
+	mkdir -p godot/bin
+	# Install under the unprefixed name so it matches cataclysm.gdextension even
+	# when BUILD_PREFIX mangles $(TARGET).
+	#
+	# Write-then-rename, not a plain cp. `cp` rewrites the file in place, which
+	# invalidates the pages of any process that has it mmapped -- a running Godot
+	# then takes SIGBUS at whatever it touches next. That looks exactly like
+	# memory corruption and is not: it is just a build landing under a live
+	# process. rename() is atomic and leaves the old inode intact for anyone
+	# still holding it.
+	# The temp name is unique per build: two builds against the same checkout
+	# would otherwise write the same .new file and rename each other's
+	# half-copied bytes into place.
+	#
+	# Both commands must be one recipe line. make runs each line in its own
+	# shell, so $$ -- the shell's pid -- differs between them, and a two-line
+	# version renames a file the other shell never created.
+	cp $(TARGET) godot/bin/$(GODOT_TARGET_NAME).new.$$$$ && mv -f godot/bin/$(GODOT_TARGET_NAME).new.$$$$ godot/bin/$(GODOT_TARGET_NAME)
+else
 $(TARGET): $(OBJS) $(SHADERS_STAMP)
 	+$(LD) $(W32FLAGS) -o $(TARGET) $(OBJS) $(LDFLAGS)
 ifeq ($(RELEASE), 1)
@@ -1193,6 +1438,7 @@ ifeq ($(RELEASE), 1)
       endif
     endif
   endif
+endif
 endif
 
 $(PCH_P): $(PCH_H)
@@ -1241,7 +1487,27 @@ includes: $(OBJS:.o=.inc)
 	+make -C tests includes
 
 $(ODIR)/third-party/%.o: $(SRC_DIR)/third-party/%.cpp
+ifeq ($(GODOT), 1)
+	$(COMPILE.cc) $(OUTPUT_OPTION) -w $(if $(findstring /imgui/,$@),-DIMTUI) $(if $(findstring /imtui/,$@),-DIMTUI) -MMD -MP $<
+else
 	$(COMPILE.cc) $(OUTPUT_OPTION) -w -MMD -MP $<
+endif
+
+# Header dependency generation, as a separate pass without the PCH.
+#
+# GCC emits no header dependencies at all for a translation unit compiled with
+# `-include <pch>`: the .d lists only the .cpp and the PCH itself. Header edits
+# then never trigger a rebuild of anything that includes them, which silently
+# produces binaries built from mismatched class layouts -- they compile and link
+# cleanly and corrupt memory at runtime. -fpch-deps does not help.
+#
+# Preprocessing a second time without the PCH is the only way to get correct
+# dependencies while keeping the PCH's speed, and it is cheap: measured here at
+# 0.07s against a 4.0s compile, so under 2%.
+#
+# Rules that do not use PCHFLAGS (third-party, C sources) keep plain -MMD, which
+# works correctly there.
+DEPGEN.cc = $(CXX) $(CXXFLAGS) $(CPPFLAGS) -w -MM -MP
 
 $(ODIR)/third-party/%.o: $(SRC_DIR)/third-party/%.cc
 	$(COMPILE.cc) $(OUTPUT_OPTION) -w -MMD -MP $<
@@ -1249,14 +1515,22 @@ $(ODIR)/third-party/%.o: $(SRC_DIR)/third-party/%.cc
 $(ODIR)/third-party/%.o: $(SRC_DIR)/third-party/%.c
 	$(COMPILE.c) $(OUTPUT_OPTION) -x c $(CFLAGS) -w -MMD -MP $<
 
-$(ODIR)/%.o: $(SRC_DIR)/%.cpp $(PCH_P)
-	$(COMPILE.cc) $(OUTPUT_OPTION) $(PCHFLAGS) -MMD -MP $<
+# Header dependencies need their own pass; see DEPGEN.cc below.
+$(ODIR)/%.o: $(SRC_DIR)/%.cpp $(PCH_P) Makefile
+	$(COMPILE.cc) $(OUTPUT_OPTION) $(PCHFLAGS) $<
+	@$(DEPGEN.cc) -MT $@ -MF $(@:.o=.d) $<
 
 $(ODIR)/%.o: $(SRC_DIR)/%.c
 	$(COMPILE.c) $(OUTPUT_OPTION) -x c $(CFLAGS) -MMD -MP $<
 
 $(ODIR)/%.o: $(SRC_DIR)/%.rc
 	$(RC) $(RFLAGS) $< -o $@
+
+ifeq ($(GODOT), 1)
+$(ODIR)/godot_ext.o: $(GODOT_EXT_SRC) $(PCH_P) Makefile
+	$(COMPILE.cc) $(OUTPUT_OPTION) $(PCHFLAGS) $<
+	@$(DEPGEN.cc) -MT $@ -MF $(@:.o=.d) $<
+endif
 
 $(ODIR)/resource.o: data/cataicon.ico data/application_manifest.xml
 
@@ -1289,6 +1563,10 @@ json-check: $(CHKJSON_BIN)
 clean: clean-tests clean-lang
 	rm -rf *$(TARGET_NAME) *$(TILES_TARGET_NAME)
 	rm -rf *$(TILES_TARGET_NAME).exe *$(TARGET_NAME).exe *$(TARGET_NAME).a
+	rm -f libcataclysm-godot.dylib *libcataclysm-godot.dylib
+	rm -f libcataclysm-godot.*.so *libcataclysm-godot.*.so
+	rm -f libcataclysm-godot.*.dll *libcataclysm-godot.*.dll
+	rm -rf godot/bin
 	rm -rf *obj *objwin
 	rm -rf *$(BINDIST_DIR) *cataclysmdda-*.tar.gz *cataclysmdda-*.zip
 	rm -f $(SRC_DIR)/version.h $(SRC_DIR)/prefix.h

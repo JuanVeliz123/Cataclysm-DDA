@@ -29,6 +29,9 @@
 #include "ui_manager.h"
 #include "uilist.h"
 #include "cata_imgui.h"
+#if defined(GODOT)
+#include "godot_color_manager_snapshot.h"
+#endif
 
 nc_color::operator ImVec4() const
 {
@@ -833,6 +836,202 @@ static void draw_header( const catacurses::window &w )
     wnoutrefresh( w );
 }
 
+void color_manager::gui_pick_custom_color( const int row, const int col )
+{
+    uilist ui_colors;
+
+    const color_manager::color_struct &entry = std::next( gui_name_color_map.begin(), row )->second;
+
+    std::string sColorType = _( "Normal" );
+    std::string sSelected = entry.name_custom;
+
+    if( col == 2 ) {
+        sColorType = _( "Invert" );
+        sSelected = entry.name_invert_custom;
+    }
+
+    ui_colors.text = string_format( _( "Custom %s color:" ), sColorType );
+
+    int i = 0;
+    for( auto &iter : gui_name_color_map ) {
+        std::string sColor = iter.first;
+        std::string sType = _( "default" );
+
+        std::string name_custom;
+
+        if( sSelected == sColor ) {
+            ui_colors.selected = i;
+        }
+
+        if( !iter.second.name_custom.empty() ) {
+            name_custom = " <color_" + iter.second.name_custom + ">" + iter.second.name_custom + "</color>";
+        }
+
+        ui_colors.addentry( string_format( "%-17s <color_%s>%s</color>%s", iter.first,
+                                           sColor, sType, name_custom ) );
+
+        i++;
+    }
+
+    ui_colors.query();
+
+    if( ui_colors.ret >= 0 && static_cast<size_t>( ui_colors.ret ) < gui_name_color_map.size() ) {
+        gui_stuff_changed = true;
+
+        auto iter = gui_name_color_map.begin();
+        std::advance( iter, ui_colors.ret );
+
+        color_manager::color_struct &target = std::next( gui_name_color_map.begin(), row )->second;
+
+        if( col == 1 ) {
+            target.name_custom = iter->first;
+        } else if( col == 2 ) {
+            target.name_invert_custom = iter->first;
+        }
+    }
+
+    finalize(); // Need to recalculate caches
+}
+
+void color_manager::gui_remove_custom_color( const int row, const int col )
+{
+    color_manager::color_struct &entry = std::next( gui_name_color_map.begin(), row )->second;
+
+    if( col == 1 && !entry.name_custom.empty() ) {
+        gui_stuff_changed = true;
+        entry.name_custom.clear();
+    } else if( col == 2 && !entry.name_invert_custom.empty() ) {
+        gui_stuff_changed = true;
+        entry.name_invert_custom.clear();
+    }
+
+    finalize(); // Need to recalculate caches
+}
+
+void color_manager::gui_load_template()
+{
+    auto vFiles = get_files_from_path( ".json", PATH_INFO::color_templates(), false, true );
+
+    if( !vFiles.empty() ) {
+        uilist ui_templates;
+        ui_templates.text = _( "Color templates:" );
+
+        for( const cata_path &file : vFiles ) {
+            ui_templates.addentry( file.get_relative_path().filename().generic_u8string() );
+        }
+
+        ui_templates.query();
+
+        if( ui_templates.ret >= 0 && static_cast<size_t>( ui_templates.ret ) < vFiles.size() ) {
+            gui_stuff_changed = true;
+
+            clear();
+
+            load_default();
+            load_custom( vFiles[ui_templates.ret] );
+
+            gui_name_color_map.clear();
+            for( const auto &pr : name_map ) {
+                gui_name_color_map[pr.first] = color_array[pr.second];
+            }
+        }
+    }
+
+    finalize(); // Need to recalculate caches
+}
+
+void color_manager::gui_load_base_colors()
+{
+    auto vFiles = get_files_from_path( ".json", PATH_INFO::color_themes(), false, true );
+
+    if( !vFiles.empty() ) {
+        uilist ui_templates;
+        ui_templates.text = _( "Color themes:" );
+
+        for( const cata_path &filename : vFiles ) {
+            ui_templates.addentry( filename.get_relative_path().filename().generic_u8string() );
+        }
+
+        ui_templates.query();
+
+        if( ui_templates.ret >= 0 && static_cast<size_t>( ui_templates.ret ) < vFiles.size() ) {
+            copy_file( vFiles[ui_templates.ret], PATH_INFO::base_colors() );
+        }
+    }
+}
+
+#if defined(GODOT)
+void color_manager::gui_publish_to_godot()
+{
+    using snapshot = godot_backend::ColorManagerSnapshot;
+    snapshot::data d;
+    d.title = _( "Color manager" );
+    d.rows.reserve( gui_name_color_map.size() );
+    for( const auto &pr : gui_name_color_map ) {
+        const color_struct &entry = pr.second;
+        snapshot::row r;
+        r.name = pr.first;
+
+        r.normal.has_custom = !entry.name_custom.empty();
+        r.normal.label = r.normal.has_custom ? entry.name_custom : _( "default" );
+        r.normal.color_name = string_from_color( r.normal.has_custom ?
+                              gui_name_color_map[entry.name_custom].color : entry.color );
+
+        r.invert.has_custom = !entry.name_invert_custom.empty();
+        r.invert.label = r.invert.has_custom ? entry.name_invert_custom : _( "default" );
+        r.invert.color_name = string_from_color( r.invert.has_custom ?
+                              gui_name_color_map[entry.name_invert_custom].color : entry.invert );
+
+        d.rows.push_back( std::move( r ) );
+    }
+
+    godot_backend::get_color_manager_snapshot().publish( d );
+}
+
+bool color_manager::gui_run_in_godot()
+{
+    godot_backend::ColorManagerSnapshot &snap = godot_backend::get_color_manager_snapshot();
+    snap.clear();
+    gui_publish_to_godot();
+    while( true ) {
+        int row = -1;
+        int col = -1;
+        const std::string action = snap.next_action( row, col );
+        if( action.empty() ) {
+            // No panel attended; the caller runs the legacy ImGui loop.
+            snap.clear();
+            return false;
+        }
+        if( action == "QUIT" ) {
+            break;
+        }
+        if( action == "GODOT_TEMPLATE" ) {
+            // The file-list uilist is already a Godot panel, but this
+            // channel must still get out of its way -- same move
+            // AutoNoteSnapshot's GODOT_SYMBOL makes for its nested popups.
+            snap.set_suspended( true );
+            gui_load_template();
+            snap.set_suspended( false );
+        } else if( action == "GODOT_THEME" ) {
+            snap.set_suspended( true );
+            gui_load_base_colors();
+            snap.set_suspended( false );
+        } else if( row >= 0 && row < static_cast<int>( gui_name_color_map.size() ) ) {
+            if( action == "GODOT_PICK" ) {
+                snap.set_suspended( true );
+                gui_pick_custom_color( row, col );
+                snap.set_suspended( false );
+            } else if( action == "GODOT_REMOVE" ) {
+                gui_remove_custom_color( row, col );
+            }
+        }
+        gui_publish_to_godot();
+    }
+    snap.clear();
+    return true;
+}
+#endif // GODOT
+
 void color_manager::show_gui()
 {
     const int iHeaderHeight = 4;
@@ -850,18 +1049,25 @@ void color_manager::show_gui()
     catacurses::window w_colors;
 
     ui_adaptor ui;
-    const auto init_windows = [&]( ui_adaptor & ui ) {
+    // Registered lazily rather than called directly (the `medical_ui`/`bp`
+    // move's sibling for window setup): under GODOT, FULL_SCREEN_WIDTH/HEIGHT
+    // are never initialized (that happens in main.cpp's terminal-size
+    // negotiation, which the GODOT backend does not run), so an eager
+    // full_screen_window() call here throws before the Godot takeover ever
+    // gets a chance to decline. `on_screen_resize` + `mark_resize()` -- the
+    // same pattern auto_note and distraction_manager use -- only builds these
+    // windows when the legacy ImGui loop actually redraws, which never
+    // happens once a panel attends.
+    ui.on_screen_resize( [&]( ui_adaptor & ui ) {
         ui_helpers::full_screen_window( ui, &w_colors, &w_colors_border, &w_colors_header, nullptr,
                                         &iContentHeight, 1, iHeaderHeight, 0 );
-    };
-    init_windows( ui );
-    ui.on_screen_resize( init_windows );
+    } );
+    ui.mark_resize();
 
     int iCurrentLine = 0;
     int iCurrentCol = 1;
     int iStartPos = 0;
     const int iMaxColors = color_array.size();
-    bool bStuffChanged = false;
     input_context ctxt( "COLORS" );
     ctxt.register_navigate_ui_list();
     ctxt.register_leftright();
@@ -872,11 +1078,25 @@ void color_manager::show_gui()
     ctxt.register_action( "LOAD_BASE_COLORS" );
     ctxt.register_action( "HELP_KEYBINDINGS" );
 
-    std::map<std::string, color_struct> name_color_map;
-
+    gui_name_color_map.clear();
+    gui_stuff_changed = false;
     for( const auto &pr : name_map ) {
-        name_color_map[pr.first] = color_array[pr.second];
+        gui_name_color_map[pr.first] = color_array[pr.second];
     }
+    std::map<std::string, color_struct> &name_color_map = gui_name_color_map;
+
+    // Same loop-split takeover as the rest of the migrated menus. It
+    // declines when no panel is attending, and the legacy ImGui loop below
+    // runs instead -- the "show_legacy() plus a shared epilogue" split
+    // options/keybindings and auto_note used. Either way `gui_name_color_map`
+    // and `gui_stuff_changed` are left exactly as the interactive part would
+    // have left them, so the "Save changes?" epilogue at the bottom of this
+    // function runs unmodified regardless of which loop produced the changes.
+    bool godot_handled = false;
+#if defined(GODOT)
+    godot_handled = gui_run_in_godot();
+#endif
+    if( !godot_handled ) {
 
     ui.on_redraw( [&]( const ui_adaptor & ) {
         draw_border( w_colors_border, BORDER_COLOR, _( "Color manager" ) );
@@ -952,129 +1172,19 @@ void color_manager::show_gui()
         } else if( action == "LEFT" || action == "RIGHT" ) {
             iCurrentCol = inc_clamp_wrap( iCurrentCol, 1, iTotalCols );
         } else if( action == "REMOVE_CUSTOM" ) {
-            color_manager::color_struct &entry = std::next( name_color_map.begin(), iCurrentLine )->second;
-
-            if( iCurrentCol == 1 && !entry.name_custom.empty() ) {
-                bStuffChanged = true;
-                entry.name_custom.clear();
-
-            } else if( iCurrentCol == 2 && !entry.name_invert_custom.empty() ) {
-                bStuffChanged = true;
-                entry.name_invert_custom.clear();
-
-            }
-
-            finalize(); // Need to recalculate caches
-
+            gui_remove_custom_color( iCurrentLine, iCurrentCol );
         } else if( action == "LOAD_TEMPLATE" ) {
-            auto vFiles = get_files_from_path( ".json", PATH_INFO::color_templates(), false, true );
-
-            if( !vFiles.empty() ) {
-                uilist ui_templates;
-                ui_templates.text = _( "Color templates:" );
-
-                for( const cata_path &file : vFiles ) {
-                    ui_templates.addentry( file.get_relative_path().filename().generic_u8string() );
-                }
-
-                ui_templates.query();
-
-                if( ui_templates.ret >= 0 && static_cast<size_t>( ui_templates.ret ) < vFiles.size() ) {
-                    bStuffChanged = true;
-
-                    clear();
-
-                    load_default();
-                    load_custom( vFiles[ui_templates.ret] );
-
-                    name_color_map.clear();
-                    for( const auto &pr : name_map ) {
-                        name_color_map[pr.first] = color_array[pr.second];
-                    }
-                }
-            }
-
-            finalize(); // Need to recalculate caches
-
+            gui_load_template();
         } else if( action == "LOAD_BASE_COLORS" ) {
-            auto vFiles = get_files_from_path( ".json", PATH_INFO::color_themes(), false, true );
-
-            if( !vFiles.empty() ) {
-                uilist ui_templates;
-                ui_templates.text = _( "Color themes:" );
-
-                for( const cata_path &filename : vFiles ) {
-                    ui_templates.addentry( filename.get_relative_path().filename().generic_u8string() );
-                }
-
-                ui_templates.query();
-
-                if( ui_templates.ret >= 0 && static_cast<size_t>( ui_templates.ret ) < vFiles.size() ) {
-                    copy_file( vFiles[ui_templates.ret], PATH_INFO::base_colors() );
-                }
-            }
+            gui_load_base_colors();
         } else if( action == "CONFIRM" ) {
-            uilist ui_colors;
-
-            const color_manager::color_struct &entry = std::next( name_color_map.begin(),
-                    iCurrentLine )->second;
-
-            std::string sColorType = _( "Normal" );
-            std::string sSelected = entry.name_custom;
-
-            if( iCurrentCol == 2 ) {
-                sColorType = _( "Invert" );
-                sSelected = entry.name_invert_custom;
-
-            }
-
-            ui_colors.text = string_format( _( "Custom %s color:" ), sColorType );
-
-            int i = 0;
-            for( auto &iter : name_color_map ) {
-                std::string sColor = iter.first;
-                std::string sType = _( "default" );
-
-                std::string name_custom;
-
-                if( sSelected == sColor ) {
-                    ui_colors.selected = i;
-                }
-
-                if( !iter.second.name_custom.empty() ) {
-                    name_custom = " <color_" + iter.second.name_custom + ">" + iter.second.name_custom + "</color>";
-                }
-
-                ui_colors.addentry( string_format( "%-17s <color_%s>%s</color>%s", iter.first,
-                                                   sColor, sType, name_custom ) );
-
-                i++;
-            }
-
-            ui_colors.query();
-
-            if( ui_colors.ret >= 0 && static_cast<size_t>( ui_colors.ret ) < name_color_map.size() ) {
-                bStuffChanged = true;
-
-                auto iter = name_color_map.begin();
-                std::advance( iter, ui_colors.ret );
-
-                color_manager::color_struct &entry = std::next( name_color_map.begin(), iCurrentLine )->second;
-
-                if( iCurrentCol == 1 ) {
-                    entry.name_custom = iter->first;
-
-                } else if( iCurrentCol == 2 ) {
-                    entry.name_invert_custom = iter->first;
-
-                }
-            }
-
-            finalize(); // Need to recalculate caches
+            gui_pick_custom_color( iCurrentLine, iCurrentCol );
         }
     }
 
-    if( bStuffChanged && query_yn( _( "Save changes?" ) ) ) {
+    } // if( !godot_handled )
+
+    if( gui_stuff_changed && query_yn( _( "Save changes?" ) ) ) {
         for( const auto &pr : name_color_map ) {
             color_id id = name_to_id( pr.first );
             color_array[id].name_custom = pr.second.name_custom;
