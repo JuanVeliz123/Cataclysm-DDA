@@ -89,22 +89,29 @@ target_link_libraries(
         )
 
 # ImGUI
-if (TILES)
-        set(_imgui_backend_sources
-            imgui/imgui_impl_sdl3.cpp
-            imgui/imgui_impl_sdl3.h
-            imgui/imgui_impl_sdlrenderer3.cpp
-            imgui/imgui_impl_sdlrenderer3.h
-            )
-        set(_imgui_freetype_sources "")
-        set(_imgui_freetype_libraries "")
-        if (NOT ANDROID)
-            find_package(Freetype REQUIRED)
-            set(_imgui_freetype_sources
-                imgui/imgui_freetype.cpp
-                imgui/imgui_freetype.h
+if (TILES OR GODOT)
+        if (TILES)
+            set(_imgui_backend_sources
+                imgui/imgui_impl_sdl3.cpp
+                imgui/imgui_impl_sdl3.h
+                imgui/imgui_impl_sdlrenderer3.cpp
+                imgui/imgui_impl_sdlrenderer3.h
                 )
-            set(_imgui_freetype_libraries Freetype::Freetype)
+            set(_imgui_freetype_sources "")
+            set(_imgui_freetype_libraries "")
+            if (NOT ANDROID)
+                find_package(Freetype REQUIRED)
+                set(_imgui_freetype_sources
+                    imgui/imgui_freetype.cpp
+                    imgui/imgui_freetype.h
+                    )
+                set(_imgui_freetype_libraries Freetype::Freetype)
+            endif ()
+        else ()
+            # Godot build: no SDL backends and no freetype dependency.
+            set(_imgui_backend_sources "")
+            set(_imgui_freetype_sources "")
+            set(_imgui_freetype_libraries "")
         endif ()
         add_library(
                 imgui
@@ -139,18 +146,26 @@ if (TILES)
                 -w
                 )
 
-        if (ANDROID)
-            target_link_libraries(imgui PUBLIC SDL3::SDL3)
-        elseif (NOT DYNAMIC_LINKING)
-            target_link_libraries(imgui PUBLIC
-                $<IF:$<TARGET_EXISTS:SDL3::SDL3-static>,SDL3::SDL3-static,SDL3::SDL3>
-                ${_imgui_freetype_libraries}
-            )
-        else()
-            target_link_libraries(imgui PUBLIC
-                SDL3::SDL3
-                ${_imgui_freetype_libraries}
-            )
+        if (GODOT)
+            # Encode ImTui codepoints in glyph vertex colors. PRIVATE so IMTUI
+            # does not leak into cataclysm-godot (cursesport.h).
+            target_compile_definitions( imgui PRIVATE IMTUI )
+        endif ()
+
+        if (TILES)
+            if (ANDROID)
+                target_link_libraries(imgui PUBLIC SDL3::SDL3)
+            elseif (NOT DYNAMIC_LINKING)
+                target_link_libraries(imgui PUBLIC
+                    $<IF:$<TARGET_EXISTS:SDL3::SDL3-static>,SDL3::SDL3-static,SDL3::SDL3>
+                    ${_imgui_freetype_libraries}
+                )
+            else()
+                target_link_libraries(imgui PUBLIC
+                    SDL3::SDL3
+                    ${_imgui_freetype_libraries}
+                )
+            endif ()
         endif ()
 
 
@@ -162,7 +177,7 @@ if (TILES)
 endif ()
 
 # ImTUI
-if (CURSES)
+if (CURSES OR GODOT)
         add_library(
                 imtui
                 STATIC
@@ -200,12 +215,34 @@ if (CURSES)
                 -w
                 )
 
-        target_compile_definitions(
-                imtui
-                PUBLIC
-                IMTUI
-                $<$<BOOL:${MSYS2}>:NCURSES_INTERNALS>
-        )
+        if (CURSES)
+            target_compile_definitions(
+                    imtui
+                    PUBLIC
+                    IMTUI
+                    $<$<BOOL:${MSYS2}>:NCURSES_INTERNALS>
+            )
+        else()
+            # GODOT build: IMTUI must not propagate to cataclysm-godot;
+            # cursesport.h hides cata_cursesport when IMTUI is defined.
+            target_compile_definitions(
+                    imtui
+                    PRIVATE
+                    IMTUI
+                    $<$<BOOL:${MSYS2}>:NCURSES_INTERNALS>
+            )
+        endif()
+
+        if (APPLE)
+            # The macOS SDK guards the wide-char curses API (waddwstr, ...)
+            # behind NCURSES_WIDECHAR and TAPI.
+            target_compile_definitions(
+                    imtui
+                    PRIVATE
+                    TAPI
+                    NCURSES_WIDECHAR=1
+            )
+        endif()
 
         target_link_libraries(
                 third-party

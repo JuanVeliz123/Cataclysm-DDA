@@ -400,6 +400,11 @@ class veh_menu_cb : public uilist_callback
         tripoint_rel_ms last_view; // to reposition the view after selecting
         shared_ptr_fast<game::draw_callback_t> terrain_draw_cb;
 
+        bool needs_own_ui() const override {
+            // Camera preview only, as pointmenu_cb.
+            return false;
+        }
+
         void select( uilist *menu ) override {
             if( last == menu->selected ) {
                 return;

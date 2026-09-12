@@ -2,6 +2,7 @@
 #ifndef CATA_SRC_CATA_TILES_H
 #define CATA_SRC_CATA_TILES_H
 
+#include "tile_connections.h"
 #include <array>
 #include <atomic>
 #include <bitset>
@@ -118,14 +119,6 @@ const std::unordered_map<std::string, TILE_CATEGORY> to_TILE_CATEGORY = {
     {"overmap_weather", TILE_CATEGORY::OVERMAP_WEATHER},
     {"map_extra", TILE_CATEGORY::MAP_EXTRA},
     {"overmap_note", TILE_CATEGORY::OVERMAP_NOTE}
-};
-
-enum class NEIGHBOUR {
-    SOUTH = 1,
-    EAST = 2,
-    WEST = 4,
-    NORTH = 8,
-    last
 };
 
 class tile_lookup_res
@@ -704,10 +697,15 @@ class cata_tiles
                                       const std::array<bool, 5> &invisible,
                                       const std::bitset<NUM_TERCONN> &rotate_group );
 
+    public:
+        // Connection-mask -> subtile + rotation. Public because the Godot backend
+        // resolves its own tile ids and must produce exactly the same answer;
+        // keeping a transcribed copy over there drifted from this one.
         static void get_rotation_and_subtile( char val, char rot_to, int &rota, int &subtile );
         static int get_rotation_unconnected( char rot_to );
         static int get_rotation_edge_ns( char rot_to );
         static int get_rotation_edge_ew( char rot_to );
+    protected:
 
         /** Map memory */
         const memorized_tile &get_terrain_memory_at( const tripoint_abs_ms &p ) const;

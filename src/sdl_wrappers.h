@@ -2,6 +2,52 @@
 #ifndef CATA_SRC_SDL_WRAPPERS_H
 #define CATA_SRC_SDL_WRAPPERS_H
 
+#if defined(GODOT)
+// Minimal stubs for the Godot build where SDL is not available.
+#include <cstdint>
+#include <memory>
+#include <string>
+#include <vector>
+
+struct SDL_Renderer;
+struct SDL_Window;
+struct SDL_Texture;
+struct SDL_Surface;
+struct TTF_Font;
+union SDL_Event { int type; };
+struct SDL_Rect { int x, y, w, h; };
+struct SDL_Point { int x, y; };
+struct SDL_Color { uint8_t r, g, b, a; };
+
+inline constexpr int SDL_MAJOR_VERSION = 2;
+
+using CataFlipMode = int;
+using SDL_Keymod = int;
+using SDL_Scancode = int;
+using SDL_Keycode = int;
+using Uint32 = unsigned int;
+using Uint8 = uint8_t;
+using Sint16 = int16_t;
+
+#define SDL_FLIP_NONE 0
+#define SDL_FLIP_HORIZONTAL 1
+#define SDL_FLIP_VERTICAL 2
+#define SDL_BLENDMODE_BLEND 1
+#define SDL_PIXELFORMAT_ARGB8888 0
+#define SDL_INIT_VIDEO 0
+#define SDL_INIT_GAMEPAD 0
+#define SDL_INIT_EVENTS 0
+
+struct gpu_handle_graveyard { struct gate {}; };
+
+struct SDL_Renderer_Ptr { void *ptr = nullptr; };
+struct SDL_Window_Ptr { void *ptr = nullptr; };
+struct SDL_Texture_Ptr { void *ptr = nullptr; };
+struct SDL_Surface_Ptr { void *ptr = nullptr; };
+struct TTF_Font_Ptr { void *ptr = nullptr; };
+
+#else // !GODOT
+
 // IWYU pragma: begin_exports
 #include <SDL3/SDL.h>
 #include <SDL3_image/SDL_image.h>
@@ -472,5 +518,7 @@ inline const char *GetAndroidExternalStoragePath()
     return SDL_GetAndroidExternalStoragePath();
 }
 #endif // __ANDROID__
+
+#endif // GODOT
 
 #endif // CATA_SRC_SDL_WRAPPERS_H

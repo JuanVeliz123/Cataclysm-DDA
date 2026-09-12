@@ -91,6 +91,10 @@
 #include "weighted_list.h"
 #include "wound.h"
 
+#if defined(GODOT)
+#include "godot_anim_snapshot.h"
+#endif
+
 static const activity_id ACT_READ( "ACT_READ" );
 static const activity_id ACT_TREE_COMMUNION( "ACT_TREE_COMMUNION" );
 static const activity_id ACT_TRY_SLEEP( "ACT_TRY_SLEEP" );
@@ -477,6 +481,11 @@ int Character::get_standard_stamina_cost( const item *thrown_item ) const
 // Actual player death is mostly handled in game::is_game_over
 void Character::die( map *, Creature *nkiller )
 {
+#if defined(GODOT)
+    // First thing, before the state below changes: npc::die funnels here too,
+    // so this one hook covers the avatar and every NPC.
+    godot_backend::note_creature_death( *this );
+#endif
     g->set_critter_died();
     set_all_parts_hp_cur( 0 );
     set_killer( nkiller );

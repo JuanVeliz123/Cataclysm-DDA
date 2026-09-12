@@ -1,13 +1,17 @@
 #include "init.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cstddef>
+#include <exception>
 #include <filesystem>
 #include <memory>
+#include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 #include "achievement.h"
@@ -536,16 +540,12 @@ void DynamicDataLoader::load_data_from_path( const cata_path &path, const std::s
         files.emplace_back( path );
     }
 
-    // iterate over each file
+    std::vector<json_load_unit> units;
+    units.reserve( files.size() );
     for( const cata_path &file : files ) {
-        try {
-            // parse it
-            JsonValue jsin = json_loader::from_path( file );
-            load_all_from_json( jsin, src, path, file );
-        } catch( const JsonError &err ) {
-            throw std::runtime_error( err.what() );
-        }
+        units.push_back( json_load_unit{ file, src, path } );
     }
+    parallel_parse_and_apply( std::move( units ) );
 }
 
 void DynamicDataLoader::load_mod_data_from_path( const cata_path &path, const std::string &src )
@@ -569,16 +569,12 @@ void DynamicDataLoader::load_mod_data_from_path( const cata_path &path, const st
         files.emplace_back( path );
     }
 
-    // iterate over each file
+    std::vector<json_load_unit> units;
+    units.reserve( files.size() );
     for( const cata_path &file : files ) {
-        try {
-            // parse it
-            JsonValue jsin = json_loader::from_path( file );
-            load_all_from_json( jsin, src, path, file );
-        } catch( const JsonError &err ) {
-            throw std::runtime_error( err.what() );
-        }
+        units.push_back( json_load_unit{ file, src, path } );
     }
+    parallel_parse_and_apply( std::move( units ) );
 }
 
 void DynamicDataLoader::load_mod_interaction_files_from_path( const cata_path &path,
@@ -609,13 +605,70 @@ void DynamicDataLoader::load_mod_interaction_files_from_path( const cata_path &p
         }
     }
     // iterate over each file
+    std::vector<json_load_unit> units;
+    units.reserve( files.size() );
     for( const std::pair<const mod_id, cata_path> &file : files ) {
-        try {
-            // parse it
-            JsonValue jsin = json_loader::from_path( file.second );
-            load_all_from_json( jsin, string_format( "%s#%s", src, file.first.str() ), path, file.second );
-        } catch( const JsonError &err ) {
-            throw std::runtime_error( err.what() );
+        units.push_back( json_load_unit{ file.second,
+                                         string_format( "%s#%s", src, file.first.str() ), path } );
+    }
+    parallel_parse_and_apply( std::move( units ) );
+}
+
+void DynamicDataLoader::parallel_parse_and_apply( std::vector<json_load_unit> units )
+{
+    if( units.empty() ) {
+        return;
+    }
+
+    // Parse files concurrently (file I/O + flexbuffer decode), but apply them to
+    // the global registries serially and in the original order. Processing in
+    // chunks bounds the amount of in-RAM parsed data held at once.
+    const unsigned int hw = std::max<unsigned int>( 1, std::thread::hardware_concurrency() );
+    const size_t chunk_size = std::max<size_t>( 1, std::min<size_t>( units.size(), 128 ) );
+
+    for( size_t start = 0; start < units.size(); start += chunk_size ) {
+        const size_t end = std::min<size_t>( start + chunk_size, units.size() );
+        const size_t count = end - start;
+
+        std::vector<std::optional<JsonValue>> parsed( count );
+        const unsigned int pool_size = std::max<unsigned int>( 1,
+                                        std::min<unsigned int>( hw, static_cast<unsigned int>( count ) ) );
+        std::vector<std::exception_ptr> errors( pool_size, nullptr );
+
+        std::atomic<size_t> next{ 0 };
+        std::vector<std::thread> workers;
+        workers.reserve( pool_size );
+        for( unsigned int t = 0; t < pool_size; ++t ) {
+            workers.emplace_back( [&, t]() {
+                size_t i = 0;
+                try {
+                    while( ( i = next.fetch_add( 1 ) ) < count ) {
+                        parsed[i] = json_loader::from_path( units[start + i].file );
+                    }
+                } catch( ... ) {
+                    if( !errors[t] ) {
+                        errors[t] = std::current_exception();
+                    }
+                }
+            } );
+        }
+        for( auto &w : workers ) {
+            w.join();
+        }
+
+        for( const std::exception_ptr &e : errors ) {
+            if( e ) {
+                try {
+                    std::rethrow_exception( e );
+                } catch( const JsonError &err ) {
+                    throw std::runtime_error( err.what() );
+                }
+            }
+        }
+
+        for( size_t i = 0; i < count; ++i ) {
+            load_all_from_json( *parsed[i], units[start + i].src, units[start + i].base_path,
+                                units[start + i].file );
         }
     }
 }

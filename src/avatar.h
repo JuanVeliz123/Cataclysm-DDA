@@ -115,6 +115,10 @@ class avatar : public Character
 
         // newcharacter.cpp
         bool create( character_type type, const std::string &tempname = "" );
+        /** Setup CUSTOM chargen defaults without opening the C++ UI. */
+        void prepare_custom_chargen();
+        /** Save Last Character template and initialize after Godot chargen. */
+        void finalize_custom_chargen();
         // initialize avatar and avatar mocks
         void initialize( character_type type );
         bool load_template( const std::string &template_name, pool_type & );

@@ -90,6 +90,10 @@
 #include "weakpoint.h"
 #include "weather.h"
 
+#if defined(GODOT)
+#include "godot_anim_snapshot.h"
+#endif
+
 static const ammo_effect_str_id ammo_effect_WHIP( "WHIP" );
 
 static const anatomy_id anatomy_default_anatomy( "default_anatomy" );
@@ -2241,6 +2245,12 @@ bool monster::melee_attack( Creature &target, float accuracy )
           here.has_flag( ter_furn_flag::TFLAG_SWIM_UNDER, target.pos_bub() ) ) ) {
         return false;
     }
+#if defined(GODOT)
+    // After the reach, sight and submersion early-outs, so a call that attacks
+    // nothing publishes nothing; before the dice roll, because a swing that
+    // misses is still a swing -- that is the event's whole point.
+    godot_backend::note_creature_swing( *this, target );
+#endif
 
     const int monster_hit_roll = melee::melee_hit_range( accuracy );
     int hitspread = target.deal_melee_attack( this, monster_hit_roll );
@@ -3112,6 +3122,11 @@ void monster::die( map *here, Creature *nkiller )
         // *only* set to true in this function!
         return;
     }
+#if defined(GODOT)
+    // After the dead-guard, so re-deaths do not publish twice; before anything
+    // moves or drops, so the event still carries where the body fell.
+    godot_backend::note_creature_death( *this );
+#endif
     // We were carrying a creature, deposit the rider
     if( has_effect( effect_ridden ) && mounted_player ) {
         mounted_player->forced_dismount();
