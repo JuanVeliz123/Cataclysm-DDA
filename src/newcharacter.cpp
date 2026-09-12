@@ -368,7 +368,6 @@ void Character::toggle_trait_deps( const trait_id &tr, const std::string &varian
 }
 
 static std::optional<std::string> query_for_template_name();
-static void reset_scenario( avatar &u, const scenario *scen );
 
 void Character::pick_name( bool bUseDefault )
 {
@@ -747,6 +746,32 @@ void Character::add_random_hobby( std::vector<profession_id> &choices )
     }
 }
 
+void avatar::prepare_custom_chargen()
+{
+    loading_ui::done();
+    set_wielded_item( item() );
+
+    prof = profession::generic();
+    set_scenario( scenario::generic() );
+
+    if( !get_option<std::string>( "DEF_CHAR_NAME" ).empty() ) {
+        name = get_option<std::string>( "DEF_CHAR_NAME" );
+    }
+    randomize_cosmetics();
+
+    // Don't apply the default backgrounds on a scenario with SKIP_DEFAULT_BACKGROUND
+    if( !get_scenario()->has_flag( flag_SKIP_DEFAULT_BACKGROUND ) ) {
+        add_default_background();
+    }
+    set_body();
+}
+
+void avatar::finalize_custom_chargen()
+{
+    save_template( _( "Last Character" ), pool_type::FREEFORM );
+    initialize( character_type::CUSTOM );
+}
+
 bool avatar::create( character_type type, const std::string &tempname )
 {
     loading_ui::done();
@@ -837,6 +862,16 @@ bool avatar::create( character_type type, const std::string &tempname )
     initialize( type );
 
     return true;
+}
+
+bool get_chargen_outfit()
+{
+    return outfit;
+}
+
+void set_chargen_outfit( bool value )
+{
+    outfit = value;
 }
 
 void Character::set_skills_from_hobbies( bool no_override )

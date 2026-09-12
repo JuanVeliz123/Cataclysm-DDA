@@ -7,6 +7,7 @@
 #include <memory>
 #include <string>
 #include <string_view>
+#include <cstdint>
 #include <utility>
 #include <vector>
 
@@ -91,15 +92,19 @@ class query_popup
         template <typename ...Args>
         query_popup &message( const std::string &fmt, Args &&... args ) {
             assert_format<Args...>( fmt );
-            invalidate_ui();
             text = string_format( fmt, std::forward<Args>( args )... );
+            // After the assignment, not before: the refresh publishes the text,
+            // and re-measuring the old one was never right either.
+            invalidate_ui();
             return *this;
         }
         template <typename ...Args>
         query_popup &message( const char *const fmt, Args &&... args ) {
             assert_format<Args...>( fmt );
-            invalidate_ui();
             text = string_format( fmt, std::forward<Args>( args )... );
+            // After the assignment, not before: the refresh publishes the text,
+            // and re-measuring the old one was never right either.
+            invalidate_ui();
             return *this;
         }
         /**
@@ -108,15 +113,15 @@ class query_popup
         template <typename ...Args>
         query_popup &wait_message( const nc_color &bar_color, const std::string &fmt, Args &&... args ) {
             assert_format<Args...>( fmt );
-            invalidate_ui();
             text = wait_text( string_format( fmt, std::forward<Args>( args )... ), bar_color );
+            invalidate_ui();
             return *this;
         }
         template <typename ...Args>
         query_popup &wait_message( const nc_color &bar_color, const char *const fmt, Args &&... args ) {
             assert_format<Args...>( fmt );
-            invalidate_ui();
             text = wait_text( string_format( fmt, std::forward<Args>( args )... ), bar_color );
+            invalidate_ui();
             return *this;
         }
         template <typename ...Args>
@@ -192,12 +197,28 @@ class query_popup
          * Query until a valid action or an error happens and return the result.
          */
         result query();
+
+        /// The message text, without colour tags stripped.
+        const std::string &get_message() const;
+        /// (action, display text) per option, using the same input_context
+        /// description the on-screen buttons show. Exposed so a backend can
+        /// render the popup itself without duplicating that derivation.
+        std::vector<std::pair<std::string, std::string>> option_descriptions() const;
+        /// Whether an implicit cancel is accepted.
+        bool cancel_allowed() const;
     protected:
         /**
          * Create or get a ui_adaptor on the UI stack to handle redrawing and
          * resizing of the popup.
          */
         std::shared_ptr<query_popup_impl> create_or_get_impl();
+
+#if defined(GODOT)
+        /// Handle of this popup's entry in the Godot notice stack, for the
+        /// display-only (static_popup) case. Zero when it is not a notice.
+        /// Protected so static_popup can retire its own.
+        mutable uint64_t godot_notice_ = 0;
+#endif
 
     private:
         struct query_option {
@@ -275,6 +296,7 @@ class static_popup : public query_popup
 {
     public:
         static_popup();
+        ~static_popup();
 
     private:
         std::shared_ptr<query_popup_impl> ui;

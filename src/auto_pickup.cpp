@@ -44,6 +44,9 @@
 #include "uilist.h"
 #include "units.h"
 #include "worldfactory.h"
+#if defined(GODOT)
+#include "godot_auto_pickup_snapshot.h"
+#endif
 
 using namespace auto_pickup;
 
@@ -311,8 +314,14 @@ void user_interface::show()
         ui_helpers::full_screen_window( ui, &w, &w_border, &w_header, nullptr,
                                         &iContentHeight, 1, iHeaderHeight, 0 );
     };
-    init_windows( ui );
+    // Registered lazily rather than called directly -- the same fix
+    // color_manager's and safemode's migrations needed. Under GODOT,
+    // FULL_SCREEN_WIDTH is never initialized (that happens in main.cpp's
+    // terminal-size negotiation, which the GODOT backend does not run), so
+    // an eager call here can build a window with a bogus negative size
+    // before the Godot takeover ever gets a chance to decline.
     ui.on_screen_resize( init_windows );
+    ui.mark_resize();
 
     size_t iTab = 0;
     int iLine = 0;
@@ -343,6 +352,20 @@ void user_interface::show()
     if( allow_swapping ) {
         ctxt.register_action( "SWAP_RULE_GLOBAL_CHAR" );
     }
+
+    // Same loop-split takeover as the rest of the migrated menus. It
+    // declines when no panel is attending, and the legacy ImGui loop below
+    // runs instead -- the "show_legacy() plus a shared epilogue" split
+    // options/keybindings, auto_note and safemode used. Either way `tabs`
+    // (already a member) and `bStuffChanged` are left exactly as the
+    // interactive part would have left them, so the "Save changes?"
+    // epilogue at the bottom of this function runs unmodified regardless of
+    // which loop produced the changes.
+    bool godot_handled = false;
+#if defined(GODOT)
+    godot_handled = gui_run_in_godot();
+#endif
+    if( !godot_handled ) {
 
     ui.on_redraw( [&]( const ui_adaptor & ) {
         // Redraw the border
@@ -481,29 +504,11 @@ void user_interface::show()
             ui_manager::redraw();
 
             if( bLeftColumn || action == "ADD_RULE" ) {
-                string_input_popup_imgui popup( 60, cur_rules[iLine].sRule );
-                popup.set_label( _( "Pickup Rule:" ) );
-                std::string description = _(
-                                              "* is used as a Wildcard.  A few Examples:\n"
-                                              "\n"
-                                              "wooden arrow    matches the itemname exactly\n"
-                                              "wooden ar*      matches items beginning with wood ar\n"
-                                              "*rrow           matches items ending with rrow\n"
-                                              "*avy fle*fi*arrow     multiple * are allowed\n"
-                                              "heAVY*woOD*arrOW      case insensitive search\n"
-                                              "\n"
-                                              "Pickup based on item materials:\n"
-                                              "m:kevlar        matches items made of Kevlar\n"
-                                              "M:copper        matches items made purely of copper\n"
-                                              "M:steel,iron    multiple materials allowed (OR search)"
-                                          );
-                popup.set_description( description, c_white, true );
-                const std::string r = popup.query();
-                // If r is empty, then either (1) The player ESC'ed from the window (changed their mind), or
-                // (2) Explicitly entered an empty rule- which isn't allowed since "*" should be used
-                // to include/exclude everything
-                if( !r.empty() ) {
-                    cur_rules[iLine].sRule = wildcard_trim_rule( r );
+                // If gui_edit_rule_text() returns false, then either (1) the
+                // player ESC'ed from the window (changed their mind), or (2)
+                // explicitly entered an empty rule -- which isn't allowed
+                // since "*" should be used to include/exclude everything.
+                if( gui_edit_rule_text( cur_rules, iLine ) ) {
                     bStuffChanged = true;
                 } else if( action == "ADD_RULE" ) {
                     cur_rules.pop_back();
@@ -541,6 +546,8 @@ void user_interface::show()
         }
     }
 
+    } // if( !godot_handled )
+
     if( !bStuffChanged ) {
         return;
     }
@@ -553,6 +560,160 @@ void user_interface::show()
         t.rules.get() = t.new_rules;
     }
 }
+
+bool user_interface::gui_edit_rule_text( rule_list &current_tab, const int row )
+{
+    string_input_popup_imgui popup( 60, current_tab[row].sRule );
+    popup.set_label( _( "Pickup Rule:" ) );
+    std::string description = _(
+                                  "* is used as a Wildcard.  A few Examples:\n"
+                                  "\n"
+                                  "wooden arrow    matches the itemname exactly\n"
+                                  "wooden ar*      matches items beginning with wood ar\n"
+                                  "*rrow           matches items ending with rrow\n"
+                                  "*avy fle*fi*arrow     multiple * are allowed\n"
+                                  "heAVY*woOD*arrOW      case insensitive search\n"
+                                  "\n"
+                                  "Pickup based on item materials:\n"
+                                  "m:kevlar        matches items made of Kevlar\n"
+                                  "M:copper        matches items made purely of copper\n"
+                                  "M:steel,iron    multiple materials allowed (OR search)"
+                              );
+    popup.set_description( description, c_white, true );
+    const std::string r = popup.query();
+    if( r.empty() ) {
+        return false;
+    }
+    current_tab[row].sRule = wildcard_trim_rule( r );
+    return true;
+}
+
+#if defined(GODOT)
+void user_interface::gui_publish_to_godot()
+{
+    using snapshot = godot_backend::AutoPickupSnapshot;
+    snapshot::data d;
+    d.title = title;
+    d.tab = gui_tab;
+    d.show_swap = tabs.size() == 2;
+    d.auto_pickup_on = get_option<bool>( "AUTO_PICKUP" );
+
+    d.tab_titles.reserve( tabs.size() );
+    for( const tab &t : tabs ) {
+        d.tab_titles.push_back( t.title );
+    }
+
+    if( gui_tab >= 0 && gui_tab < static_cast<int>( tabs.size() ) ) {
+        const rule_list &cur_rules = tabs[gui_tab].new_rules;
+        d.rows.reserve( cur_rules.size() );
+        for( const rule &r : cur_rules ) {
+            snapshot::row sr;
+            sr.rule = r.sRule;
+            sr.active = r.bActive;
+            sr.exclude = r.bExclude;
+            d.rows.push_back( std::move( sr ) );
+        }
+    }
+
+    godot_backend::get_auto_pickup_snapshot().publish( d );
+}
+
+bool user_interface::gui_run_in_godot()
+{
+    if( tabs.empty() ) {
+        return false;
+    }
+
+    godot_backend::AutoPickupSnapshot &snap = godot_backend::get_auto_pickup_snapshot();
+    snap.clear();
+    gui_tab = 0;
+    gui_publish_to_godot();
+
+    while( true ) {
+        int row = -1;
+        int col = -1;
+        const std::string action = snap.next_action( row, col );
+        if( action.empty() ) {
+            // No panel attended; the caller runs the legacy ImGui loop.
+            snap.clear();
+            return false;
+        }
+        if( action == "QUIT" ) {
+            break;
+        }
+
+        rule_list &cur_rules = tabs[gui_tab].new_rules;
+        const bool allow_swapping = tabs.size() == 2;
+
+        if( action == "GODOT_TAB" ) {
+            if( col >= 0 && col < static_cast<int>( tabs.size() ) ) {
+                gui_tab = col;
+            }
+        } else if( action == "ADD_RULE" ) {
+            // Simplified re-presentation, like safemode's own ADD_RULE: add
+            // a blank rule rather than immediately opening the text prompt
+            // the legacy loop does -- a click on the new row's rule cell
+            // edits it instead.
+            bStuffChanged = true;
+            cur_rules.push_back( rule( "", true, false ) );
+        } else if( action == "SWITCH_AUTO_PICKUP_OPTION" ) {
+            get_options().get_option( "AUTO_PICKUP" ).setNext();
+            get_options().save();
+        } else if( row >= 0 && row < static_cast<int>( cur_rules.size() ) ) {
+            if( action == "GODOT_REMOVE" ) {
+                bStuffChanged = true;
+                cur_rules.erase( cur_rules.begin() + row );
+            } else if( action == "GODOT_COPY" ) {
+                bStuffChanged = true;
+                cur_rules.push_back( cur_rules[row] );
+            } else if( action == "GODOT_SWAP" && allow_swapping ) {
+                bStuffChanged = true;
+                const int other_tab = ( gui_tab + 1 ) % 2;
+                tabs[other_tab].new_rules.push_back( cur_rules[row] );
+                cur_rules.erase( cur_rules.begin() + row );
+                gui_tab = other_tab;
+            } else if( action == "GODOT_ENABLE" ) {
+                bStuffChanged = true;
+                cur_rules[row].bActive = true;
+            } else if( action == "GODOT_DISABLE" ) {
+                bStuffChanged = true;
+                cur_rules[row].bActive = false;
+            } else if( action == "GODOT_MOVE_UP" ) {
+                if( row < static_cast<int>( cur_rules.size() ) - 1 ) {
+                    bStuffChanged = true;
+                    std::swap( cur_rules[row], cur_rules[row + 1] );
+                }
+            } else if( action == "GODOT_MOVE_DOWN" ) {
+                if( row > 0 ) {
+                    bStuffChanged = true;
+                    std::swap( cur_rules[row], cur_rules[row - 1] );
+                }
+            } else if( action == "GODOT_TEST" ) {
+                // uilist is already a Godot panel, but this channel must
+                // still get out of its way -- same move
+                // AutoNoteSnapshot's GODOT_SYMBOL makes for its popups.
+                snap.set_suspended( true );
+                cur_rules[row].test_pattern();
+                snap.set_suspended( false );
+            } else if( action == "GODOT_CONFIRM" ) {
+                if( col == 0 ) {
+                    snap.set_suspended( true );
+                    if( gui_edit_rule_text( cur_rules, row ) ) {
+                        bStuffChanged = true;
+                    }
+                    snap.set_suspended( false );
+                } else if( col == 1 ) {
+                    bStuffChanged = true;
+                    cur_rules[row].bExclude = !cur_rules[row].bExclude;
+                }
+            }
+        }
+        gui_publish_to_godot();
+    }
+    snap.clear();
+    return true;
+}
+#endif // GODOT
 
 void player_settings::show()
 {
@@ -580,11 +741,11 @@ void player_settings::show()
 
 void rule::test_pattern() const
 {
-    std::vector<std::string> vMatchingItems;
-
     if( sRule.empty() ) {
         return;
     }
+
+    std::vector<std::string> vMatchingItems;
 
     //Loop through all itemfactory items
     //APU now ignores prefixes, bottled items and suffix combinations still not generated
@@ -597,89 +758,23 @@ void rule::test_pattern() const
         vMatchingItems.push_back( sItemName );
     }
 
-    int iStartPos = 0;
-    int iContentHeight = 0;
-    int iContentWidth = 0;
-
-    catacurses::window w_test_rule_border;
-    catacurses::window w_test_rule_content;
-
-    ui_adaptor ui;
-
-    const auto init_windows = [&]( ui_adaptor & ui ) {
-        const point iOffset( 15 + ( TERMX > FULL_SCREEN_WIDTH ? ( TERMX - FULL_SCREEN_WIDTH ) / 2 : 0 ),
-                             5 + ( TERMY > FULL_SCREEN_HEIGHT ? ( TERMY - FULL_SCREEN_HEIGHT ) / 2 :
-                                   0 ) );
-        iContentHeight = FULL_SCREEN_HEIGHT - 8;
-        iContentWidth = FULL_SCREEN_WIDTH - 30;
-
-        w_test_rule_border = catacurses::newwin( iContentHeight + 2, iContentWidth,
-                             iOffset );
-        w_test_rule_content = catacurses::newwin( iContentHeight,
-                              iContentWidth - 2,
-                              iOffset + point::south_east );
-
-        ui.position_from_window( w_test_rule_border );
-    };
-    init_windows( ui );
-    ui.on_screen_resize( init_windows );
-
-    int nmatch = vMatchingItems.size();
-    const std::string buf = string_format( n_gettext( "%1$d item matches: %2$s",
-                                           "%1$d items match: %2$s",
-                                           nmatch ), nmatch, sRule );
-
-    int iLine = 0;
-
-    input_context ctxt( "AUTO_PICKUP_TEST" );
-    ctxt.register_navigate_ui_list();
-    ctxt.register_action( "QUIT" );
-    ctxt.register_action( "HELP_KEYBINDINGS" );
-
-    ui.on_redraw( [&]( const ui_adaptor & ) {
-        draw_border( w_test_rule_border, BORDER_COLOR, buf, hilite( c_white ) );
-        center_print( w_test_rule_border, iContentHeight + 1, red_background( c_white ),
-                      _( "Won't display content or suffix matches" ) );
-        wnoutrefresh( w_test_rule_border );
-
-        // Clear the lines
-        mvwrectf( w_test_rule_content, point::zero, c_black, ' ', 79, iContentHeight );
-
-        calcStartPos( iStartPos, iLine, iContentHeight, vMatchingItems.size() );
-
-        // display auto pickup
-        for( int i = iStartPos; i < static_cast<int>( vMatchingItems.size() ); i++ ) {
-            if( i >= iStartPos &&
-                i < iStartPos + std::min<int>( iContentHeight, vMatchingItems.size() ) ) {
-                nc_color cLineColor = c_white;
-
-                mvwprintz( w_test_rule_content, point( 0, i - iStartPos ), cLineColor, "%d", i + 1 );
-                mvwprintz( w_test_rule_content, point( 4, i - iStartPos ), cLineColor, "" );
-
-                if( iLine == i ) {
-                    wprintz( w_test_rule_content, c_yellow, ">> " );
-                } else {
-                    wprintz( w_test_rule_content, c_yellow, "   " );
-                }
-
-                wprintz( w_test_rule_content, iLine == i ? hilite( cLineColor ) : cLineColor, vMatchingItems[i] );
-            }
-        }
-
-        wnoutrefresh( w_test_rule_content );
-    } );
-
-    while( true ) {
-        ui_manager::redraw();
-
-        const int recmax = static_cast<int>( vMatchingItems.size() );
-        const int scroll_rate = recmax > 20 ? 10 : 3;
-        const std::string action = ctxt.handle_input();
-        if( navigate_ui_list( action, iLine, scroll_rate, recmax, true ) ) {
-        } else if( action == "QUIT" ) {
-            break;
+    // Read-only, so a plain `uilist` -- already a migrated Godot panel --
+    // stands in for the bespoke scrollable window this used to build: the
+    // same MENU-4 "drive the existing implementation" insight safemode's
+    // own TEST_RULE applied a second time.
+    const int nmatch = static_cast<int>( vMatchingItems.size() );
+    uilist test_list;
+    test_list.text = string_format( n_gettext( "%1$d item matches: %2$s",
+                                    "%1$d items match: %2$s",
+                                    nmatch ), nmatch, sRule );
+    if( vMatchingItems.empty() ) {
+        test_list.addentry( -1, false, -1, _( "(no items match)" ) );
+    } else {
+        for( const std::string &name : vMatchingItems ) {
+            test_list.addentry( name );
         }
     }
+    test_list.query();
 }
 
 bool player_settings::has_rule( const item *it )

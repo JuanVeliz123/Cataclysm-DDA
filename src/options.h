@@ -283,9 +283,10 @@ class options_manager
                   copt_hide_t opt_hide = COPT_NO_HIDE,
                   const std::string &format = "%.2f" );
 
-    private:
-        options_container options;
-        std::optional<options_container *> world_options; // NOLINT(cata-serialize)
+        // The page/group/item model below describes how the options screen is laid
+        // out. It is public because a backend that draws its own options UI has to
+        // walk it; the containers themselves stay private and are read through
+        // get_pages() and find_group().
 
         /** Option group. */
         class Group
@@ -349,6 +350,18 @@ class options_manager
                 Page( const std::string &id, const translation &name ) : id_( id ), name_( name ) { }
         };
 
+        /** The pages, in tab order. */
+        const std::vector<Page> &get_pages() const {
+            return pages_;
+        }
+
+        /** Find group by id. */
+        const Group &find_group( const std::string &id ) const;
+
+    private:
+        options_container options;
+        std::optional<options_container *> world_options; // NOLINT(cata-serialize)
+
         std::vector<Page> pages_; // NOLINT(cata-serialize)
         std::string adding_to_group_; // NOLINT(cata-serialize)
         std::vector<Group> groups_; // NOLINT(cata-serialize)
@@ -373,8 +386,13 @@ class options_manager
         /** Find page by id. */
         Page &find_page( const std::string &id );
 
-        /** Find group by id. */
-        const Group &find_group( const std::string &id ) const;
+        /**
+         * The curses options screen -- draw, input loop, edit the options in place.
+         * show() calls this only when no other backend has drawn the screen; see
+         * the comment on the definition, including what a non-empty return means.
+         */
+        std::string show_legacy( bool ingame, bool world_options_only, bool with_tabs,
+                                 options_container &OPTIONS_OLD, options_container &WOPTIONS_OLD );
 };
 
 struct option_slider {

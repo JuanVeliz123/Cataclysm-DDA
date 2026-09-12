@@ -325,6 +325,109 @@ func _setup_session_hud() -> void:
 		inventory_panel.closed.connect(_close_session_overlays)
 	if character_panel.has_method("setup"):
 		character_panel.setup(cdda_host)
+	game_menu_panel = Control.new()
+	game_menu_panel.set_script(load("res://scripts/game_menu_panel.gd"))
+	game_menu_panel.name = "GameMenuPanel"
+	game_menu_panel.z_index = 14
+	game_menu_panel.visible = false
+	add_child(game_menu_panel)
+	game_menu_panel.setup(cdda_host)
+	game_menu_panel.closed.connect(func() -> void: game_menu_panel.visible = false)
+	game_menu_panel.open_inventory.connect(func() -> void:
+		game_menu_panel.visible = false
+		_toggle_inventory())
+	game_menu_panel.open_character.connect(func() -> void:
+		game_menu_panel.visible = false
+		_toggle_character())
+	uilist_panel = Control.new()
+	uilist_panel.set_script(load("res://scripts/uilist_panel.gd"))
+	uilist_panel.name = "UilistPanel"
+	uilist_panel.z_index = 16
+	uilist_panel.visible = false
+	add_child(uilist_panel)
+	uilist_panel.setup(cdda_host)
+	popup_panel = Control.new()
+	popup_panel.set_script(load("res://scripts/popup_panel.gd"))
+	popup_panel.name = "PopupPanel"
+	# Above the uilist panel: a prompt can be raised from inside a menu.
+	popup_panel.z_index = 18
+	add_child(popup_panel)
+	popup_panel.setup(cdda_host)
+	textwin_panel = Control.new()
+	textwin_panel.set_script(load("res://scripts/textwin_panel.gd"))
+	textwin_panel.name = "TextWinPanel"
+	textwin_panel.z_index = 17
+	textwin_panel.visible = false
+	add_child(textwin_panel)
+	textwin_panel.setup(cdda_host)
+
+	options_panel = Control.new()
+	options_panel.set_script(load("res://scripts/options_panel.gd"))
+	options_panel.name = "OptionsPanel"
+	options_panel.z_index = 17
+	options_panel.visible = false
+	add_child(options_panel)
+	options_panel.setup(cdda_host)
+
+	keybind_panel = Control.new()
+	keybind_panel.set_script(load("res://scripts/keybind_panel.gd"))
+	keybind_panel.name = "KeybindPanel"
+	keybind_panel.z_index = 17
+	keybind_panel.visible = false
+	add_child(keybind_panel)
+	keybind_panel.setup(cdda_host)
+
+	crafting_panel = Control.new()
+	crafting_panel.set_script(load("res://scripts/crafting_panel.gd"))
+	crafting_panel.name = "CraftingPanel"
+	crafting_panel.z_index = 17
+	crafting_panel.visible = false
+	add_child(crafting_panel)
+	crafting_panel.setup(cdda_host)
+
+	advanced_inv_panel = Control.new()
+	advanced_inv_panel.set_script(load("res://scripts/advanced_inv_panel.gd"))
+	advanced_inv_panel.name = "AdvancedInvPanel"
+	advanced_inv_panel.z_index = 17
+	advanced_inv_panel.visible = false
+	add_child(advanced_inv_panel)
+	advanced_inv_panel.setup(cdda_host)
+
+	dialogue_panel = Control.new()
+	dialogue_panel.set_script(load("res://scripts/dialogue_panel.gd"))
+	dialogue_panel.name = "DialoguePanel"
+	dialogue_panel.z_index = 17
+	dialogue_panel.visible = false
+	add_child(dialogue_panel)
+	dialogue_panel.setup(cdda_host)
+
+	surroundings_panel = Control.new()
+	surroundings_panel.set_script(load("res://scripts/surroundings_panel.gd"))
+	surroundings_panel.name = "SurroundingsPanel"
+	surroundings_panel.z_index = 17
+	surroundings_panel.visible = false
+	add_child(surroundings_panel)
+	surroundings_panel.setup(cdda_host)
+
+	# MENU-13's screens. Above the dialogue panel deliberately: an NPC can ask
+	# the player to pick a style mid-conversation, and the picker has to be the
+	# thing on top when it does.
+	for spec in [["martialarts", "MartialArtsPanel"], ["scores", "ScoresPanel"],
+			["medical", "MedicalPanel"], ["study_zone", "StudyZonePanel"],
+			["mission", "MissionPanel"], ["faction", "FactionPanel"],
+			["diary", "DiaryPanel"], ["follower_rules", "FollowerRulesPanel"],
+			["distraction", "DistractionPanel"], ["auto_note", "AutoNotePanel"],
+			["color_manager", "ColorManagerPanel"], ["safemode", "SafemodePanel"],
+			["auto_pickup", "AutoPickupPanel"], ["compare_item", "CompareItemPanel"],
+			["end_screen", "EndScreenPanel"]]:
+		var panel := Control.new()
+		panel.set_script(load("res://scripts/%s_panel.gd" % spec[0]))
+		panel.name = str(spec[1])
+		panel.z_index = 18
+		panel.visible = false
+		add_child(panel)
+		panel.setup(cdda_host)
+		set(str(spec[0]) + "_panel", panel)
 	if character_panel.has_signal("closed"):
 		character_panel.closed.connect(_close_session_overlays)
 	_setup_minimap_panel()

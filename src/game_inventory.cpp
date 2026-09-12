@@ -72,6 +72,9 @@
 #include "type_id.h"
 #include "ui_manager.h"
 #include "uilist.h"
+#if defined(GODOT)
+#include "godot_compare_snapshot.h"
+#endif
 #include "uistate.h"
 #include "units.h"
 #include "units_utility.h"
@@ -2703,6 +2706,29 @@ cataimgui::bounds game_menus::inv::compare_item_menu::get_bounds()
 
 bool game_menus::inv::compare_item_menu::show()
 {
+#if defined(GODOT)
+    {
+        godot_backend::CompareSnapshot &snap = godot_backend::get_compare_snapshot();
+        godot_backend::CompareSnapshot::data d;
+        d.title = "compare";
+        d.first_name = first.tname();
+        d.first_body = remove_color_tags( format_item_info( first_info, second_info ) );
+        d.second_name = second.tname();
+        d.second_body = remove_color_tags( format_item_info( second_info, first_info ) );
+        d.confirm_message = confirm_message;
+        snap.clear();
+        snap.publish( d );
+        const std::string action = snap.next_action();
+        snap.clear();
+        if( action == "CONFIRM" ) {
+            return true;
+        } else if( action == "QUIT" ) {
+            return false;
+        }
+        // "" -> nobody attended; fall through to the legacy ImGui loop.
+    }
+#endif
+
     while( true ) {
         ui_manager::redraw();
 

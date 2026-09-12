@@ -6,7 +6,6 @@
 #include <functional>
 #include <iterator>
 #include <numeric>
-#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -14,7 +13,6 @@
 #include "action.h"
 #include "cata_path.h"
 #include "cata_utility.h"
-#include "catacharset.h"
 #include "color.h"
 #include "cursesdef.h"
 #include "debug.h"
@@ -23,12 +21,15 @@
 #include "input_enums.h"
 #include "output.h"
 #include "path_info.h"
-#include "point.h"
 #include "string_formatter.h"
 #include "text_snippets.h"
 #include "translations.h"
+#include "uilist.h"
 #include "ui_helpers.h"
 #include "ui_manager.h"
+#if defined(GODOT)
+#include "godot_textwin_snapshot.h"
+#endif
 
 help &get_help()
 {
@@ -105,48 +106,6 @@ std::string help::get_dir_grid()
     return movement;
 }
 
-std::map<int, inclusive_rectangle<point>> help::draw_menu( const catacurses::window &win,
-                                       int selected, std::map<int, input_event> &hotkeys ) const
-{
-    std::map<int, inclusive_rectangle<point>> opt_map;
-
-    werase( win );
-    // NOLINTNEXTLINE(cata-use-named-point-constants)
-    int y = fold_and_print( win, point( 1, 0 ), getmaxx( win ) - 2, c_white,
-                            _( "Please press one of the following for help on that topic:\n"
-                               "Press ESC to return to the game." ) ) + 1;
-
-    size_t half_size = help_texts.size() / 2 + 1;
-    int second_column = divide_round_up( getmaxx( win ), 2 );
-    size_t i = 0;
-    for( const auto &text : help_texts ) {
-        std::string cat_name;
-        auto hotkey_it = hotkeys.find( text.first );
-        if( hotkey_it != hotkeys.end() ) {
-            cat_name = colorize( hotkey_it->second.short_description(),
-                                 selected == text.first ? hilite( c_light_blue ) : c_light_blue );
-            cat_name += ": ";
-        }
-        cat_name += text.second.first.translated();
-        const int cat_width = utf8_width( remove_color_tags( cat_name ) );
-        if( i < half_size ) {
-            second_column = std::max( second_column, cat_width + 4 );
-        }
-
-        const point sc_start( i < half_size ? 1 : second_column, y + i % half_size );
-        fold_and_print( win, sc_start, getmaxx( win ) - 2,
-                        selected == text.first ? hilite( c_white ) : c_white, cat_name );
-        ++i;
-
-        opt_map.emplace( text.first,
-                         inclusive_rectangle<point>( sc_start, sc_start + point( cat_width - 1, 0 ) ) );
-    }
-
-    wnoutrefresh( win );
-
-    return opt_map;
-}
-
 std::string help::get_note_colors()
 {
     std::string text = _( "Note colors: " );
@@ -163,128 +122,109 @@ std::string help::get_note_colors()
 
 void help::display_help() const
 {
-    catacurses::window w_help_border;
+    if( help_texts.empty() ) {
+        return;
+    }
+
     catacurses::window w_help;
+    catacurses::window w_help_border;
 
     ui_adaptor ui;
     const auto init_windows = [&]( ui_adaptor & ui ) {
         ui_helpers::full_screen_window( ui, &w_help, &w_help_border, nullptr, nullptr, nullptr, 1 );
     };
-    init_windows( ui );
-    ui.on_screen_resize( init_windows );
+    // Never called eagerly -- the same fix color_manager's and safemode's
+    // migrations needed: FULL_SCREEN_WIDTH is never initialized under GODOT
+    // (that happens in main.cpp's terminal-size negotiation, which the
+    // GODOT backend does not run). `get_w_help_border` below calls it only
+    // when the detail view actually falls back to `scrollable_text`, which
+    // happens only once an unattended `run_textwin_in_godot()` call declines.
 
-    input_context ctxt( "DISPLAY_HELP", keyboard_mode::keychar );
-    ctxt.register_cardinal();
-    ctxt.register_action( "QUIT" );
-    ctxt.register_action( "CONFIRM" );
-    // for mouse selection
-    ctxt.register_action( "SELECT" );
-    ctxt.register_action( "MOUSE_MOVE" );
-    // for the menu shortcuts
-    ctxt.register_action( "ANY_INPUT" );
-
-    std::string action;
-    std::map<int, inclusive_rectangle<point>> opt_map;
-    int sel = -1;
-
-    const hotkey_queue &hkq = hotkey_queue::alphabets();
-    input_event next_hotkey = ctxt.first_unassigned_hotkey( hkq );
-    std::map<int, input_event> hotkeys;
-    for( const auto &text : help_texts ) {
-        hotkeys.emplace( text.first, next_hotkey );
-        next_hotkey = ctxt.next_unassigned_hotkey( hkq, next_hotkey );
-    }
-
-    ui.on_redraw( [&]( const ui_adaptor & ) {
-        draw_border( w_help_border, BORDER_COLOR, _( "Help" ) );
-        wnoutrefresh( w_help_border );
-        opt_map = draw_menu( w_help, sel, hotkeys );
-    } );
-
-    do {
-        ui_manager::redraw();
-
-        sel = -1;
-        action = ctxt.handle_input();
-        input_event input = ctxt.get_raw_input();
-
-        // Mouse selection
-        if( action == "MOUSE_MOVE" || action == "SELECT" ) {
-            std::optional<point> coord = ctxt.get_coordinates_text( w_help );
-            if( !!coord ) {
-                int cnt = run_for_point_in<int, point>( opt_map, *coord,
-                [&sel]( const std::pair<int, inclusive_rectangle<point>> &p ) {
-                    sel = p.first;
-                } );
-                if( cnt > 0 && action == "SELECT" ) {
-                    auto iter = hotkeys.find( sel );
-                    if( iter != hotkeys.end() ) {
-                        input = iter->second;
-                        action = "CONFIRM";
-                    }
-                }
-            }
+    while( true ) {
+        // The category picker: a plain `uilist` -- already a migrated Godot
+        // panel -- stands in for the bespoke clickable grid `draw_menu()`
+        // used to build, the same MENU-4 "drive the existing implementation"
+        // insight the `help` row in BACKLOG.md proposed. It gets mouse
+        // selection, hotkey assignment and Godot routing for free.
+        uilist menu;
+        menu.title = _( "Help" );
+        menu.text = _( "Please press one of the following for help on that topic:" );
+        for( const auto &text : help_texts ) {
+            menu.addentry( text.first, true, MENU_AUTOASSIGN, text.second.first.translated() );
+        }
+        menu.query();
+        const int selection = menu.ret;
+        if( selection < 0 ) {
+            break;
         }
 
-        for( const auto &hotkey_entry : hotkeys ) {
-            auto help_text_it = help_texts.find( hotkey_entry.first );
-            if( help_text_it == help_texts.end() ) {
+        const auto help_text_it = help_texts.find( selection );
+        if( help_text_it == help_texts.end() ) {
+            continue;
+        }
+
+        std::vector<std::string> i18n_help_texts;
+        i18n_help_texts.reserve( help_text_it->second.second.size() );
+        std::transform( help_text_it->second.second.begin(), help_text_it->second.second.end(),
+        std::back_inserter( i18n_help_texts ), [&]( const translation & line ) {
+            std::string line_proc = line.translated();
+            if( line_proc == "<DRAW_NOTE_COLORS>" ) {
+                line_proc = get_note_colors();
+            } else if( line_proc == "<HELP_DRAW_DIRECTIONS>" ) {
+                line_proc = get_dir_grid();
+            }
+            size_t pos = line_proc.find( "<press_", 0, 7 );
+            while( pos != std::string::npos ) {
+                size_t pos2 = line_proc.find( ">", pos, 1 );
+
+                std::string action = line_proc.substr( pos + 7, pos2 - pos - 7 );
+                std::string replace = "<color_light_blue>" +
+                                      press_x( look_up_action( action ), "", "" ) + "</color>";
+
+                if( replace.empty() ) {
+                    debugmsg( "Help json: Unknown action: %s", action );
+                } else {
+                    line_proc = string_replace(
+                                    line_proc, "<press_" + std::move( action ) + ">", replace );
+                }
+
+                pos = line_proc.find( "<press_", pos2, 7 );
+            }
+            return line_proc;
+        } );
+
+        if( i18n_help_texts.empty() ) {
+            continue;
+        }
+
+        const std::string body = std::accumulate( i18n_help_texts.begin() + 1, i18n_help_texts.end(),
+                                  i18n_help_texts.front(),
+        []( std::string lhs, const std::string & rhs ) {
+            return std::move( lhs ) + "\n\n" + rhs;
+        } );
+
+#if defined(GODOT)
+        // Formatted text you scroll and dismiss, so it goes to the shared
+        // Godot text window (MENU-3's `godot_textwin_snapshot.*`) rather
+        // than `scrollable_text`'s curses/ImGui window -- the same move
+        // `ui_iteminfo.cpp`'s `execute()` makes for item info.
+        {
+            std::vector<godot_backend::TextWinSnapshot::tab> tabs;
+            tabs.push_back( { std::string(), remove_color_tags( body ) } );
+            int current = 0;
+            if( godot_backend::run_textwin_in_godot( _( "Help" ),
+                    remove_color_tags( help_text_it->second.first.translated() ), tabs, current ) ) {
                 continue;
             }
-            if( input == hotkey_entry.second ) {
-                std::vector<std::string> i18n_help_texts;
-                i18n_help_texts.reserve( help_text_it->second.second.size() );
-                std::transform( help_text_it->second.second.begin(), help_text_it->second.second.end(),
-                std::back_inserter( i18n_help_texts ), [&]( const translation & line ) {
-                    std::string line_proc = line.translated();
-                    if( line_proc == "<DRAW_NOTE_COLORS>" ) {
-                        line_proc = get_note_colors();
-                    } else if( line_proc == "<HELP_DRAW_DIRECTIONS>" ) {
-                        line_proc = get_dir_grid();
-                    }
-                    size_t pos = line_proc.find( "<press_", 0, 7 );
-                    while( pos != std::string::npos ) {
-                        size_t pos2 = line_proc.find( ">", pos, 1 );
-
-                        std::string action = line_proc.substr( pos + 7, pos2 - pos - 7 );
-                        std::string replace = "<color_light_blue>" +
-                                              press_x( look_up_action( action ), "", "" ) + "</color>";
-
-                        if( replace.empty() ) {
-                            debugmsg( "Help json: Unknown action: %s", action );
-                        } else {
-                            line_proc = string_replace(
-                                            line_proc, "<press_" + std::move( action ) + ">", replace );
-                        }
-
-                        pos = line_proc.find( "<press_", pos2, 7 );
-                    }
-                    return line_proc;
-                } );
-
-                if( !i18n_help_texts.empty() ) {
-                    ui.on_screen_resize( nullptr );
-
-                    const auto get_w_help_border = [&]() {
-                        init_windows( ui );
-                        return w_help_border;
-                    };
-
-                    scrollable_text( get_w_help_border, _( "Help" ),
-                                     std::accumulate( i18n_help_texts.begin() + 1, i18n_help_texts.end(),
-                                                      i18n_help_texts.front(),
-                    []( std::string lhs, const std::string & rhs ) {
-                        return std::move( lhs ) + "\n\n" + rhs;
-                    } ) );
-
-                    ui.on_screen_resize( init_windows );
-                }
-                action = "CONFIRM";
-                break;
-
-            }
         }
-    } while( action != "QUIT" );
+#endif
+
+        const auto get_w_help_border = [&]() {
+            init_windows( ui );
+            return w_help_border;
+        };
+        scrollable_text( get_w_help_border, _( "Help" ), body );
+    }
 }
 
 std::string get_hint()

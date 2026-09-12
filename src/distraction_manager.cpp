@@ -13,6 +13,9 @@
 #include "ui_manager.h"
 #include "uilist.h"
 #include "uistate.h"
+#if defined(GODOT)
+#include "godot_distraction_snapshot.h"
+#endif
 
 namespace distraction_manager
 {
@@ -26,6 +29,11 @@ struct configurable_distraction {
     bool is_toggle = false;
 };
 } // namespace
+
+/// Toggle row @p index's flag, cascading to every distraction when it is the
+/// "Toggle all" row. Shared by the legacy CONFIRM/LEFT/RIGHT branch and the
+/// Godot takeover so there is exactly one copy of the cascade list.
+static void apply_toggle( int index );
 
 static const std::vector<configurable_distraction> &get_configurable_distractions()
 {
@@ -51,8 +59,88 @@ static const std::vector<configurable_distraction> &get_configurable_distraction
     return configurable_distractions;
 }
 
+static void apply_toggle( const int index )
+{
+    const auto &distractions = get_configurable_distractions();
+    if( index < 0 || index >= static_cast<int>( distractions.size() ) ) {
+        return;
+    }
+    *( distractions[index].state ) ^= true;
+    if( distractions[index].is_toggle ) {
+        const bool toggle_state = uistate.distraction_all;
+        uistate.distraction_noise = toggle_state;
+        uistate.distraction_pain = toggle_state;
+        uistate.distraction_attack = toggle_state;
+        uistate.distraction_hostile_close = toggle_state;
+        uistate.distraction_hostile_spotted = toggle_state;
+        uistate.distraction_conversation = toggle_state;
+        uistate.distraction_asthma = toggle_state;
+        uistate.distraction_dangerous_field = toggle_state;
+        uistate.distraction_weather_change = toggle_state;
+        uistate.distraction_hunger = toggle_state;
+        uistate.distraction_thirst = toggle_state;
+        uistate.distraction_temperature = toggle_state;
+        uistate.distraction_mutation = toggle_state;
+        uistate.distraction_oxygen = toggle_state;
+        uistate.distraction_withdrawal = toggle_state;
+        uistate.distraction_craft_step_complete = toggle_state;
+    }
+}
+
+#if defined(GODOT)
+void distraction_manager_gui::publish_to_godot()
+{
+    using snapshot = godot_backend::DistractionSnapshot;
+    snapshot::data d;
+    d.title = _( "Distractions manager" );
+    const auto &distractions = get_configurable_distractions();
+    d.rows.reserve( distractions.size() );
+    for( const configurable_distraction &entry : distractions ) {
+        snapshot::row r;
+        r.name = _( entry.name );
+        r.description = _( entry.description );
+        r.enabled = *entry.state;
+        d.rows.push_back( std::move( r ) );
+    }
+    godot_backend::get_distraction_snapshot().publish( d );
+}
+
+bool distraction_manager_gui::run_in_godot()
+{
+    godot_backend::DistractionSnapshot &snap = godot_backend::get_distraction_snapshot();
+    snap.clear();
+    publish_to_godot();
+    while( true ) {
+        int index = -1;
+        const std::string action = snap.next_action( index );
+        if( action.empty() ) {
+            // No panel attended; the caller runs the legacy ImGui loop.
+            snap.clear();
+            return false;
+        }
+        if( action == "QUIT" ) {
+            break;
+        }
+        if( action == "GODOT_TOGGLE" ) {
+            apply_toggle( index );
+        }
+        publish_to_godot();
+    }
+    snap.clear();
+    return true;
+}
+#endif // GODOT
+
 void distraction_manager_gui::show()
 {
+#if defined(GODOT)
+    // Same loop-split takeover as the rest of the migrated menus; only the
+    // source of a toggle moves. It declines when no panel is attending, and
+    // the legacy ImGui loop below runs instead.
+    if( run_in_godot() ) {
+        return;
+    }
+#endif
     const int iHeaderHeight = 4;
     int iContentHeight = 0;
     const int number_of_distractions = get_configurable_distractions().size();
@@ -140,29 +228,9 @@ void distraction_manager_gui::show()
             break;
         }
 
-        bool toggle_state;
         if( navigate_ui_list( action, currentLine, 5, number_of_distractions, true ) ) {
         } else if( action == "CONFIRM" || action == "LEFT" || action == "RIGHT" ) {
-            *( get_configurable_distractions()[currentLine].state ) ^= true;
-            if( get_configurable_distractions()[currentLine].is_toggle ) {
-                toggle_state = uistate.distraction_all;
-                uistate.distraction_noise = toggle_state;
-                uistate.distraction_pain = toggle_state;
-                uistate.distraction_attack = toggle_state;
-                uistate.distraction_hostile_close = toggle_state;
-                uistate.distraction_hostile_spotted = toggle_state;
-                uistate.distraction_conversation = toggle_state;
-                uistate.distraction_asthma = toggle_state;
-                uistate.distraction_dangerous_field = toggle_state;
-                uistate.distraction_weather_change = toggle_state;
-                uistate.distraction_hunger = toggle_state;
-                uistate.distraction_thirst = toggle_state;
-                uistate.distraction_temperature = toggle_state;
-                uistate.distraction_mutation = toggle_state;
-                uistate.distraction_oxygen = toggle_state;
-                uistate.distraction_withdrawal = toggle_state;
-                uistate.distraction_craft_step_complete = toggle_state;
-            }
+            apply_toggle( currentLine );
         }
     }
 }

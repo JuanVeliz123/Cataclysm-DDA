@@ -231,6 +231,21 @@ class uilist_callback
             return false;
         }
         virtual void refresh( uilist * ) {}
+        /**
+         * Whether this callback needs the C++ menu UI to function.
+         *
+         * A backend that renders only the entry list -- the Godot uilist panel --
+         * can run select() and confirm() for you, because those just act on game
+         * state. It cannot run refresh(), which issues ImGui draw calls directly,
+         * or key(), which intercepts input the panel never forwards.
+         *
+         * Defaults to true so a callback is left on the C++ path unless it has
+         * been checked. Being wrong in the other direction shows the player a
+         * menu with pieces silently missing.
+         */
+        virtual bool needs_own_ui() const {
+            return true;
+        }
         virtual float desired_extra_space_left( ) {
             return 0.0;
         }
@@ -470,6 +485,22 @@ class uilist // NOLINT(cata-xy)
 
         uilist_callback *callback;
 
+        /// Whether this menu uses category tabs. Public so a backend can ask
+        /// without reaching into the category list itself.
+        bool has_categories() const;
+        /// (key, display name) per category tab, and which one is showing.
+        const std::vector<std::pair<std::string, std::string>> &get_categories() const;
+        size_t get_current_category() const;
+        void set_current_category( size_t index );
+        /// Whether @p entry belongs in the category at @p index. False when the
+        /// menu has no categories, which is the caller's cue to show everything.
+        bool entry_in_category( const uilist_entry &entry, size_t index ) const;
+
+        /// Assign hotkeys and default retvals. Normally done by calc_data();
+        /// exposed because the Godot backend renders the menu itself and still
+        /// needs the semantics.
+        void assign_hotkeys();
+
         std::optional<cataimgui::bounds> desired_bounds;
         bool desc_enabled = false;
 
@@ -633,6 +664,11 @@ class pointmenu_cb : public uilist_callback
         explicit pointmenu_cb( const std::vector< tripoint_bub_ms > &pts );
         ~pointmenu_cb() override;
         void select( uilist *menu ) override;
+        // Only moves the camera to preview the highlighted point; no drawing,
+        // no key handling. The Godot panel can drive that.
+        bool needs_own_ui() const override {
+            return false;
+        }
 };
 
 void temp_hide_advanced_inv();

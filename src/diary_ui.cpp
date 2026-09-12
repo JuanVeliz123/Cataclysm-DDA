@@ -10,6 +10,7 @@
 #include "color.h"
 #include "cursesdef.h"
 #include "diary.h"
+#include "godot_diary_snapshot.h"
 #include "input_context.h"
 #include "output.h"
 #include "point.h"
@@ -174,6 +175,112 @@ static std::pair<point, point> diary_window_position()
 
 void diary::show_diary_ui( diary *c_diary )
 {
+#if defined(GODOT)
+    {
+        // Same loop-split takeover as the other MENU-13 screens. A click
+        // addresses a page or a change row directly rather than reproducing
+        // the legacy three-pane keyboard focus cycle -- see the "simplified
+        // re-presentation" note in godot_diary_snapshot.h.
+        godot_backend::DiarySnapshot &snap = godot_backend::get_diary_snapshot();
+        snap.clear();
+
+        int selected_change = 0;
+
+        const auto publish = [&]() {
+            godot_backend::DiarySnapshot::data d;
+            d.title = string_format( _( "%s's Diary" ), c_diary->owner );
+            d.pages = c_diary->get_pages_list();
+            d.current_page = c_diary->get_opened_page_num();
+            const diary_page *page = c_diary->get_page_ptr();
+            d.is_summary = page != nullptr && page->is_summary();
+            d.head_text = c_diary->pages.empty() ? std::string() :
+                          c_diary->get_head_text( d.is_summary );
+            const std::vector<std::string> &change_list = c_diary->get_change_list();
+            d.changes = change_list;
+            d.change_desc.resize( change_list.size() );
+            for( const std::pair<const int, std::string> &entry : c_diary->get_desc_map() ) {
+                if( entry.first >= 0 && static_cast<size_t>( entry.first ) < d.change_desc.size() ) {
+                    d.change_desc[entry.first] = entry.second;
+                }
+            }
+            if( selected_change >= static_cast<int>( change_list.size() ) ) {
+                selected_change = 0;
+            }
+            d.selected_change = selected_change;
+            d.page_text = d.is_summary ? std::string() : c_diary->get_page_text();
+            d.hint = string_format( "%s   %s   %s   %s   %s",
+                                    _( "New page" ), _( "Edit text" ), _( "Delete page" ),
+                                    _( "Export diary" ), _( "View scores" ) );
+            snap.publish( d );
+        };
+
+        // Same starting point as the legacy loop: the most recent page.
+        const int diary_last_page = c_diary->pages.empty() ? 0 :
+                                    static_cast<int>( c_diary->pages.size() ) - 1;
+        c_diary->set_opened_page( diary_last_page );
+        publish();
+
+        bool attended = true;
+        while( true ) {
+            int page_index = -1;
+            int change_index = -1;
+            const std::string action = snap.next_action( page_index, change_index );
+            if( action.empty() ) {
+                attended = false;
+                break;
+            }
+            if( action == "QUIT" ) {
+                break;
+            } else if( action == "GODOT_SELECT_PAGE" ) {
+                c_diary->set_opened_page( page_index );
+                selected_change = 0;
+            } else if( action == "GODOT_SELECT_CHANGE" ) {
+                selected_change = change_index;
+            } else if( action == "NEW_PAGE" ) {
+                c_diary->new_page();
+                c_diary->set_opened_page( static_cast<int>( c_diary->pages.size() ) - 1 );
+                selected_change = 0;
+            } else if( action == "DELETE_PAGE" ) {
+                if( c_diary->pages.size() > 1 && query_yn( _( "Really delete Page?" ) ) ) {
+                    c_diary->delete_page();
+                    if( c_diary->get_opened_page_num() >= static_cast<int>( c_diary->pages.size() ) ) {
+                        c_diary->set_opened_page( static_cast<int>( c_diary->pages.size() ) - 1 );
+                    }
+                    selected_change = 0;
+                }
+            } else if( action == "EXPORT_DIARY" ) {
+                if( query_yn( _( "Export Diary as .txt?" ) ) ) {
+                    c_diary->export_to_txt();
+                }
+            } else if( action == "VIEW_SCORES" ) {
+                // The scores screen is already its own Godot channel; get out
+                // from under it the same way MedicalSnapshot's APPLY suspends
+                // for the item picker.
+                snap.set_suspended( true );
+                show_scores_ui();
+                snap.set_suspended( false );
+            } else if( action == "EDIT_TEXT" ) {
+                if( !c_diary->pages.empty() && !c_diary->get_page_ptr()->is_summary() ) {
+                    // string_editor_window is still a raw catacurses::window;
+                    // hide this channel while it runs.
+                    snap.set_suspended( true );
+                    c_diary->edit_page_ui( []() {
+                        return catacurses::newwin( FULL_SCREEN_HEIGHT, FULL_SCREEN_WIDTH,
+                                                    point( ( TERMX - FULL_SCREEN_WIDTH ) / 2,
+                                                            ( TERMY - FULL_SCREEN_HEIGHT ) / 2 ) );
+                    } );
+                    snap.set_suspended( false );
+                }
+            }
+            publish();
+        }
+        snap.clear();
+        if( attended ) {
+            return;
+        }
+        // No panel attended within the timeout; run the legacy curses screen.
+    }
+#endif
     catacurses::window w_diary;
     catacurses::window w_pages;
     catacurses::window w_text;

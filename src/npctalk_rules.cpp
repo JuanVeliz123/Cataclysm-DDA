@@ -25,6 +25,9 @@
 #include "string_formatter.h"
 #include "translation.h"
 #include "ui_manager.h"
+#if defined(GODOT)
+#include "godot_follower_rules_snapshot.h"
+#endif
 
 static std::map<cbm_recharge_rule, std::string> recharge_map = {
     {cbm_recharge_rule::CBM_RECHARGE_ALL, "<ally_rule_cbm_recharge_all_text>" },
@@ -75,6 +78,15 @@ void follower_rules_ui::draw_follower_rules_ui( npc *guy )
     ctxt.register_action( "ANY_INPUT" );
     // This is still bizarrely necessary for imgui
     ctxt.set_timeout( 10 );
+
+#if defined(GODOT)
+    // Same loop-split takeover as the rest of MENU-13; only the source of an
+    // action moves. It declines when no panel is attending, and the legacy
+    // ImGui loop below runs instead.
+    if( p_impl.run_in_godot() ) {
+        return;
+    }
+#endif
 
     while( true ) {
         ui_manager::redraw_invalidated();
@@ -440,3 +452,136 @@ void follower_rules_ui_impl::draw_controls()
 
     ImGui::InvisibleButton( "BOTTOM_OF_WINDOW_KB_SCROLL_SELECTABLE", ImVec2( 1.0, 1.0 ) );
 }
+
+#if defined(GODOT)
+namespace
+{
+std::string hotkey_str( const input_event &hotkey )
+{
+    if( hotkey.sequence.empty() ) {
+        return std::string();
+    }
+    return std::string( 1, static_cast<char>( hotkey.sequence.front() ) );
+}
+
+template<typename T>
+void publish_radio_group( std::vector<godot_backend::FollowerRulesSnapshot::radio_group> &groups,
+                          const std::string &id, const std::string &title, const input_event &hotkey,
+                          const T &current, const std::map<T, std::string> &values, npc &guy )
+{
+    godot_backend::FollowerRulesSnapshot::radio_group g;
+    g.id = id;
+    g.title = title;
+    g.hotkey = hotkey_str( hotkey );
+    g.current = static_cast<int>( current );
+    g.options.reserve( values.size() );
+    for( const std::pair<const T, std::string> &value : values ) {
+        godot_backend::FollowerRulesSnapshot::radio_option opt;
+        opt.value = static_cast<int>( value.first );
+        std::string label = value.second;
+        parse_tags( label, get_player_character(), guy );
+        opt.label = std::move( label );
+        g.options.push_back( std::move( opt ) );
+    }
+    groups.push_back( std::move( g ) );
+}
+} // namespace
+
+void follower_rules_ui_impl::publish_to_godot()
+{
+    using snapshot = godot_backend::FollowerRulesSnapshot;
+    snapshot::data d;
+    d.title = string_format( _( "Rules for your follower, %s" ), guy->disp_name() );
+
+    const hotkey_queue &hotkeys = hotkey_queue::alphabets();
+    input_event assigned_hotkey = input_ptr->first_unassigned_hotkey( hotkeys );
+    // Same order as draw_controls(): boolean rules, engagement, aim, then the
+    // CBM radio groups when the follower has bionics -- so the same key means
+    // the same rule whether the takeover is on or off.
+    d.rules.reserve( ally_rule_strs.size() );
+    for( const std::pair<const std::string, ally_rule_data> &rule_data : ally_rule_strs ) {
+        assigned_hotkey = input_ptr->next_unassigned_hotkey( hotkeys, assigned_hotkey );
+        snapshot::bool_rule r;
+        r.flag = static_cast<int>( rule_data.second.rule );
+        r.enabled = guy->rules.has_flag( rule_data.second.rule );
+        r.label = get_parsed( r.enabled ? rule_data.second.rule_true_text :
+                              rule_data.second.rule_false_text );
+        r.hotkey = hotkey_str( assigned_hotkey );
+        d.rules.push_back( std::move( r ) );
+    }
+
+    assigned_hotkey = input_ptr->next_unassigned_hotkey( hotkeys, assigned_hotkey );
+    publish_radio_group( d.groups, "engagement", _( "Engagement rules:" ), assigned_hotkey,
+                         guy->rules.engagement, engagement_rules, *guy );
+
+    assigned_hotkey = input_ptr->next_unassigned_hotkey( hotkeys, assigned_hotkey );
+    publish_radio_group( d.groups, "aim", _( "Aiming rules:" ), assigned_hotkey,
+                         guy->rules.aim, aim_rule_map, *guy );
+
+    if( !guy->get_bionics().empty() ) {
+        assigned_hotkey = input_ptr->next_unassigned_hotkey( hotkeys, assigned_hotkey );
+        publish_radio_group( d.groups, "cbm_recharge", _( "CBM recharging rules:" ), assigned_hotkey,
+                             guy->rules.cbm_recharge, recharge_map, *guy );
+
+        assigned_hotkey = input_ptr->next_unassigned_hotkey( hotkeys, assigned_hotkey );
+        publish_radio_group( d.groups, "cbm_reserve", _( "CBM reserve rules" ), assigned_hotkey,
+                             guy->rules.cbm_reserve, reserve_map, *guy );
+    }
+
+    godot_backend::get_follower_rules_snapshot().publish( d );
+}
+
+bool follower_rules_ui_impl::run_in_godot()
+{
+    if( !guy ) {
+        return false;
+    }
+    godot_backend::FollowerRulesSnapshot &snap = godot_backend::get_follower_rules_snapshot();
+    snap.clear();
+    publish_to_godot();
+    while( true ) {
+        int rule_flag = 0;
+        std::string group;
+        int value = 0;
+        const std::string action = snap.next_action( rule_flag, group, value );
+        if( action.empty() ) {
+            // No panel attended; the caller runs the legacy ImGui loop.
+            snap.clear();
+            return false;
+        }
+        if( action == "QUIT" ) {
+            break;
+        }
+        if( action == "GODOT_TOGGLE" ) {
+            // Mirrors checkbox()'s mutation: toggle the flag, then set the
+            // override to the flag's new state.
+            const ally_rule rule = static_cast<ally_rule>( rule_flag );
+            const bool was_enabled = guy->rules.has_flag( rule );
+            guy->rules.toggle_flag( rule );
+            guy->rules.toggle_specific_override_state( rule, !was_enabled );
+        } else if( action == "GODOT_DEFAULT_RULE" ) {
+            const ally_rule rule = static_cast<ally_rule>( rule_flag );
+            guy->rules.clear_flag( rule );
+            guy->rules.clear_override( rule );
+        } else if( action == "GODOT_SET" ) {
+            if( group == "engagement" ) {
+                guy->rules.engagement = static_cast<combat_engagement>( value );
+            } else if( group == "aim" ) {
+                guy->rules.aim = static_cast<aim_rule>( value );
+            } else if( group == "cbm_recharge" ) {
+                guy->rules.cbm_recharge = static_cast<cbm_recharge_rule>( value );
+            } else if( group == "cbm_reserve" ) {
+                guy->rules.cbm_reserve = static_cast<cbm_reserve_rule>( value );
+            }
+        } else if( action == "DEFAULT_ALL" ) {
+            // Call the constructor and let *it* tell us what the default is,
+            // same as the legacy "Default ALL" button.
+            npc_follower_rules default_values;
+            guy->rules = default_values;
+        }
+        publish_to_godot();
+    }
+    snap.clear();
+    return true;
+}
+#endif // GODOT

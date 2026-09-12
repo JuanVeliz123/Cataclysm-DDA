@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <string>
+#include <vector>
 
 #include <imgui/imgui.h>
 
@@ -43,6 +44,13 @@ class faction_ui : public cataimgui::window
 
         bool execute();
 
+#if defined(GODOT)
+        /// Show this screen as a Godot panel and block until it is dismissed.
+        /// @return false when no panel attended, so the caller must run the
+        ///         legacy ImGui loop instead.
+        bool run_in_godot();
+#endif
+
         void draw_hint_section() const;
 
         void draw_your_faction_tab();
@@ -63,6 +71,30 @@ class faction_ui : public cataimgui::window
         void creature_display() const;
 
         void radio_the_faction();
+
+        // Fetch-only versions of the four draw_*_list()s above, and
+        // text-blob versions of the four *_display()s, shared by the Godot
+        // panel. The legacy draw functions are untouched and keep doing
+        // their own fetching -- these exist alongside them rather than
+        // replacing anything, so the ImGui path carries zero risk from this.
+        std::vector<basecamp *> get_camps() const;
+        std::vector<npc *> get_followers() const;
+        std::vector<const faction *> get_other_factions() const;
+        std::vector<const mtype_id *> get_creatures() const;
+        std::string camp_detail( basecamp *camp ) const;
+        std::string follower_detail( npc *follower ) const;
+        std::string other_faction_detail( const faction *fac ) const;
+        std::string creature_detail( const mtype_id *creature ) const;
+
+#if defined(GODOT)
+        /// Move the row cursor for the active tab (UP/DOWN/HOME/END) and
+        /// switch tabs (NEXT_TAB/PREV_TAB) -- the part of draw_controls()'s
+        /// per-tab list functions that is not itself an ImGui draw call.
+        void process_action( const std::string &action );
+        void publish_to_godot();
+        void select_row( int index );
+        void set_tab( int index );
+#endif
 
         std::string last_action;
     protected:
