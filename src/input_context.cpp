@@ -39,6 +39,14 @@
 #include "ui_manager.h"
 #include "sdl_gamepad.h"
 
+#if defined(GODOT)
+#include "godot_backend.h"
+#include "godot_keybind_snapshot.h"
+
+#include <chrono>
+#include <thread>
+#endif // GODOT
+
 enum class kb_menu_status {
     remove, reset, add, add_global, execute, show, filter
 };
@@ -997,10 +1005,132 @@ bool input_context::action_add( const std::string &name, const std::string &acti
     return true;
 }
 
-action_id input_context::display_menu( bool permit_execute_action )
+#if defined(GODOT)
+bool input_context::display_menu_godot( const bool permit_execute_action,
+                                        action_id &action_to_execute, bool &changed )
 {
-    action_id action_to_execute = ACTION_NULL;
+    using snapshot = godot_backend::KeybindSnapshot;
+    snapshot &snap = godot_backend::get_keybind_snapshot();
 
+    // ANY_INPUT and COORDINATE are plumbing, not things a player binds.
+    std::vector<std::string> actions( registered_actions );
+    actions.erase( std::remove_if( actions.begin(), actions.end(),
+    []( const std::string & a ) {
+        return a == ANY_INPUT || a == COORDINATE;
+    } ), actions.end() );
+    if( actions.empty() ) {
+        return false;
+    }
+
+    const auto build_rows = [&]() {
+        std::vector<snapshot::row> rows;
+        rows.reserve( actions.size() );
+        for( const std::string &id : actions ) {
+            bool overwrites_default = false;
+            const action_attributes &attrs =
+                inp_mngr.get_action_attributes( id, category, &overwrites_default );
+            bool basic_overwrites_default = false;
+            const action_attributes &basic =
+                inp_mngr.get_action_attributes( id, category, &basic_overwrites_default, true );
+
+            snapshot::row r;
+            r.action_id = id;
+            r.name = get_action_name( id );
+            r.keys = get_desc( id );
+            r.scope = attrs.input_events.empty() ? 2 : ( overwrites_default ? 1 : 0 );
+            r.customized = overwrites_default != basic_overwrites_default
+                           || attrs.input_events != basic.input_events;
+            rows.push_back( std::move( r ) );
+        }
+        return rows;
+    };
+
+    snap.clear();
+    snap.publish( category, build_rows(), permit_execute_action );
+
+    // Same contract as the other takeovers: shutdown wins, and a screen nothing
+    // is drawing is handed back rather than blocking the game thread forever.
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds( 1500 );
+    bool executing = false;
+    while( !snap.dismissed() && !executing ) {
+        if( godot_backend::is_shutdown_requested() ) {
+            snap.clear();
+            return true;
+        }
+        if( !snap.attended() && std::chrono::steady_clock::now() > deadline ) {
+            snap.clear();
+            return false;
+        }
+        const std::vector<snapshot::pending> requests = snap.take_requests();
+        bool dirty = false;
+        for( const snapshot::pending &req : requests ) {
+            bool is_local = false;
+            const action_attributes &attrs =
+                inp_mngr.get_action_attributes( req.action_id, category, &is_local );
+            const bool is_empty = attrs.input_events.empty();
+            const std::string name = get_action_name( req.action_id );
+
+            switch( req.op ) {
+                case snapshot::operation::remove:
+                    // Never wipe a global entry outright; the curses screen has the
+                    // same guard, and without it an action becomes unbindable.
+                    if( is_local || !is_empty ) {
+                        changed |= action_remove( name, req.action_id, is_local, is_empty );
+                        dirty = true;
+                    }
+                    break;
+                case snapshot::operation::reset:
+                    changed |= action_reset( req.action_id );
+                    dirty = true;
+                    break;
+                case snapshot::operation::add_local:
+                    changed |= action_add( name, req.action_id, is_local, kb_menu_status::add );
+                    dirty = true;
+                    break;
+                case snapshot::operation::add_global:
+                    if( is_local ) {
+                        popup( _( "There are already local keybindings defined for this action, please remove them first." ) );
+                    } else {
+                        changed |= action_add( name, req.action_id, is_local,
+                                               kb_menu_status::add_global );
+                        dirty = true;
+                    }
+                    break;
+                case snapshot::operation::execute:
+                    if( permit_execute_action ) {
+                        action_to_execute = look_up_action( req.action_id );
+                        executing = true;
+                    }
+                    break;
+            }
+            if( executing ) {
+                break;
+            }
+        }
+        if( dirty ) {
+            snap.publish( category, build_rows(), permit_execute_action );
+        }
+        std::this_thread::sleep_for( std::chrono::milliseconds( 4 ) );
+    }
+
+    snap.clear();
+    return true;
+}
+#endif // GODOT
+
+/**
+ * The curses keybindings screen: draws the list, runs its own input loop, and
+ * edits the input_manager in place. Split out of display_menu() so a backend that
+ * draws its own can stand in for exactly this part -- asking whether to save and
+ * putting the old bindings back if not is shared, and must not be written twice.
+ *
+ * @param action_to_execute out: the action the player chose to run, if any.
+ * @return whether any binding was changed.
+ */
+bool input_context::display_menu_legacy( const bool permit_execute_action,
+                                         action_id &action_to_execute )
+{
+    bool changed = false;
     input_context ctxt( "HELP_KEYBINDINGS", keyboard_mode::keychar );
     // Keybinding menu actions
     ctxt.register_action( "COORDINATE" );
@@ -1034,9 +1164,7 @@ action_id input_context::display_menu( bool permit_execute_action )
     ctxt.set_timeout( 50 );
 
     // has the user changed something?
-    bool changed = false;
     // keybindings before the user changed anything.
-    input_manager::t_action_contexts old_action_contexts( inp_mngr.action_contexts );
     // copy of registered_actions, but without the ANY_INPUT and COORDINATE, which should not be shown
     std::vector<std::string> org_registered_actions( registered_actions );
     org_registered_actions.erase( std::remove_if( org_registered_actions.begin(),
@@ -1183,6 +1311,25 @@ action_id input_context::display_menu( bool permit_execute_action )
             }
             kb_menu.status = kb_menu_status::show;
         }
+    }
+    return changed;
+}
+
+action_id input_context::display_menu( bool permit_execute_action )
+{
+    action_id action_to_execute = ACTION_NULL;
+    bool changed = false;
+    // Captured before either screen runs: the epilogue puts these back when the
+    // player declines to save.
+    input_manager::t_action_contexts old_action_contexts( inp_mngr.action_contexts );
+
+#if defined(GODOT)
+    // Both screens edit the same input_manager, so the two paths cannot disagree
+    // about what was changed or how it is saved.
+    if( !display_menu_godot( permit_execute_action, action_to_execute, changed ) )
+#endif
+    {
+        changed = display_menu_legacy( permit_execute_action, action_to_execute );
     }
 
     if( changed && query_yn( _( "Save changes?" ) ) ) {

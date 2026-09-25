@@ -5,7 +5,10 @@
 #endif
 
 // snmalloc isn't compatible with any sanitizers.
-#if !defined(__SANITIZE_ADDRESS__) && !__has_feature(address_sanitizer)
+// Also disable it for GODOT GDExtension builds: overriding global
+// operator new/delete inside a dylib loaded by Godot corrupts the heap when
+// allocations cross the engine↔extension boundary.
+#if !defined(__SANITIZE_ADDRESS__) && !__has_feature(address_sanitizer) && !defined(GODOT)
 #define CATA_USE_SNMALLOC
 #endif
 

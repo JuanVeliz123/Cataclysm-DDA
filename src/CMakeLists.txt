@@ -48,6 +48,96 @@ add_custom_command(
         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
 # Build tiles version if requested
+# Build Godot extension if requested
+if (GODOT)
+    # godot-cpp ships its own CMake project which exports the `godot-cpp` target
+    # with the right per-platform definitions (LINUX_ENABLED / MACOS_ENABLED /
+    # WINDOWS_ENABLED, DEBUG_ENABLED, HOT_RELOAD_ENABLED) and PIC already set.
+    # Building it as a subproject keeps the extension's ABI in lockstep with the
+    # bindings, which a hand-rolled IMPORTED target cannot guarantee.
+    if (NOT TARGET godot-cpp)
+        if (NOT GODOT_CPP_DIR)
+            if (DEFINED ENV{GODOT_CPP_DIR})
+                set(GODOT_CPP_DIR "$ENV{GODOT_CPP_DIR}")
+            else ()
+                set(GODOT_CPP_DIR "$ENV{HOME}/godot-cpp")
+            endif ()
+        endif ()
+        set(GODOT_CPP_DIR "${GODOT_CPP_DIR}" CACHE PATH "Path to a godot-cpp checkout")
+        if (NOT EXISTS "${GODOT_CPP_DIR}/CMakeLists.txt")
+            message(FATAL_ERROR
+                    "godot-cpp not found at ${GODOT_CPP_DIR}. Clone it with "
+                    "build-scripts/get-godot-cpp.sh or pass -DGODOT_CPP_DIR=<path>.")
+        endif ()
+        add_subdirectory("${GODOT_CPP_DIR}" "${CMAKE_BINARY_DIR}/godot-cpp" EXCLUDE_FROM_ALL)
+    endif ()
+
+    # Create a shared library for the extension
+    # Exclude SDL files if building for Godot. cata_imgui.cpp is kept and
+    # guards its SDL includes behind !defined(GODOT).
+    foreach(SDL_FILE sdltiles.cpp sdl_font.cpp sdl_geometry.cpp sdl_wrappers.cpp sdl_utils.cpp sdl_gamepad.cpp sdlsound.cpp sound_backend_sdl2.cpp sound_backend_sdl3.cpp pixel_minimap.cpp tileset_loader.cpp)
+        list(REMOVE_ITEM CATACLYSM_DDA_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/${SDL_FILE})
+    endforeach()
+
+    # messages.cpp is normally built into the game executable; the Godot
+    # extension needs it for the add_msg* family (messages.h/messages.cpp).
+    list(APPEND CATACLYSM_DDA_SOURCES ${MESSAGES_CPP})
+
+    add_library(cataclysm-godot SHARED
+            ${CATACLYSM_DDA_SOURCES}
+            ${CATACLYSM_DDA_HEADERS}
+            ${CMAKE_SOURCE_DIR}/godot/extensions/godot_ext.cpp)
+
+    target_include_directories(cataclysm-godot PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/godot/extensions)
+    # godot-cpp propagates its platform/feature definitions and include dirs
+    # through this target, so nothing here needs to restate them.
+    target_link_libraries(cataclysm-godot PRIVATE third-party imgui godot-cpp ZLIB::ZLIB)
+
+    # The extension is a shared library; its static dependencies must be PIC.
+    set_property(TARGET cataclysm-godot third-party imgui
+            PROPERTY POSITION_INDEPENDENT_CODE ON)
+
+    if(APPLE)
+        target_link_libraries(cataclysm-godot PRIVATE "-framework CoreFoundation" "-framework SystemConfiguration")
+    endif()
+
+    target_compile_definitions(cataclysm-godot PUBLIC GODOT)
+
+    # Name the artifact exactly as godot/extensions/cataclysm.gdextension expects
+    # per platform, so the Godot host can load it straight out of godot/bin/.
+    if(APPLE)
+        set(GODOT_EXT_FILENAME "libcataclysm-godot.dylib")
+    else()
+        get_target_property(GODOT_EXT_PLATFORM godot-cpp GODOTCPP_PLATFORM)
+        get_target_property(GODOT_EXT_ARCH godot-cpp GODOTCPP_ARCH)
+        get_target_property(GODOT_EXT_CPP_TARGET godot-cpp GODOTCPP_TARGET)
+        if(GODOT_EXT_CPP_TARGET STREQUAL "template_release")
+            set(GODOT_EXT_KIND "release")
+        else()
+            set(GODOT_EXT_KIND "debug")
+        endif()
+        if(WIN32)
+            set(GODOT_EXT_SUFFIX ".dll")
+        else()
+            set(GODOT_EXT_SUFFIX ".so")
+        endif()
+        set(GODOT_EXT_FILENAME
+                "libcataclysm-godot.${GODOT_EXT_PLATFORM}.${GODOT_EXT_KIND}.${GODOT_EXT_ARCH}${GODOT_EXT_SUFFIX}")
+    endif()
+
+    set_target_properties(cataclysm-godot PROPERTIES
+            PREFIX ""
+            SUFFIX ""
+            OUTPUT_NAME "${GODOT_EXT_FILENAME}")
+
+    # Post-build: copy to godot/bin/
+    add_custom_command(TARGET cataclysm-godot POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_SOURCE_DIR}/godot/bin/
+            COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:cataclysm-godot> ${CMAKE_SOURCE_DIR}/godot/bin/
+            COMMENT "Copying extension to Godot project"
+    )
+endif()
+
 if (TILES)
     add_library(
             cataclysm-tiles-common OBJECT

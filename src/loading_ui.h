@@ -12,6 +12,13 @@ void done();
 // device reset/loss invalidates or replaces it, so the texture is destroyed
 // against a valid renderer. No-op when no loading session is active.
 void release_gpu_resources();
+
+// Thread-safe snapshot for a Godot (or other) loading overlay. Independent of
+// the TILES ImGui splash / curses MOTD present.
+bool active();
+std::string context();
+std::string step();
+std::string tip();
 } // namespace loading_ui
 
 #endif // CATA_SRC_LOADING_UI_H

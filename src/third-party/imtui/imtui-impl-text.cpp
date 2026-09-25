@@ -204,18 +204,32 @@ void ImTui_ImplText_RenderDrawData(ImDrawData * drawData) {
                         auto col1 = cmd_list->VtxBuffer[vidx1].col;
                         auto col2 = cmd_list->VtxBuffer[vidx2].col;
 
-                        if (uv0.x != uv1.x || uv0.x != uv2.x || uv1.x != uv2.x ||
-                            uv0.y != uv1.y || uv0.y != uv2.y || uv1.y != uv2.y) {
-                            int vvidx0 = cmd_list->IdxBuffer[pcmd->IdxOffset + i + 3];
-                            int vvidx1 = cmd_list->IdxBuffer[pcmd->IdxOffset + i + 4];
-                            int vvidx2 = cmd_list->IdxBuffer[pcmd->IdxOffset + i + 5];
+                        // START CDDA PATCH
+                        // ImTui packs the codepoint in vtx1.col and cell width in
+                        // vtx2.col. A 1px atlas can give every glyph identical UVs,
+                        // so UV-difference alone drops all text and leaves grey fills.
+                        const bool uv_differs =
+                            uv0.x != uv1.x || uv0.x != uv2.x || uv1.x != uv2.x ||
+                            uv0.y != uv1.y || uv0.y != uv2.y || uv1.y != uv2.y;
+                        const bool packed_glyph = ( col0 != col1 ) && ( col1 < 0x110000u );
+                        if( uv_differs || packed_glyph ) {
+                            float x;
+                            float y;
+                            if( i + 5 < pcmd->ElemCount ) {
+                                int vvidx0 = cmd_list->IdxBuffer[pcmd->IdxOffset + i + 3];
+                                int vvidx1 = cmd_list->IdxBuffer[pcmd->IdxOffset + i + 4];
+                                int vvidx2 = cmd_list->IdxBuffer[pcmd->IdxOffset + i + 5];
 
-                            auto ppos0 = cmd_list->VtxBuffer[vvidx0].pos;
-                            auto ppos1 = cmd_list->VtxBuffer[vvidx1].pos;
-                            auto ppos2 = cmd_list->VtxBuffer[vvidx2].pos;
+                                auto ppos0 = cmd_list->VtxBuffer[vvidx0].pos;
+                                auto ppos1 = cmd_list->VtxBuffer[vvidx1].pos;
+                                auto ppos2 = cmd_list->VtxBuffer[vvidx2].pos;
 
-                            float x = ((pos0.x + pos1.x + pos2.x + ppos0.x + ppos1.x + ppos2.x)/6.0f);
-                            float y = ((pos0.y + pos1.y + pos2.y + ppos0.y + ppos1.y + ppos2.y)/6.0f) + 0.5f;
+                                x = ((pos0.x + pos1.x + pos2.x + ppos0.x + ppos1.x + ppos2.x)/6.0f);
+                                y = ((pos0.y + pos1.y + pos2.y + ppos0.y + ppos1.y + ppos2.y)/6.0f) + 0.5f;
+                            } else {
+                                x = ( pos0.x + pos1.x + pos2.x ) / 3.0f;
+                                y = ( pos0.y + pos1.y + pos2.y ) / 3.0f + 0.5f;
+                            }
 
                             if (std::fabs(y - lastCharY) < 0.5f && std::fabs(x - lastCharX) < 0.5f) {
                                 x = lastCharX + 1.0f;
@@ -228,16 +242,18 @@ void ImTui_ImplText_RenderDrawData(ImDrawData * drawData) {
                             int xx = (x) + 1;
                             int yy = (y) + 0;
                             if (xx < clip_rect.x || xx >= clip_rect.z || yy < clip_rect.y || yy >= clip_rect.w) {
-                            } else {
+                            } else if( xx >= 0 && yy >= 0 && xx < screen.nx && yy < screen.ny ) {
                                 auto & cell = screen.data[yy*screen.nx + xx];
                                 cell.ch = col1;
-                                cell.chwidth = (uint8_t)col2;
+                                uint8_t cw = static_cast<uint8_t>( col2 );
+                                cell.chwidth = ( cw >= 1 && cw <= 2 ) ? cw : 1;
                                 cell.fg = rgbToAnsi256(col0, false);
                             }
                             i += 3;
                         } else {
                             drawTriangle(pos0, pos1, pos2, rgbToAnsi256(col0, true), screen);
                         }
+                        // END CDDA PATCH
                     }
                 }
             }

@@ -1,5 +1,8 @@
 #pragma GCC diagnostic ignored "-Wunused-macros"
-#if !defined(TILES) && defined(_WIN32)
+// GODOT provides its own catacurses backend (godot_curses_backend.cpp); without
+// this guard a Windows Godot build (which leaves TILES undefined) would compile
+// the WinAPI console backend too and define every catacurses symbol twice.
+#if !defined(TILES) && !defined(GODOT) && defined(_WIN32)
 #ifndef CMAKE
 #define _UNICODE 1
 #endif

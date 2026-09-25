@@ -397,6 +397,21 @@ class input_context
          */
         action_id display_menu( bool permit_execute_action = false );
     private:
+#if defined(GODOT)
+        /**
+         * display_menu() drawn as a Godot panel instead of through the overlay.
+         * @param action_to_execute out: the action the player chose to run, if any.
+         * @param changed out: whether any binding was edited.
+         * @return false when no panel attended, so the caller must draw its own.
+         */
+        bool display_menu_godot( bool permit_execute_action, action_id &action_to_execute,
+                                 bool &changed );
+#endif
+        /**
+         * The curses keybindings screen. display_menu() calls this only when no
+         * other backend has drawn the screen; see the comment on the definition.
+         */
+        bool display_menu_legacy( bool permit_execute_action, action_id &action_to_execute );
         /**
          * Reset action to default keybindings.
          * Prompt the user to resolve conflicts if they arise.

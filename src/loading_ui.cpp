@@ -7,6 +7,8 @@
 #include "text_snippets.h"
 #include "ui_manager.h"
 
+#include <mutex>
+
 #if defined(TILES)
 #define IMGUI_DEFINE_MATH_OPERATORS
 #include "imgui/imgui.h"
@@ -24,6 +26,33 @@
 
 namespace
 {
+struct published_loading {
+    std::mutex mutex;
+    bool active = false;
+    std::string context;
+    std::string step;
+    std::string tip;
+};
+
+published_loading g_published;
+
+void publish_loading( bool active, const std::string &context, const std::string &step )
+{
+    std::lock_guard<std::mutex> lock( g_published.mutex );
+    g_published.active = active;
+    if( active ) {
+        g_published.context = context;
+        g_published.step = step;
+    } else {
+        g_published.context.clear();
+        g_published.step.clear();
+        g_published.tip.clear();
+    }
+}
+
+} // namespace
+
+#if !defined(GODOT)
 struct ui_state {
     ui_adaptor *ui;
     background_pane *bg;
@@ -48,7 +77,6 @@ struct ui_state {
     std::string context;
     std::string step;
 };
-} // namespace
 
 static ui_state *gLUI = nullptr;
 
@@ -114,6 +142,9 @@ static void redraw()
     mvwprintz( catacurses::stdscr, point( 0, TERMY - 1 ), c_black, gLUI->blanks );
     center_print( catacurses::stdscr, TERMY - 1, c_white, string_format( "%s %s",
                   gLUI->context.c_str(), gLUI->step.c_str() ) );
+    // GODOT (and plain curses) need an explicit refresh; otherwise the loading
+    // splash stays in the WINDOW buffer and the framebuffer remains black.
+    wnoutrefresh( catacurses::stdscr );
 #endif
 }
 
@@ -235,21 +266,31 @@ static void update_state( const std::string &context, const std::string &step )
     gLUI->context = std::string( context );
     gLUI->step = std::string( step );
 }
+#endif // !GODOT
 
 void loading_ui::show( const std::string &context, const std::string &step )
 {
     if( test_mode ) {
         return;
     }
+    publish_loading( true, context, step );
+#if defined(GODOT)
+    // Godot owns the loading present. Skip curses MOTD / ASCII splash so it
+    // does not flicker through a black session frame.
+    inp_mngr.pump_events();
+#else
     update_state( context, step );
     drain_renderer_recovery();
     ui_manager::redraw();
     refresh_display();
     inp_mngr.pump_events();
+#endif
 }
 
 void loading_ui::done()
 {
+    publish_loading( false, {}, {} );
+#if !defined(GODOT)
     if( gLUI != nullptr ) {
 #ifdef TILES
         // Need to manually clear the screen due to using direct ImGui calls
@@ -260,6 +301,31 @@ void loading_ui::done()
         delete gLUI;
         gLUI = nullptr;
     }
+#endif
+}
+
+bool loading_ui::active()
+{
+    std::lock_guard<std::mutex> lock( g_published.mutex );
+    return g_published.active;
+}
+
+std::string loading_ui::context()
+{
+    std::lock_guard<std::mutex> lock( g_published.mutex );
+    return g_published.context;
+}
+
+std::string loading_ui::step()
+{
+    std::lock_guard<std::mutex> lock( g_published.mutex );
+    return g_published.step;
+}
+
+std::string loading_ui::tip()
+{
+    std::lock_guard<std::mutex> lock( g_published.mutex );
+    return g_published.tip;
 }
 
 void loading_ui::release_gpu_resources()

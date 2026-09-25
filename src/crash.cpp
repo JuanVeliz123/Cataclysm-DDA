@@ -140,7 +140,10 @@ extern "C" {
             default:
                 return;
         }
-#if !(defined(WIN32) || defined(TILES)) && !defined(CYGWIN)
+        // Restore the terminal before dying, but only where a real curses
+        // library owns it. GODOT links no curses at all -- Godot owns the
+        // window, and its catacurses backend is not signal-safe anyway.
+#if !(defined(WIN32) || defined(TILES) || defined(GODOT)) && !defined(CYGWIN)
         endwin();
 #endif
         if( !isDebuggerActive() ) {

@@ -22,6 +22,15 @@ class main_menu
         // Shows the main menu and returns whether a game was started or not
         bool opening_screen();
 
+        /**
+         * Godot host entry points: skip opening_screen chrome and jump into
+         * new-character / load flows. @p new_game_sel2 matches vNewGameSubItems
+         * indices (0=custom, 1=preset, 2=random, 3=now, 4=full_random).
+         */
+        bool prepare_for_godot_start();
+        bool start_new_character( int new_game_sel2 );
+        bool start_load_game( const std::string &worldname, const std::string &save_id );
+
         static std::string queued_world_to_load;
         static std::string queued_save_id_to_load;
     private:
