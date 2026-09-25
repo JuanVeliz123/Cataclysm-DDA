@@ -106,8 +106,32 @@ class DynamicDataLoader
          * @throws std::exception on all kind of errors.
          */
         void load_object( const JsonObject &jo, const std::string &src,
-                          const cata_path &base_path = cata_path{},
-                          const cata_path &full_path = cata_path{} );
+                           const cata_path &base_path = cata_path{},
+                           const cata_path &full_path = cata_path{} );
+
+        /**
+         * A single JSON file to be loaded, plus the metadata @ref load_all_from_json
+         * needs to attribute it to the correct mod/source.
+         */
+        struct json_load_unit {
+            cata_path file;
+            std::string src;
+            cata_path base_path;
+        };
+
+        /**
+         * Parallelizes only the (expensive) parse stage of JSON loading:
+         * each file is read + decoded to a JsonValue concurrently across a thread
+         * pool, then the resulting JsonValues are applied via @ref load_all_from_json
+         * serially, in the original order. This keeps all mutation of the global
+         * registries single-threaded (required for correctness) while overlapping
+         * file I/O and flexbuffer decode across files.
+         *
+         * Parsing is done in chunks to bound peak memory: the parsed JsonValues of
+         * at most a few files are held in RAM at once (on warm caches these are
+         * mmap'd and cheap; on cold caches they are in-RAM flexbuffers).
+         */
+        void parallel_parse_and_apply( std::vector<json_load_unit> units );
 
         DynamicDataLoader();
         ~DynamicDataLoader();

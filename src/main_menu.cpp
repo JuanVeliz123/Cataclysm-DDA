@@ -578,6 +578,55 @@ void main_menu::load_char_templates()
     std::sort( templates.begin(), templates.end(), localized_compare );
 }
 
+bool main_menu::prepare_for_godot_start()
+{
+    current_holiday = get_holiday_from_time();
+
+    if( music::get_music_id() != music::music_id::title ) {
+        music::deactivate_music_id_all();
+    } else {
+        play_music( music::get_music_id_string() );
+    }
+
+    world_generator->set_active_world( nullptr );
+    world_generator->init();
+
+    init_strings();
+    load_char_templates();
+
+    ctxt.register_cardinal();
+    ctxt.register_action( "NEXT_TAB" );
+    ctxt.register_action( "PREV_TAB" );
+    ctxt.register_action( "PAGE_UP" );
+    ctxt.register_action( "PAGE_DOWN" );
+    ctxt.register_action( "CONFIRM" );
+    ctxt.register_action( "QUIT" );
+    ctxt.register_action( "SELECT" );
+    ctxt.register_action( "MOUSE_MOVE" );
+    ctxt.register_action( "SCROLL_UP" );
+    ctxt.register_action( "SCROLL_DOWN" );
+    ctxt.register_action( "ANY_INPUT" );
+
+    get_avatar() = avatar();
+    sel1 = 1;
+    sel2 = 0;
+    return true;
+}
+
+bool main_menu::start_new_character( int new_game_sel2 )
+{
+    prepare_for_godot_start();
+    sel1 = getopt( main_menu_opts::NEWCHAR );
+    sel2 = new_game_sel2;
+    return new_character_tab();
+}
+
+bool main_menu::start_load_game( const std::string &worldname, const std::string &save_id )
+{
+    prepare_for_godot_start();
+    return load_game( worldname, save_t::from_save_id( save_id ) );
+}
+
 bool main_menu::opening_screen()
 {
     // set holiday based on local system time

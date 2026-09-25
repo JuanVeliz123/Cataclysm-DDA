@@ -7,6 +7,7 @@
 #include <fstream>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <sstream>
 #include <stdexcept>
@@ -317,6 +318,8 @@ class flexbuffer_disk_cache
             const std::filesystem::path &lexically_normal_json_source_path ) {
             std::shared_ptr<flexbuffer_mmap_storage> storage;
 
+            std::lock_guard<std::mutex> lock( mutex_ );
+
             std::filesystem::path root_relative_source_path =
                 lexically_normal_json_source_path.lexically_relative(
                     root_path_ ).lexically_normal();
@@ -405,7 +408,10 @@ class flexbuffer_disk_cache
             }
 
             fb.close();
-            cached_flexbuffers_[json_source_path_string] = disk_cache_entry{ flexbuffer_path, mtime };
+            {
+                std::lock_guard<std::mutex> lock( mutex_ );
+                cached_flexbuffers_[json_source_path_string] = disk_cache_entry{ flexbuffer_path, mtime };
+            }
 
             return true;
         }
@@ -417,6 +423,10 @@ class flexbuffer_disk_cache
 
         std::filesystem::path cache_path_;
         std::filesystem::path root_path_;
+
+        // Guards all access to cached_flexbuffers_ so that concurrent
+        // parse_and_cache calls (e.g. parallel JSON data loading) are safe.
+        std::mutex mutex_;
 
         struct disk_cache_entry {
             std::filesystem::path flexbuffer_path;

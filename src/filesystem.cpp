@@ -136,8 +136,8 @@ std::string as_norm_dir( const std::string &path )
     std::filesystem::path dir = std::filesystem::u8path( path ) / std::filesystem::path{};
     std::filesystem::path norm = dir.lexically_normal();
     std::string ret = norm.generic_u8string();
-    if( "." == ret ) {
-        ret = "./"; // TODO Change the many places that use strings instead of paths
+    if( "." == ret || ".." == ret ) {
+        ret += "/"; // TODO Change the many places that use strings instead of paths
     }
     return ret;
 }

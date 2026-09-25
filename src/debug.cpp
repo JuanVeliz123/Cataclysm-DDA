@@ -342,6 +342,21 @@ static void debug_error_prompt(
             text, funcname, filename, line, getVersionString()
         );
 
+#if defined(GODOT)
+    // No interactive debug screen under GODOT. The blocking curses loop below
+    // has two failure modes this port cannot live with: its input wait still
+    // drains queued Godot commands (commands_safe_to_run knows ImGui windows,
+    // not curses ui_adaptors), so game logic re-enters underneath the report --
+    // and when that re-entry raises the same debugmsg again, the nested
+    // ui_adaptor trips cata_assert( !showing_debug_message ) and aborts the
+    // whole process. That is how the scenario probe died on a burnt vehicle's
+    // repeating display anomaly. The report is already in debug.log via
+    // DebugLog above; repeat it on stderr so headless runs surface it, and
+    // carry on -- an anomaly worth a message is not worth the game.
+    std::cerr << formatted_report << std::endl;
+    return;
+#endif
+
 #if defined(BACKTRACE)
     std::string backtrace_instructions =
         string_format(

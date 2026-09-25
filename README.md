@@ -58,6 +58,7 @@ We also have the following build guides:
 * Building on Windows with `MSYS2` at [COMPILING-MSYS.md](doc/c++/COMPILING-MSYS.md)
 * Building on Windows with `vcpkg` at [COMPILING-VS-VCPKG.md](doc/c++/COMPILING-VS-VCPKG.md)
 * Building with `cmake` at [COMPILING-CMAKE.md](doc/c++/COMPILING-CMAKE.md)  (*unofficial guide*)
+* Building the experimental Godot rendering backend at [COMPILING-GODOT.md](doc/c++/COMPILING-GODOT.md)  (*`godot-mig` branch only*)
 
 ## Contribute
 

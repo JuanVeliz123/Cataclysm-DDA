@@ -11,6 +11,10 @@
 #include <utility>
 
 #include "action.h"
+#if defined(GODOT)
+#include "godot_anim_snapshot.h"
+#include "godot_view_snapshot.h"
+#endif
 #include "activity_actor_definitions.h"
 #include "advanced_inv.h"
 #include "auto_note.h"
@@ -241,6 +245,17 @@ class user_turn
 
 input_context game::get_player_input( std::string &action )
 {
+#if defined(GODOT)
+    // Back on the map waiting for an action, so any curses/ImGui screen opened
+    // since the last turn has returned. Opening one spends no turn, and the
+    // overlay is otherwise only wiped at the end of one (game_do_turn), so a
+    // dismissed screen stayed painted over the map until the player next acted.
+    // Unconditional, unlike game_do_turn: any_window_shown() still reports a
+    // window closed this frame (ImGui's Active flag lags a frame), which left
+    // the overmap's cells behind, and a live ImGui window repaints its layer
+    // on the next blit anyway.
+    ::godot_backend::get_view_snapshot().clear_all();
+#endif
     map &here = get_map();
 
     const tripoint_bub_ms pos = u.pos_bub( here );
@@ -403,6 +418,28 @@ input_context game::get_player_input( std::string &action )
                     }
                 }
             }
+
+#if defined(GODOT)
+            // Publish and commit the combat-text frame here, rather than from a
+            // draw callback.
+            //
+            // The overlay's frame boundary is the w_terrain refresh at the end of
+            // game::draw, and game::draw never runs in this build: MapView draws
+            // the map from a snapshot, the HUD is a Godot panel, and nothing asks
+            // the main ui_adaptor to redraw. Measured, not assumed -- an entire
+            // session with a fight in it produced zero commits. Anything routed
+            // through a draw callback therefore cannot reach the screen.
+            //
+            // This loop does run: it is the input wait, and it is already where
+            // SCT is stepped. Called unconditionally so that the frame after the
+            // last thing expires publishes an empty list and clears the overlay;
+            // commit_frame is a no-op once there is nothing left on either side.
+            //
+            // This runs every draw callback, not just combat text -- the aim
+            // line, the targeting cursor and anything else a menu registered all
+            // publish from here now.
+            godot_backend::publish_transient_visuals();
+#endif
 
             if( pixel_minimap_option && g->w_pixel_minimap ) {
                 if( liveview.is_enabled() ) {

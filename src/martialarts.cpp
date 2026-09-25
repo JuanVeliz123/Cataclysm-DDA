@@ -28,6 +28,9 @@
 #include "flexbuffer_json.h"
 #include "game_constants.h"
 #include "generic_factory.h"
+#if defined(GODOT)
+#include "godot_martialarts_snapshot.h"
+#endif
 #include "input_context.h"
 #include "item.h"
 #include "item_factory.h"
@@ -2592,3 +2595,17 @@ bool ma_style_callback::key( const input_context &ctxt, const input_event &event
 
     return true;
 }
+
+#if defined(GODOT)
+namespace godot_backend
+{
+
+// Nothing publishes to the martial arts panel until the details screen routes
+// through it, so there are no lines to build yet.
+std::vector<MartialArtsSnapshot::detail_line> ma_style_details_lines( const matype_id & )
+{
+    return {};
+}
+
+} // namespace godot_backend
+#endif

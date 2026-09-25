@@ -396,6 +396,30 @@ std::shared_ptr<query_popup_impl> query_popup::create_or_get_impl()
     }
     return impl;
 }
+const std::string &query_popup::get_message() const
+{
+    return text;
+}
+
+bool query_popup::cancel_allowed() const
+{
+    return cancel;
+}
+
+std::vector<std::pair<std::string, std::string>> query_popup::option_descriptions() const
+{
+    // Same derivation as fold_query: the visible label of an option is the
+    // input_context description of its action, not the action name.
+    input_context ctxt( category, pref_kbd_mode );
+    std::vector<std::pair<std::string, std::string>> out;
+    out.reserve( options.size() );
+    for( const query_option &opt : options ) {
+        const std::string &name = ctxt.get_action_name( opt.action );
+        out.emplace_back( opt.action, ctxt.get_desc( opt.action, name, opt.filter ) );
+    }
+    return out;
+}
+
 query_popup::result query_popup::query()
 {
     std::shared_ptr<query_popup_impl> ui = create_or_get_impl();
