@@ -20,6 +20,7 @@
 #include "flexbuffer_json.h"
 #include "game.h"
 #include "input_context.h"
+#include "input_popup.h"
 #include "json.h"
 #include "json_loader.h"
 #include "monstergenerator.h"
@@ -29,12 +30,14 @@
 #include "path_info.h"
 #include "point.h"
 #include "string_formatter.h"
-#include "string_input_popup.h"
 #include "translation.h"
 #include "translations.h"
 #include "uilist.h"
 #include "ui_manager.h"
 #include "worldfactory.h"
+#if defined(GODOT)
+#include "godot_safemode_snapshot.h"
+#endif
 
 safemode &get_safemode()
 {
@@ -60,16 +63,7 @@ void safemode::show( const std::string &custom_name_in, bool is_safemode_in )
 
     const int header_height = 5;
     int content_height = 0;
-    const int num_columns = 6;
-
-    enum Columns : int {
-        COLUMN_RULE,
-        COLUMN_ATTITUDE,
-        COLUMN_PROXIMITY,
-        COLUMN_WHITE_BLACKLIST,
-        COLUMN_CATEGORY,
-        COLUMN_MOVEMENT_MODE
-    };
+    const int num_columns = MAX_COLUMN;
 
     catacurses::window w_border;
     catacurses::window w_header;
@@ -89,14 +83,22 @@ void safemode::show( const std::string &custom_name_in, bool is_safemode_in )
 
         ui.position_from_window( w_border );
     };
-    init_windows( ui );
+    // Registered lazily rather than called directly -- the same fix
+    // color_manager's migration needed. Under GODOT, FULL_SCREEN_WIDTH is
+    // never initialized (that happens in main.cpp's terminal-size
+    // negotiation, which the GODOT backend does not run), so an eager call
+    // here can build a window with a bogus negative size before the Godot
+    // takeover ever gets a chance to decline. `on_screen_resize` +
+    // `mark_resize()` only builds these windows when the legacy ImGui loop
+    // actually redraws, which never happens once a panel attends.
     ui.on_screen_resize( init_windows );
+    ui.mark_resize();
 
     int tab = GLOBAL_TAB;
     int line = 0;
     int column = 0;
     int start_pos = 0;
-    bool changes_made = false;
+    gui_changes_made = false;
     input_context ctxt( "SAFEMODE" );
     ctxt.register_navigate_ui_list();
     ctxt.register_leftright();
@@ -120,6 +122,21 @@ void safemode::show( const std::string &custom_name_in, bool is_safemode_in )
     }
 
     Character &player_character = get_player_character();
+
+    // Same loop-split takeover as the rest of the migrated menus. It
+    // declines when no panel is attending, and the legacy ImGui loop below
+    // runs instead -- the "show_legacy() plus a shared epilogue" split
+    // options/keybindings and auto_note used. Either way `global_rules`,
+    // `character_rules` (both already members) and `gui_changes_made` are
+    // left exactly as the interactive part would have left them, so the
+    // "Save changes?" epilogue at the bottom of this function runs
+    // unmodified regardless of which loop produced the changes.
+    bool godot_handled = false;
+#if defined(GODOT)
+    godot_handled = gui_run_in_godot( custom_name_in, is_safemode_in );
+#endif
+    if( !godot_handled ) {
+
     ui.on_redraw( [&]( const ui_adaptor & ) {
 
         int free_space = ( getmaxx( w_border ) - FULL_SCREEN_WIDTH ) / 5;
@@ -292,7 +309,7 @@ void safemode::show( const std::string &custom_name_in, bool is_safemode_in )
                    || navigate_ui_list( action, line, scroll_rate, recmax, true ) ) {
             // NO FURTHER ACTION REQUIRED
         } else if( action == "ADD_DEFAULT_RULESET" ) {
-            changes_made = true;
+            gui_changes_made = true;
             current_tab.emplace_back( "*", true, false, Creature::Attitude::HOSTILE,
                                       get_option<int>( "SAFEMODEPROXIMITY" )
                                       , Categories::HOSTILE_SPOTTED, MovementModes::BOTH );
@@ -300,12 +317,12 @@ void safemode::show( const std::string &custom_name_in, bool is_safemode_in )
                                       Categories::SOUND, MovementModes::BOTH );
             line = current_tab.size() - 1;
         } else if( action == "ADD_RULE" ) {
-            changes_made = true;
+            gui_changes_made = true;
             current_tab.emplace_back( "", true, false, Creature::Attitude::HOSTILE,
                                       get_option<int>( "SAFEMODEPROXIMITY" ), Categories::HOSTILE_SPOTTED, MovementModes::BOTH );
             line = current_tab.size() - 1;
         } else if( action == "REMOVE_RULE" && !current_tab.empty() ) {
-            changes_made = true;
+            gui_changes_made = true;
             current_tab.erase( current_tab.begin() + line );
             if( line > static_cast<int>( current_tab.size() ) - 1 ) {
                 line--;
@@ -314,12 +331,12 @@ void safemode::show( const std::string &custom_name_in, bool is_safemode_in )
                 line = 0;
             }
         } else if( action == "COPY_RULE" && !current_tab.empty() ) {
-            changes_made = true;
+            gui_changes_made = true;
             current_tab.push_back( current_tab[line] );
             line = current_tab.size() - 1;
         } else if( action == "SWAP_RULE_GLOBAL_CHAR" && !current_tab.empty() ) {
             if( ( tab == GLOBAL_TAB && !player_character.name.empty() ) || tab == CHARACTER_TAB ) {
-                changes_made = true;
+                gui_changes_made = true;
                 //copy over
                 auto &temp_rules_from = ( tab == GLOBAL_TAB ) ? global_rules : character_rules;
                 auto &temp_rules_to = ( tab == GLOBAL_TAB ) ? character_rules : global_rules;
@@ -332,63 +349,9 @@ void safemode::show( const std::string &custom_name_in, bool is_safemode_in )
                 tab = ( tab == GLOBAL_TAB ) ? CHARACTER_TAB : GLOBAL_TAB;
             }
         } else if( action == "CONFIRM" && !current_tab.empty() ) {
-            changes_made = true;
+            gui_changes_made = true;
             if( column == COLUMN_RULE ) {
-                catacurses::window w_help;
-                ui_adaptor help_ui;
-                const auto init_help_window = [&]( ui_adaptor & help_ui ) {
-                    const point offset( TERMX > FULL_SCREEN_WIDTH ? ( TERMX - FULL_SCREEN_WIDTH ) / 2 : 0,
-                                        TERMY > FULL_SCREEN_HEIGHT ? ( TERMY - FULL_SCREEN_HEIGHT ) / 2 : 0 );
-
-                    w_help = catacurses::newwin( FULL_SCREEN_HEIGHT / 2 - 2, FULL_SCREEN_WIDTH * 3 / 4,
-                                                 offset + point( 19 / 2, 7 + FULL_SCREEN_HEIGHT / 2 / 2 ) );
-
-                    help_ui.position_from_window( w_help );
-                };
-                init_help_window( help_ui );
-                help_ui.on_screen_resize( init_help_window );
-
-                help_ui.on_redraw( [&]( const ui_adaptor & ) {
-                    switch( current_tab[line].category ) {
-                        case Categories::HOSTILE_SPOTTED:
-                            // NOLINTNEXTLINE(cata-use-named-point-constants)
-                            fold_and_print( w_help, point( 1, 1 ), 999, c_white,
-                                            _(
-                                                "* is used as a Wildcard.  A few Examples:\n"
-                                                "\n"
-                                                "human          matches every NPC\n"
-                                                "zombie         matches the monster name exactly\n"
-                                                "acidic zo*     matches monsters beginning with 'acidic zo'\n"
-                                                "*mbie          matches monsters ending with 'mbie'\n"
-                                                "*cid*zo*ie     multiple * are allowed\n"
-                                                "AcI*zO*iE      case insensitive search" )
-                                          );
-                            break;
-                        case Categories::SOUND:
-                            // NOLINTNEXTLINE(cata-use-named-point-constants)
-                            fold_and_print( w_help, point( 1, 1 ), 999, c_white,
-                                            _(
-                                                "* is used as a Wildcard.  A few Examples:\n"
-                                                "\n"
-                                                "footsteps      matches the sound name exactly\n"
-                                                "a loud ba*     matches sounds beginning with 'a loud ba'\n"
-                                                "*losion!       matches sounds ending with 'losion!'\n"
-                                                "a *oud*ba*     multiple * are allowed\n"
-                                                "*LoU*bA*       case insensitive search" )
-                                          );
-                            break;
-                        default:
-                            break;
-                    }
-                    draw_border( w_help );
-                    wnoutrefresh( w_help );
-                } );
-
-                current_tab[line].rule = wildcard_trim_rule( string_input_popup()
-                                         .title( _( "Safe Mode Rule:" ) )
-                                         .width( 30 )
-                                         .text( current_tab[line].rule )
-                                         .query_string() );
+                gui_edit_rule_text( current_tab, line );
             } else if( column == COLUMN_WHITE_BLACKLIST ) {
                 current_tab[line].whitelist = !current_tab[line].whitelist;
             } else if( column == COLUMN_CATEGORY ) {
@@ -414,23 +377,7 @@ void safemode::show( const std::string &custom_name_in, bool is_safemode_in )
                 }
             } else if( column == COLUMN_PROXIMITY && ( current_tab[line].category == Categories::SOUND ||
                        !current_tab[line].whitelist ) ) {
-                const std::string text = string_input_popup()
-                                         .title( _( "Proximity Distance (0=max view distance)" ) )
-                                         .width( 4 )
-                                         .text( std::to_string( current_tab[line].proximity ) )
-                                         .description( _( "Option: " ) + std::to_string( get_option<int>( "SAFEMODEPROXIMITY" ) ) +
-                                                       " " + get_options().get_option( "SAFEMODEPROXIMITY" ).getDefaultText() )
-                                         .max_length( 3 )
-                                         .only_digits( true )
-                                         .query_string();
-                if( text.empty() ) {
-                    current_tab[line].proximity = get_option<int>( "SAFEMODEPROXIMITY" );
-                } else {
-                    //Let the options class handle the validity of the new value
-                    options_manager::cOpt temp_option = get_options().get_option( "SAFEMODEPROXIMITY" );
-                    temp_option.setValue( text );
-                    current_tab[line].proximity = temp_option.value_as<int>();
-                }
+                gui_edit_proximity( current_tab, line );
             } else if( column == COLUMN_MOVEMENT_MODE ) {
                 safemode::MovementModes &mode = current_tab[line].movement_mode;
                 switch( mode ) {
@@ -447,33 +394,35 @@ void safemode::show( const std::string &custom_name_in, bool is_safemode_in )
                 }
             }
         } else if( action == "ENABLE_RULE" && !current_tab.empty() ) {
-            changes_made = true;
+            gui_changes_made = true;
             current_tab[line].active = true;
         } else if( action == "DISABLE_RULE" && !current_tab.empty() ) {
-            changes_made = true;
+            gui_changes_made = true;
             current_tab[line].active = false;
         } else if( action == "LEFT" || action == "RIGHT" ) {
             column = inc_clamp_wrap( column, action == "RIGHT", num_columns );
         } else if( action == "MOVE_RULE_UP" && !current_tab.empty() ) {
-            changes_made = true;
+            gui_changes_made = true;
             if( line < static_cast<int>( current_tab.size() ) - 1 ) {
                 std::swap( current_tab[line], current_tab[line + 1] );
                 line++;
                 column = 0;
             }
         } else if( action == "MOVE_RULE_DOWN" && !current_tab.empty() ) {
-            changes_made = true;
+            gui_changes_made = true;
             if( line > 0 ) {
                 std::swap( current_tab[line],  current_tab[line - 1] );
                 line--;
                 column = 0;
             }
         } else if( action == "TEST_RULE" && !current_tab.empty() ) {
-            test_pattern( tab, line );
+            gui_test_pattern( current_tab, line );
         }
     }
 
-    if( !changes_made ) {
+    } // if( !godot_handled )
+
+    if( !gui_changes_made ) {
         return;
     }
 
@@ -492,13 +441,62 @@ void safemode::show( const std::string &custom_name_in, bool is_safemode_in )
     }
 }
 
-void safemode::test_pattern( const int tab_in, const int row_in )
+void safemode::gui_edit_rule_text( std::vector<rules_class> &current_tab, const int row )
 {
-    std::vector<std::string> creature_list;
+    std::string description;
+    switch( current_tab[row].category ) {
+        case Categories::HOSTILE_SPOTTED:
+            description = _(
+                              "* is used as a Wildcard.  A few Examples:\n"
+                              "\n"
+                              "human          matches every NPC\n"
+                              "zombie         matches the monster name exactly\n"
+                              "acidic zo*     matches monsters beginning with 'acidic zo'\n"
+                              "*mbie          matches monsters ending with 'mbie'\n"
+                              "*cid*zo*ie     multiple * are allowed\n"
+                              "AcI*zO*iE      case insensitive search" );
+            break;
+        case Categories::SOUND:
+            description = _(
+                              "* is used as a Wildcard.  A few Examples:\n"
+                              "\n"
+                              "footsteps      matches the sound name exactly\n"
+                              "a loud ba*     matches sounds beginning with 'a loud ba'\n"
+                              "*losion!       matches sounds ending with 'losion!'\n"
+                              "a *oud*ba*     multiple * are allowed\n"
+                              "*LoU*bA*       case insensitive search" );
+            break;
+        default:
+            break;
+    }
+    string_input_popup_imgui popup( 30, current_tab[row].rule, _( "Safe Mode Rule:" ) );
+    popup.set_label( _( "Safe Mode Rule:" ) );
+    popup.set_description( description, c_white, true );
+    current_tab[row].rule = wildcard_trim_rule( popup.query() );
+}
 
-    auto &temp_rules = ( tab_in == GLOBAL_TAB ) ? global_rules : character_rules;
+void safemode::gui_edit_proximity( std::vector<rules_class> &current_tab, const int row )
+{
+    string_input_popup_imgui popup( 4, std::to_string( current_tab[row].proximity ),
+                                    _( "Proximity Distance (0=max view distance)" ) );
+    popup.set_label( _( "Proximity Distance (0=max view distance):" ) );
+    popup.set_description( _( "Option: " ) + std::to_string( get_option<int>( "SAFEMODEPROXIMITY" ) ) +
+                           " " + get_options().get_option( "SAFEMODEPROXIMITY" ).getDefaultText() );
+    popup.set_max_input_length( 3 );
+    const std::string text = popup.query();
+    if( text.empty() ) {
+        current_tab[row].proximity = get_option<int>( "SAFEMODEPROXIMITY" );
+    } else {
+        //Let the options class handle the validity of the new value
+        options_manager::cOpt temp_option = get_options().get_option( "SAFEMODEPROXIMITY" );
+        temp_option.setValue( text );
+        current_tab[row].proximity = temp_option.value_as<int>();
+    }
+}
 
-    if( temp_rules[row_in].rule.empty() ) {
+void safemode::gui_test_pattern( std::vector<rules_class> &current_tab, const int row )
+{
+    if( current_tab[row].rule.empty() ) {
         return;
     }
 
@@ -508,95 +506,212 @@ void safemode::test_pattern( const int tab_in, const int row_in )
         return;
     }
 
-    //Loop through all monster mtypes
+    std::vector<std::string> creature_list;
     for( const mtype &mtype : MonsterGenerator::generator().get_all_mtypes() ) {
         std::string creature_name = mtype.nname();
-        if( wildcard_match( creature_name, temp_rules[row_in].rule ) ) {
+        if( wildcard_match( creature_name, current_tab[row].rule ) ) {
             creature_list.push_back( creature_name );
         }
     }
 
-    int start_pos = 0;
-    int content_height = 0;
-    int content_width = 0;
-
-    catacurses::window w_test_rule_border;
-    catacurses::window w_test_rule_content;
-
-    ui_adaptor ui;
-    const auto init_windows = [&]( ui_adaptor & ui ) {
-        const point offset( 15 + ( TERMX > FULL_SCREEN_WIDTH ? ( TERMX - FULL_SCREEN_WIDTH ) / 2 : 0 ),
-                            5 + ( TERMY > FULL_SCREEN_HEIGHT ? ( TERMY - FULL_SCREEN_HEIGHT ) / 2 :
-                                  0 ) );
-
-        content_height = FULL_SCREEN_HEIGHT - 8;
-        content_width = FULL_SCREEN_WIDTH - 30;
-
-        w_test_rule_border = catacurses::newwin( content_height + 2, content_width,
-                             offset );
-        w_test_rule_content = catacurses::newwin( content_height, content_width - 2,
-                              offset + point::south_east );
-
-        ui.position_from_window( w_test_rule_border );
-    };
-    init_windows( ui );
-    ui.on_screen_resize( init_windows );
-
-    int nmatch = creature_list.size();
-    const std::string buf = string_format( n_gettext( "%1$d monster matches: %2$s",
-                                           "%1$d monsters match: %2$s",
-                                           nmatch ), nmatch, temp_rules[row_in].rule.c_str() );
-
-    int line = 0;
-
-    input_context ctxt( "SAFEMODE_TEST" );
-    ctxt.register_navigate_ui_list();
-    ctxt.register_action( "QUIT" );
-    ctxt.register_action( "HELP_KEYBINDINGS" );
-
-    ui.on_redraw( [&]( const ui_adaptor & ) {
-        draw_border( w_test_rule_border, BORDER_COLOR, buf, hilite( c_white ) );
-        center_print( w_test_rule_border, content_height + 1, red_background( c_white ),
-                      _( "Lists monsters regardless of their attitude." ) );
-
-        wnoutrefresh( w_test_rule_border );
-
-        // Clear the lines
-        mvwrectf( w_test_rule_content, point::zero, c_black, ' ', 79, content_height );
-
-        calcStartPos( start_pos, line, content_height, creature_list.size() );
-
-        // display safe mode
-        for( int i = start_pos; i < static_cast<int>( creature_list.size() ); i++ ) {
-            if( i >= start_pos &&
-                i < start_pos + std::min( content_height, static_cast<int>( creature_list.size() ) ) ) {
-                nc_color line_color = c_white;
-
-                mvwprintz( w_test_rule_content, point( 0, i - start_pos ), line_color, "%d", i + 1 );
-                mvwprintz( w_test_rule_content, point( 4, i - start_pos ), line_color, "" );
-
-                wprintz( w_test_rule_content, c_yellow, ( line == i ) ? ">> " : "   " );
-
-                wprintz( w_test_rule_content, ( line == i ) ? hilite( line_color ) : line_color,
-                         creature_list[i] );
-            }
-        }
-
-        wnoutrefresh( w_test_rule_content );
-    } );
-
-    while( true ) {
-        ui_manager::redraw();
-
-        const int recmax = static_cast<int>( creature_list.size() );
-        const int scroll_rate = recmax > 20 ? 10 : 3;
-        const std::string action = ctxt.handle_input();
-        if( navigate_ui_list( action, line, scroll_rate, recmax, true ) ) {
-        } else if( action == "QUIT" ) {
-            break;
+    // Read-only, so a plain `uilist` -- already a migrated Godot panel --
+    // stands in for the bespoke scrollable window the legacy version built:
+    // the MENU-4 "drive the existing implementation" insight, used the same
+    // way the `help` screen's plan intends to.
+    const int nmatch = creature_list.size();
+    uilist test_list;
+    test_list.text = string_format( n_gettext( "%1$d monster matches: %2$s",
+                                    "%1$d monsters match: %2$s",
+                                    nmatch ), nmatch, current_tab[row].rule );
+    if( creature_list.empty() ) {
+        test_list.addentry( -1, false, -1, _( "(no monsters match)" ) );
+    } else {
+        for( const std::string &name : creature_list ) {
+            test_list.addentry( name );
         }
     }
+    test_list.query();
 }
+
+#if defined(GODOT)
+void safemode::gui_publish_to_godot( const std::string &custom_name_in, const bool is_safemode_in )
+{
+    using snapshot = godot_backend::SafemodeSnapshot;
+    snapshot::data d;
+    d.title = custom_name_in;
+    d.tab = gui_tab;
+    d.show_swap = is_safemode_in;
+    d.safe_mode_on = g->safe_mode == SAFE_MODE_ON;
+
+    Character &player_character = get_player_character();
+    d.character_locked = gui_tab == CHARACTER_TAB && player_character.name.empty();
+
+    if( !d.character_locked ) {
+        const std::vector<rules_class> &current_tab = gui_tab == GLOBAL_TAB ? global_rules :
+                character_rules;
+        d.rows.reserve( current_tab.size() );
+        for( const rules_class &rule : current_tab ) {
+            snapshot::row r;
+            r.rule = rule.rule;
+            r.active = rule.active;
+            r.attitude = rule.category == Categories::HOSTILE_SPOTTED ?
+                        Creature::get_attitude_ui_data( rule.attitude ).first.translated() : "---";
+            r.proximity = ( rule.category == Categories::SOUND || !rule.whitelist ) ?
+                          std::to_string( rule.proximity ) : "---";
+            r.whitelist = rule.whitelist;
+            r.category = rule.category == Categories::SOUND ? _( "Sound" ) : _( "Hostile" );
+            r.movement_mode = rule.movement_mode == MovementModes::WALKING ? _( "Walking" ) :
+                              rule.movement_mode == MovementModes::DRIVING ? _( "Driving" ) : _( "Both" );
+            d.rows.push_back( std::move( r ) );
+        }
+    }
+
+    godot_backend::get_safemode_snapshot().publish( d );
+}
+
+bool safemode::gui_run_in_godot( const std::string &custom_name_in, const bool is_safemode_in )
+{
+    godot_backend::SafemodeSnapshot &snap = godot_backend::get_safemode_snapshot();
+    snap.clear();
+    gui_tab = GLOBAL_TAB;
+    gui_publish_to_godot( custom_name_in, is_safemode_in );
+
+    Character &player_character = get_player_character();
+    while( true ) {
+        int row = -1;
+        int col = -1;
+        const std::string action = snap.next_action( row, col );
+        if( action.empty() ) {
+            // No panel attended; the caller runs the legacy ImGui loop.
+            snap.clear();
+            return false;
+        }
+        if( action == "QUIT" ) {
+            break;
+        }
+
+        std::vector<rules_class> &current_tab = gui_tab == GLOBAL_TAB ? global_rules : character_rules;
+        const bool locked = gui_tab == CHARACTER_TAB && player_character.name.empty();
+
+        if( action == "GODOT_TAB" ) {
+            gui_tab = col == CHARACTER_TAB ? CHARACTER_TAB : GLOBAL_TAB;
+        } else if( action == "ADD_DEFAULT_RULESET" && !locked ) {
+            gui_changes_made = true;
+            current_tab.emplace_back( "*", true, false, Creature::Attitude::HOSTILE,
+                                      get_option<int>( "SAFEMODEPROXIMITY" ),
+                                      Categories::HOSTILE_SPOTTED, MovementModes::BOTH );
+            current_tab.emplace_back( "*", true, true, Creature::Attitude::HOSTILE, 5,
+                                      Categories::SOUND, MovementModes::BOTH );
+        } else if( action == "ADD_RULE" && !locked ) {
+            gui_changes_made = true;
+            current_tab.emplace_back( "", true, false, Creature::Attitude::HOSTILE,
+                                      get_option<int>( "SAFEMODEPROXIMITY" ), Categories::HOSTILE_SPOTTED,
+                                      MovementModes::BOTH );
+        } else if( !locked && row >= 0 && row < static_cast<int>( current_tab.size() ) ) {
+            if( action == "GODOT_REMOVE" ) {
+                gui_changes_made = true;
+                current_tab.erase( current_tab.begin() + row );
+            } else if( action == "GODOT_COPY" ) {
+                gui_changes_made = true;
+                current_tab.push_back( current_tab[row] );
+            } else if( action == "GODOT_SWAP" ) {
+                if( ( gui_tab == GLOBAL_TAB && !player_character.name.empty() ) || gui_tab == CHARACTER_TAB ) {
+                    gui_changes_made = true;
+                    std::vector<rules_class> &to = gui_tab == GLOBAL_TAB ? character_rules : global_rules;
+                    to.push_back( current_tab[row] );
+                    current_tab.erase( current_tab.begin() + row );
+                    gui_tab = gui_tab == GLOBAL_TAB ? CHARACTER_TAB : GLOBAL_TAB;
+                }
+            } else if( action == "GODOT_ENABLE" ) {
+                gui_changes_made = true;
+                current_tab[row].active = true;
+            } else if( action == "GODOT_DISABLE" ) {
+                gui_changes_made = true;
+                current_tab[row].active = false;
+            } else if( action == "GODOT_MOVE_UP" ) {
+                if( row < static_cast<int>( current_tab.size() ) - 1 ) {
+                    gui_changes_made = true;
+                    std::swap( current_tab[row], current_tab[row + 1] );
+                }
+            } else if( action == "GODOT_MOVE_DOWN" ) {
+                if( row > 0 ) {
+                    gui_changes_made = true;
+                    std::swap( current_tab[row], current_tab[row - 1] );
+                }
+            } else if( action == "GODOT_TEST" ) {
+                // uilist is already a Godot panel, but this channel must
+                // still get out of its way -- same move
+                // AutoNoteSnapshot's GODOT_SYMBOL makes for its popups.
+                snap.set_suspended( true );
+                gui_test_pattern( current_tab, row );
+                snap.set_suspended( false );
+            } else if( action == "GODOT_CONFIRM" ) {
+                gui_changes_made = true;
+                switch( col ) {
+                    case COLUMN_RULE:
+                        snap.set_suspended( true );
+                        gui_edit_rule_text( current_tab, row );
+                        snap.set_suspended( false );
+                        break;
+                    case COLUMN_WHITE_BLACKLIST:
+                        current_tab[row].whitelist = !current_tab[row].whitelist;
+                        break;
+                    case COLUMN_CATEGORY:
+                        current_tab[row].category = current_tab[row].category == Categories::HOSTILE_SPOTTED
+                                                    ? Categories::SOUND : Categories::HOSTILE_SPOTTED;
+                        break;
+                    case COLUMN_ATTITUDE: {
+                        Creature::Attitude &attitude = current_tab[row].attitude;
+                        switch( attitude ) {
+                            case Creature::Attitude::HOSTILE:
+                                attitude = Creature::Attitude::NEUTRAL;
+                                break;
+                            case Creature::Attitude::NEUTRAL:
+                                attitude = Creature::Attitude::FRIENDLY;
+                                break;
+                            case Creature::Attitude::FRIENDLY:
+                                attitude = Creature::Attitude::ANY;
+                                break;
+                            case Creature::Attitude::ANY:
+                                attitude = Creature::Attitude::HOSTILE;
+                                break;
+                        }
+                        break;
+                    }
+                    case COLUMN_PROXIMITY:
+                        if( current_tab[row].category == Categories::SOUND || !current_tab[row].whitelist ) {
+                            snap.set_suspended( true );
+                            gui_edit_proximity( current_tab, row );
+                            snap.set_suspended( false );
+                        }
+                        break;
+                    case COLUMN_MOVEMENT_MODE: {
+                        MovementModes &mode = current_tab[row].movement_mode;
+                        switch( mode ) {
+                            case MovementModes::WALKING:
+                                mode = MovementModes::DRIVING;
+                                break;
+                            default:
+                            case MovementModes::DRIVING:
+                                mode = MovementModes::BOTH;
+                                break;
+                            case MovementModes::BOTH:
+                                mode = MovementModes::WALKING;
+                                break;
+                        }
+                        break;
+                    }
+                    default:
+                        break;
+                }
+            }
+        }
+        gui_publish_to_godot( custom_name_in, is_safemode_in );
+    }
+    snap.clear();
+    return true;
+}
+#endif // GODOT
 
 void safemode::add_rule( const std::string &rule_in, const Creature::Attitude attitude_in,
                          const int proximity_in,

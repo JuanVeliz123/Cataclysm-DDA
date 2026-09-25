@@ -22,6 +22,9 @@
 #include "translations.h"
 #include "ui_manager.h"
 #include "cata_imgui.h"
+#if defined(GODOT)
+#include "godot_uilist_snapshot.h"
+#endif
 #include "imgui/imgui.h"
 #include "imgui/imgui_internal.h"
 
@@ -934,6 +937,15 @@ shared_ptr_fast<uilist_impl> uilist::create_or_get_ui()
 
 shared_ptr_fast<uilist_impl> uilist::query( bool loop, int timeout, bool allow_unfiltered_hotkeys )
 {
+#if defined(GODOT)
+    // Godot renders the menu itself where it can. This is the single hook that
+    // moves most of the game's menus off the curses/ImGui overlay at once --
+    // uilist has 254 call sites. Menus it cannot reproduce fall through to the
+    // path below; see godot_backend::run_uilist_in_godot.
+    if( loop && godot_backend::run_uilist_in_godot( *this ) ) {
+        return nullptr;
+    }
+#endif
     input_context ctxt = create_main_input_context();
 
 #if defined(__ANDROID__)

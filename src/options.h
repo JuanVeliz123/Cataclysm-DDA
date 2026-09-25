@@ -385,6 +385,14 @@ class options_manager
 
         /** Find page by id. */
         Page &find_page( const std::string &id );
+
+        /**
+         * The curses options screen -- draw, input loop, edit the options in place.
+         * show() calls this only when no other backend has drawn the screen; see
+         * the comment on the definition, including what a non-empty return means.
+         */
+        std::string show_legacy( bool ingame, bool world_options_only, bool with_tabs,
+                                 options_container &OPTIONS_OLD, options_container &WOPTIONS_OLD );
 };
 
 struct option_slider {

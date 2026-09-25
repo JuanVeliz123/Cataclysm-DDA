@@ -4,6 +4,7 @@
 
 #include <array>
 #include <iosfwd>
+#include <map>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -456,6 +457,31 @@ class color_manager
         std::unordered_map<std::string, color_id> name_map; // NOLINT(cata-serialize)
 
         bool save_custom() const;
+
+        /// `show_gui()`'s working copy and change flag, promoted from locals
+        /// to members (the `medical_ui`/`bp` move) so the Godot takeover and
+        /// the legacy loop -- and the shared epilogue after either -- see the
+        /// same values.
+        std::map<std::string, color_struct> gui_name_color_map;
+        bool gui_stuff_changed = false;
+
+        /// The nested "pick a custom color" `uilist`, shared by the legacy
+        /// loop and the Godot takeover below.
+        void gui_pick_custom_color( int row, int col );
+        /// The nested "remove custom color" handler, shared the same way.
+        void gui_remove_custom_color( int row, int col );
+        /// The nested "load a color template" `uilist`, shared the same way.
+        void gui_load_template();
+        /// The nested "load a base color theme" `uilist`, shared the same way.
+        void gui_load_base_colors();
+
+#if defined(GODOT)
+        /// Show this screen as a Godot panel and block until it is dismissed.
+        /// @return false when no panel attended, so the caller must run the
+        ///         legacy ImGui loop instead.
+        bool gui_run_in_godot();
+        void gui_publish_to_godot();
+#endif
 
     public:
         color_manager() = default;

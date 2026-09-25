@@ -27,6 +27,9 @@
 #include "ui_manager.h"
 #include "uilist.h"
 #include "worldfactory.h"
+#if defined(GODOT)
+#include "godot_auto_note_snapshot.h"
+#endif
 
 namespace auto_notes
 {
@@ -297,6 +300,155 @@ void auto_note_manager_gui::set_cached_custom_symbol( const map_extra_id &mapExt
     }
 }
 
+void auto_note_manager_gui::change_symbol( const map_extra_id &currentItem,
+        std::pair<const map_extra, bool> &entry )
+{
+    string_input_popup_imgui custom_symbol_popup( 0 );
+    custom_symbol_popup.set_label( _( "Enter a map extra custom symbol (empty to unset):" ) );
+    custom_symbol_popup.set_max_input_length( 1 );
+    const std::string &custom_symbol_str = custom_symbol_popup.query();
+
+    if( custom_symbol_popup.cancelled() ) {
+        return;
+    }
+    if( custom_symbol_str.empty() ) {
+        ( bCharacter ? char_custom_symbol_cache : global_custom_symbol_cache ).erase( currentItem );
+    } else {
+        uilist ui_colors;
+        ui_colors.text = _( "Pick a color:" );
+        int i = 0;
+        const std::unordered_map<std::string, note_color> &note_color_names = get_note_color_names();
+        for( const std::pair<const std::string, note_color> &color_pair : note_color_names ) {
+            ui_colors.addentry( string_format( pgettext( "note color", "%1$s:%2$s, " ), color_pair.first,
+                                               colorize( color_pair.second.name, color_pair.second.color ) ) );
+            if( entry.first.color == color_pair.second.color ) {
+                ui_colors.selected = i;
+            }
+            i++;
+        }
+        // Default note color is the last one
+        const nc_color color_default = c_yellow;
+        const color_manager &colors = get_all_colors();
+        const std::string color_default_name = colors.get_name( color_default );
+        const translation color_yellow = to_translation( "color", "yellow" );
+        ui_colors.addentry( string_format( _( "Default: %s" ),
+                                           colorize( color_yellow.translated(), color_default ) ) );
+
+        ui_colors.query();
+        std::string custom_symbol_color;
+        if( ui_colors.ret >= 0 && static_cast<size_t>( ui_colors.ret ) < note_color_names.size() ) {
+            auto iter = note_color_names.begin();
+            std::advance( iter, ui_colors.ret );
+
+            // selected color
+            custom_symbol_color = colors.get_name( iter->second.color );
+        }
+
+        custom_symbol value_to_set;
+        value_to_set.set_symbol( custom_symbol_str );
+        value_to_set.set_color( custom_symbol_color );
+        set_cached_custom_symbol( currentItem, value_to_set, bCharacter );
+    }
+    ( bCharacter ? charwasChanged : globalwasChanged ) = true;
+}
+
+#if defined(GODOT)
+void auto_note_manager_gui::publish_to_godot( const bool char_emptyMode,
+        const bool global_emptyMode )
+{
+    using snapshot = godot_backend::AutoNoteSnapshot;
+    snapshot::data d;
+    d.title = _( "Auto notes manager" );
+    d.selected_tab = bCharacter ? 0 : 1;
+    d.empty_mode = bCharacter ? char_emptyMode : global_emptyMode;
+    d.auto_notes_map_extras = get_option<bool>( "AUTO_NOTES_MAP_EXTRAS" );
+
+    if( !d.empty_mode ) {
+        const std::vector<map_extra_id> &display_cache = bCharacter ? char_displayCache :
+                global_displayCache;
+        const std::unordered_map<map_extra_id, std::pair<const map_extra, bool>> &extra_cache =
+                    bCharacter ? char_mapExtraCache : global_mapExtraCache;
+        const std::unordered_map<map_extra_id, custom_symbol> &symbol_cache = bCharacter ?
+                char_custom_symbol_cache : global_custom_symbol_cache;
+        d.rows.reserve( display_cache.size() );
+        for( const map_extra_id &id : display_cache ) {
+            const std::pair<const map_extra, bool> &cache_entry = extra_cache.at( id );
+            snapshot::row r;
+            r.name = cache_entry.first.name();
+            r.enabled = cache_entry.second;
+            const auto symbol_it = symbol_cache.find( id );
+            r.has_custom_symbol = symbol_it != symbol_cache.end();
+            r.symbol = r.has_custom_symbol ? symbol_it->second.get_symbol_string() :
+                      cache_entry.first.get_symbol();
+            r.symbol_color = string_from_color( r.has_custom_symbol ? symbol_it->second.get_color() :
+                                                cache_entry.first.color );
+            d.rows.push_back( std::move( r ) );
+        }
+    }
+
+    godot_backend::get_auto_note_snapshot().publish( d );
+}
+
+bool auto_note_manager_gui::run_in_godot( const bool char_emptyMode, const bool global_emptyMode )
+{
+    godot_backend::AutoNoteSnapshot &snap = godot_backend::get_auto_note_snapshot();
+    snap.clear();
+    publish_to_godot( char_emptyMode, global_emptyMode );
+    while( true ) {
+        int index = -1;
+        int tab = -1;
+        const std::string action = snap.next_action( index, tab );
+        if( action.empty() ) {
+            // No panel attended; the caller runs the legacy ImGui loop.
+            snap.clear();
+            return false;
+        }
+        if( action == "QUIT" ) {
+            break;
+        }
+        if( action == "SWITCH_OPTION" ) {
+            get_options().get_option( "AUTO_NOTES_MAP_EXTRAS" ).setNext();
+            get_options().save();
+        } else if( action == "GODOT_TAB" ) {
+            bCharacter = tab == 0;
+        } else if( bCharacter ? char_emptyMode : global_emptyMode ) {
+            // Every other action addresses a row; there is none to address.
+        } else {
+            const std::vector<map_extra_id> &display_cache = bCharacter ? char_displayCache :
+                    global_displayCache;
+            if( index < 0 || index >= static_cast<int>( display_cache.size() ) ) {
+                publish_to_godot( char_emptyMode, global_emptyMode );
+                continue;
+            }
+            const map_extra_id &current_item = display_cache[index];
+            std::pair<const map_extra, bool> &entry = ( bCharacter ? char_mapExtraCache :
+                    global_mapExtraCache )[current_item];
+            currentLine = index;
+            if( action == "GODOT_TOGGLE" ) {
+                entry.second = !entry.second;
+                ( bCharacter ? charwasChanged : globalwasChanged ) = true;
+            } else if( action == "GODOT_ENABLE" ) {
+                entry.second = true;
+                ( bCharacter ? charwasChanged : globalwasChanged ) = true;
+            } else if( action == "GODOT_DISABLE" ) {
+                entry.second = false;
+                ( bCharacter ? charwasChanged : globalwasChanged ) = true;
+            } else if( action == "GODOT_SYMBOL" ) {
+                // The symbol prompt and colour uilist are already Godot
+                // panels, but this channel must still get out of their way --
+                // same move MedicalSnapshot's APPLY makes for the item picker.
+                snap.set_suspended( true );
+                change_symbol( current_item, entry );
+                snap.set_suspended( false );
+            }
+        }
+        publish_to_godot( char_emptyMode, global_emptyMode );
+    }
+    snap.clear();
+    return true;
+}
+#endif // GODOT
+
 void auto_note_manager_gui::show()
 {
     const int iHeaderHeight = 4;
@@ -316,13 +468,26 @@ void auto_note_manager_gui::show()
     // If the display cache contains no entries, the player might not have discovered any of
     // the map extras. In this case, we switch to a special state that alerts the user of this
     // in order to avoid confusion a completely empty GUI might normally create.
-    bool bCharacter = true;
     const bool char_emptyMode = char_displayCache.empty();
     const bool global_emptyMode = global_displayCache.empty();
     const int char_cacheSize = static_cast<int>( char_displayCache.size() );
     const int global_cacheSize = static_cast<int>( global_displayCache.size() );
 
-    int currentLine = 0;
+    // Same loop-split takeover as the rest of the migrated menus; only the
+    // source of an action moves. It declines when no panel is attending, and
+    // the legacy ImGui loop below runs instead. Either way bCharacter and
+    // currentLine (both members) and the caches are left exactly as the
+    // interactive part would have left them, so the epilogue at the bottom of
+    // this function -- the "auto notes disabled globally" / "Save changes?"
+    // prompts -- runs unmodified regardless of which loop produced the
+    // changes, the same "show_legacy() plus a shared epilogue" split
+    // options/keybindings used.
+    bool godot_handled = false;
+#if defined(GODOT)
+    godot_handled = run_in_godot( char_emptyMode, global_emptyMode );
+#endif
+    if( !godot_handled ) {
+
     int startPosition = 0;
     int endPosition = 0;
 
@@ -499,57 +664,14 @@ void auto_note_manager_gui::show()
             entry.second = false;
             ( bCharacter ? charwasChanged : globalwasChanged ) = true;
         } else if( action == "CHANGE_MAPEXTRA_CHARACTER" ) {
-            string_input_popup_imgui custom_symbol_popup( 0 );
-            custom_symbol_popup.set_label( _( "Enter a map extra custom symbol (empty to unset):" ) );
-            custom_symbol_popup.set_max_input_length( 1 );
-            const std::string &custom_symbol_str = custom_symbol_popup.query();
-
-            if( !custom_symbol_popup.cancelled() ) {
-                if( custom_symbol_str.empty() ) {
-                    ( bCharacter ? char_custom_symbol_cache : global_custom_symbol_cache ).erase( currentItem );
-                } else {
-                    uilist ui_colors;
-                    ui_colors.text = _( "Pick a color:" );
-                    int i = 0;
-                    const std::unordered_map<std::string, note_color> &note_color_names = get_note_color_names();
-                    for( const std::pair<const std::string, note_color> &color_pair : note_color_names ) {
-                        ui_colors.addentry( string_format( pgettext( "note color", "%1$s:%2$s, " ), color_pair.first,
-                                                           colorize( color_pair.second.name, color_pair.second.color ) ) );
-                        if( entry.first.color == color_pair.second.color ) {
-                            ui_colors.selected = i;
-                        }
-                        i++;
-                    }
-                    // Default note color is the last one
-                    const nc_color color_default = c_yellow;
-                    const color_manager &colors = get_all_colors();
-                    const std::string color_default_name = colors.get_name( color_default );
-                    const translation color_yellow = to_translation( "color", "yellow" );
-                    ui_colors.addentry( string_format( _( "Default: %s" ),
-                                                       colorize( color_yellow.translated(), color_default ) ) );
-
-                    ui_colors.query();
-                    std::string custom_symbol_color;
-                    if( ui_colors.ret >= 0 && static_cast<size_t>( ui_colors.ret ) < note_color_names.size() ) {
-                        auto iter = note_color_names.begin();
-                        std::advance( iter, ui_colors.ret );
-
-                        // selected color
-                        custom_symbol_color = colors.get_name( iter->second.color );
-                    }
-
-                    custom_symbol value_to_set;
-                    value_to_set.set_symbol( custom_symbol_str );
-                    value_to_set.set_color( custom_symbol_color );
-                    set_cached_custom_symbol( currentItem, value_to_set, bCharacter );
-                }
-                ( bCharacter ? charwasChanged : globalwasChanged ) = true;
-            }
+            change_symbol( currentItem, entry );
         } else if( action == "CONFIRM" ) {
             entry.second = !entry.second;
             ( bCharacter ? charwasChanged : globalwasChanged ) = true;
         }
     }
+
+    } // if( !godot_handled )
 
     if( !get_option<bool>( "AUTO_NOTES" ) &&
         get_option<bool>( "AUTO_NOTES_MAP_EXTRAS" ) &&

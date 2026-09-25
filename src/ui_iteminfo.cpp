@@ -1,5 +1,9 @@
 #include "ui_iteminfo.h"
 
+#if defined(GODOT)
+#include "godot_textwin_snapshot.h"
+#endif
+
 #include <imgui/imgui.h>
 #include <string>
 #include <vector>
@@ -67,6 +71,27 @@ void iteminfo_window::execute()
         ui_manager::redraw();
         return;
     }
+
+#if defined(GODOT)
+    // Item info is formatted text you scroll and dismiss, so it goes to the
+    // shared Godot text window rather than the curses/ImGui overlay.
+    {
+        std::vector<godot_backend::TextWinSnapshot::tab> tabs;
+        tabs.push_back( { std::string(),
+                          remove_color_tags( format_item_info( data.get_item_display(),
+                                             data.get_item_compare() ) ) } );
+        int current = 0;
+        std::string subtitle;
+        if( !data.get_type_name().empty() &&
+            data.get_item_name().find( data.get_type_name() ) == std::string::npos ) {
+            subtitle = remove_color_tags( data.get_type_name() );
+        }
+        if( godot_backend::run_textwin_in_godot(
+                remove_color_tags( data.get_item_name() ), subtitle, tabs, current ) ) {
+            return;
+        }
+    }
+#endif
 
     while( true ) {
         ui_manager::redraw();

@@ -95,6 +95,30 @@ class user_interface
         void show();
 
         bool bStuffChanged = false;
+
+    private:
+        /// The current tab, authoritative on the Godot side the same way
+        /// `safemode::gui_tab` is -- row-only requests carry no tab of their
+        /// own, so this says which of `tabs` they address. Unused by the
+        /// legacy ImGui loop, which keeps its own local `iTab`.
+        int gui_tab = 0;
+
+        /// The rule-text edit prompt, shared by the legacy loop and the
+        /// Godot takeover -- `string_input_popup_imgui` already routes
+        /// itself through the Godot text-prompt channel, so this needs no
+        /// bespoke panel, only a shared call site. Returns false (and
+        /// leaves the rule's text untouched) when the player entered
+        /// nothing or cancelled.
+        bool gui_edit_rule_text( rule_list &current_tab, int row );
+
+#if defined(GODOT)
+        /// Show this screen as a Godot panel and block until it is
+        /// dismissed.
+        /// @return false when no panel attended, so the caller must run the
+        ///         legacy ImGui loop instead.
+        bool gui_run_in_godot();
+        void gui_publish_to_godot();
+#endif
 };
 
 class base_settings

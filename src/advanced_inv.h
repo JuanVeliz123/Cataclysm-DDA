@@ -36,6 +36,13 @@ class advanced_inventory
         void display();
         void temp_hide();
 
+#if defined(GODOT)
+        /// Show this screen as a Godot panel and block until it is dismissed.
+        /// @return false when no panel attended, so the caller must run the
+        ///         legacy loop instead.
+        bool run_in_godot();
+#endif
+
         void init();
 
         void process_action( const std::string &input_action );
@@ -222,6 +229,13 @@ class advanced_inventory
          */
         bool query_charges( aim_location destarea, const advanced_inv_listitem &sitem,
                             const std::string &action, int &amount );
+
+#if defined(GODOT)
+        void publish_to_godot();
+        /// A clicked row: switch `src` to `p_side` (mirrors what LEFT/RIGHT
+        /// already do) and select `index` within it.
+        void select_row( side p_side, int index );
+#endif
 };
 
 #endif // CATA_SRC_ADVANCED_INV_H

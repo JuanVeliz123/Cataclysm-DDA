@@ -189,6 +189,18 @@ class overmap_sidebar : public cataimgui::window
         void draw_quick_reference();
         void draw_layer_info();
         void draw_debug();
+        /// Join the next text to the current line, or indent it. No-ops while
+        /// recording -- calling ImGui outside a frame is not safe, and the
+        /// recorded form carries the same intent as flags on the line.
+        void same_line();
+        void indent();
+        void unindent();
+#if defined(GODOT)
+        /// While set, draw_sidebar_text appends to recorded_ instead of drawing.
+        bool recording_ = false;
+        int record_indent_ = 0;
+        bool record_join_ = false;
+#endif
     public:
         int width = 0;
         int x_pos = 0;
@@ -196,6 +208,28 @@ class overmap_sidebar : public cataimgui::window
 
         void init();
         void draw_controls() override;
+#if defined(GODOT)
+        struct recorded_line {
+            std::string text;
+            std::string color;
+            int indent = 0;
+            /// Continues the previous line rather than starting its own.
+            bool join = false;
+            /// A section heading rather than body text.
+            bool header = false;
+        };
+        std::vector<recorded_line> recorded_;
+        /**
+         * Run the same content the sidebar draws, collecting it as text.
+         *
+         * Every line the sidebar shows already goes through draw_sidebar_text,
+         * so recording there gets the real content rather than a second version
+         * of it that drifts. What the recording does not reproduce is layout:
+         * collapsible sections are always expanded, and the panel decides how
+         * to fold them.
+         */
+        const std::vector<recorded_line> &record();
+#endif
     protected:
         cataimgui::bounds get_bounds() override;
         void on_resized() override {

@@ -213,6 +213,12 @@ class query_popup
          */
         std::shared_ptr<query_popup_impl> create_or_get_impl();
 
+#if defined(GODOT)
+        /// Handle of this popup's entry in the Godot notice stack, for the
+        /// display-only (static_popup) case. Zero when it is not a notice.
+        /// Protected so static_popup can retire its own.
+        mutable uint64_t godot_notice_ = 0;
+#endif
 
     private:
         struct query_option {
@@ -290,6 +296,7 @@ class static_popup : public query_popup
 {
     public:
         static_popup();
+        ~static_popup();
 
     private:
         std::shared_ptr<query_popup_impl> ui;
