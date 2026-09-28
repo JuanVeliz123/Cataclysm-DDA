@@ -27,7 +27,7 @@ class main_menu
          * new-character / load flows. @p new_game_sel2 matches vNewGameSubItems
          * indices (0=custom, 1=preset, 2=random, 3=now, 4=full_random).
          */
-        bool prepare_for_godot_start();
+        bool prepare_for_godot_start( bool load_core_data = true );
         bool start_new_character( int new_game_sel2 );
         bool start_load_game( const std::string &worldname, const std::string &save_id );
 
@@ -55,7 +55,7 @@ class main_menu
          * Does what it sounds like, but this function also exists in order to gracefully handle
          * the case where the player goes to the 'Settings' tab and changes the language.
         */
-        void init_strings();
+        void init_strings( bool load_core_data = true );
         /** Helper function for @ref init_strings */
         std::vector<std::string> load_file( const std::string &path,
                                             const std::string &alt_text ) const;

@@ -527,10 +527,14 @@ void bp_qualities_provided::load( const JsonObject &jo )
 void body_part_type::reset()
 {
     body_part_factory.reset();
+    combined_similar_bodyparts.clear();
 }
 
 void body_part_type::finalize_all()
 {
+    // Rebuilt by finalize(). Anything left from data loaded before would repeat every
+    // entry, or name body parts that no longer exist.
+    combined_similar_bodyparts.clear();
     body_part_factory.finalize();
 }
 

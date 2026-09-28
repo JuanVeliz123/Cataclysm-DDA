@@ -7,9 +7,11 @@
 #include <memory>
 #include <numeric>
 #include <queue>
+#include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
+#include <vector>
 
 #include "action.h"
 #include "activity_actor_definitions.h"
@@ -2478,9 +2480,18 @@ void construction::load( const JsonObject &jo, const std::string_view )
     optional( jo, was_loaded, "strict", strict, false );
 }
 
+// Blueprint requirements look up how to build the same terrain and furniture again and
+// again, and each lookup scans every construction; the answer only changes with them.
+static std::unordered_map<std::string, std::vector<construction_id>> &blueprint_build_sequences()
+{
+    static std::unordered_map<std::string, std::vector<construction_id>> sequences;
+    return sequences;
+}
+
 void reset_constructions()
 {
     construction_factory.reset();
+    blueprint_build_sequences().clear();
 }
 
 void check_constructions()
@@ -2580,6 +2591,7 @@ static std::vector<item_comp> frame_items;
 
 void finalize_constructions()
 {
+    blueprint_build_sequences().clear();
     frame_items.clear();
     for( const vpart_info &vpi : vehicles::parts::get_all() ) {
         if( !vpi.has_flag( flag_INITIAL_PART.str() ) ) {
@@ -2771,14 +2783,20 @@ build_reqs get_build_reqs_for_furn_ter_ids(
     // adding the constructions to the total_builds map
     const auto add_builds = [&total_builds, &base_ter]( const std::string & target_id, int count ) {
 
-        std::vector<construction_id> construction_chain = find_build_sequence( target_id, [](
-        construction const & cons ) {
-            return !( cons.post_terrain.empty() || cons.pre_terrain.size() > 1 ||
-                      cons.category == construction_category_REPAIR ||
-                      cons.category == construction_category_DECONSTRUCT );
-        }, [&base_ter]( construction const & cons ) {
-            return cons.pre_terrain.empty() || *cons.pre_terrain.begin() == base_ter.id().str();
-        } );
+        std::unordered_map<std::string, std::vector<construction_id>> &sequences =
+            blueprint_build_sequences();
+        auto sequence = sequences.find( target_id );
+        if( sequence == sequences.end() ) {
+            sequence = sequences.emplace( target_id, find_build_sequence( target_id, [](
+            construction const & cons ) {
+                return !( cons.post_terrain.empty() || cons.pre_terrain.size() > 1 ||
+                          cons.category == construction_category_REPAIR ||
+                          cons.category == construction_category_DECONSTRUCT );
+            }, [&base_ter]( construction const & cons ) {
+                return cons.pre_terrain.empty() || *cons.pre_terrain.begin() == base_ter.id().str();
+            } ) ).first;
+        }
+        const std::vector<construction_id> &construction_chain = sequence->second;
 
         // count == 0 means we cannot find a valid route to construct this terrain from the ground up
         // thus skip it.

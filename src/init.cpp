@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <exception>
 #include <filesystem>
@@ -995,7 +996,14 @@ void DynamicDataLoader::finalize_loaded_data()
 
     for( const named_entry &e : entries ) {
         loading_ui::show( _( "Finalizing" ), e.first );
+        const std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
         e.second();
+        const std::chrono::milliseconds elapsed = std::chrono::duration_cast<std::chrono::milliseconds>
+                ( std::chrono::steady_clock::now() - start );
+        // Only the slow steps, to trace slow loads without flooding the log.
+        if( elapsed >= std::chrono::milliseconds( 100 ) ) {
+            DebugLog( D_WARNING, D_MAIN ) << "Finalizing " << e.first << ": " << elapsed.count() << " ms";
+        }
     }
 
     if( !get_option<bool>( "SKIP_VERIFICATION" ) ) {

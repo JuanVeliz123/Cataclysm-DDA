@@ -368,6 +368,18 @@ void worldfactory::init()
 {
     load_last_world_info();
 
+    // The active world must outlive the rescan: active_world, and the options manager's
+    // pointer to its options, would otherwise dangle once all_worlds is cleared. Reading
+    // options through that freed memory made every world's options fail to load, and
+    // then get overwritten with the defaults below.
+    std::unique_ptr<WORLD> kept_active_world;
+    if( active_world != nullptr ) {
+        const auto active_it = all_worlds.find( active_world->world_name );
+        if( active_it != all_worlds.end() && active_it->second.get() == active_world ) {
+            kept_active_world = std::move( active_it->second );
+        }
+    }
+
     all_worlds.clear();
 
     // The validity of a world is determined by the existence of any
@@ -432,6 +444,18 @@ void worldfactory::init()
             continue;
         }
         add_existing_world( dir );
+    }
+
+    if( kept_active_world ) {
+        const auto rescanned = all_worlds.find( kept_active_world->world_name );
+        if( rescanned != all_worlds.end() ) {
+            // Keep the object in use, with the save list as found on disk now.
+            kept_active_world->world_saves = rescanned->second->world_saves;
+            rescanned->second = std::move( kept_active_world );
+        } else {
+            // The active world is gone from disk.
+            set_active_world( nullptr );
+        }
     }
 }
 

@@ -10461,9 +10461,9 @@ small_fake_map::small_fake_map( const ter_id &ter_type )
             for( int gridz = -OVERMAP_DEPTH; gridz <= OVERMAP_HEIGHT; gridz++ ) {
                 std::unique_ptr<submap> sm = std::make_unique<submap>();
 
-                sm->set_all_ter( ter_type );
-                sm->set_all_furn( furn_str_id::NULL_ID() );
-                sm->set_all_traps( tr_null );
+                // Uniform, which already means no furniture and no traps: a submap only
+                // takes tile storage once something is placed on it.
+                sm->set_all_ter( ter_type, true );
 
                 setsubmap( get_nonant( tripoint_rel_sm{ gridx, gridy, gridz } ), sm.get() );
 
@@ -10474,6 +10474,34 @@ small_fake_map::small_fake_map( const ter_id &ter_type )
 }
 
 small_fake_map::~small_fake_map() = default;
+
+void small_fake_map::count_terrain_and_furniture( const ter_id &base_ter,
+        std::map<ter_id, int> &terrains, std::map<furn_id, int> &furnitures ) const
+{
+    for( const std::unique_ptr<submap> &sm : temp_submaps_ ) {
+        if( sm->is_uniform() ) {
+            // Nothing was placed on it, so it holds one terrain and no furniture.
+            const ter_id &ter = sm->get_ter( point_sm_ms::zero );
+            if( ter != base_ter ) {
+                terrains[ter] += SEEX * SEEY;
+            }
+            continue;
+        }
+        for( int x = 0; x < SEEX; ++x ) {
+            for( int y = 0; y < SEEY; ++y ) {
+                const point_sm_ms p( x, y );
+                const ter_id &ter = sm->get_ter( p );
+                if( ter != base_ter ) {
+                    terrains[ter] += 1;
+                }
+                const furn_id &furn = sm->get_furn( p );
+                if( furn != furn_str_id::NULL_ID() ) {
+                    furnitures[furn] += 1;
+                }
+            }
+        }
+    }
+}
 
 void map::set_graffiti( const tripoint_bub_ms &p, const std::string &contents )
 {

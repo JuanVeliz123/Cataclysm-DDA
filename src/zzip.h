@@ -10,6 +10,7 @@
 #include <optional>
 #include <string_view>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 #include "flexbuffer_json.h"
@@ -86,6 +87,14 @@ class zzip
          * we can't until c++20.
          */
         bool add_file( std::filesystem::path const &zzip_relative_path, std::string_view content );
+
+        /**
+         * Writes several files into the zzip at once, as if by add_file for each in order,
+         * but rewriting the footer only once. Prefer this when writing many entries:
+         * every footer rewrite copies the whole index, so N add_file calls cost O(N^2).
+         * Returns true on success, false on any error.
+         */
+        bool add_files( std::vector<std::pair<std::filesystem::path, std::string_view>> const &files );
 
         /**
          * Directly copies compressed entries from one zzip to another, keeping the same path.

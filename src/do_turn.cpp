@@ -601,6 +601,8 @@ bool game::do_turn()
         !u.is_dead_state() ) {
         autosave();
     }
+    // Keeps the memory of a big world bounded between saves; cheap until far quads pile up.
+    MAPBUFFER.compact_far_quads();
 
     weather.update_weather();
 

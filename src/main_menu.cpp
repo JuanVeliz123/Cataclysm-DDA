@@ -427,7 +427,7 @@ void main_menu::init_windows()
     LAST_TERM = point( TERMX, TERMY );
 }
 
-void main_menu::init_strings()
+void main_menu::init_strings( const bool load_core_data )
 {
     // ASCII Art
     mmenu_title = load_file( PATH_INFO::title( current_holiday ), _( "Cataclysm: Dark Days Ahead" ) );
@@ -530,13 +530,15 @@ void main_menu::init_strings()
         vSettingsHotkeys.push_back( get_hotkeys( item ) );
     }
 
-    try {
-        g->load_core_data();
-    } catch( const std::exception &err ) {
-        debugmsg( err.what() );
-        std::exit( 1 );
+    if( load_core_data ) {
+        try {
+            g->load_core_data();
+        } catch( const std::exception &err ) {
+            debugmsg( err.what() );
+            std::exit( 1 );
+        }
+        vdaytip = SNIPPET.random_from_category( "tip" ).value_or( translation() ).translated();
     }
-    vdaytip = SNIPPET.random_from_category( "tip" ).value_or( translation() ).translated();
 }
 
 void main_menu::display_text( const std::string &text, const std::string &title, int &selected )
@@ -578,7 +580,7 @@ void main_menu::load_char_templates()
     std::sort( templates.begin(), templates.end(), localized_compare );
 }
 
-bool main_menu::prepare_for_godot_start()
+bool main_menu::prepare_for_godot_start( const bool load_core_data )
 {
     current_holiday = get_holiday_from_time();
 
@@ -591,7 +593,7 @@ bool main_menu::prepare_for_godot_start()
     world_generator->set_active_world( nullptr );
     world_generator->init();
 
-    init_strings();
+    init_strings( load_core_data );
     load_char_templates();
 
     ctxt.register_cardinal();
@@ -623,7 +625,9 @@ bool main_menu::start_new_character( int new_game_sel2 )
 
 bool main_menu::start_load_game( const std::string &worldname, const std::string &save_id )
 {
-    prepare_for_godot_start();
+    // Loading a game reloads all data in game::setup(), core data included, so loading
+    // it here first would only be thrown away.
+    prepare_for_godot_start( false );
     return load_game( worldname, save_t::from_save_id( save_id ) );
 }
 

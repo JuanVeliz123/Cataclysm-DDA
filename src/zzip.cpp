@@ -85,8 +85,9 @@ struct zzip_vector_storage : flexbuffer_storage {
     }
 };
 
-// To save time, and because we aren't multithreading, we can cache zstd
-// compress and decompress contexts, indexed by dictionary path.
+// To save time we cache zstd compress and decompress contexts, indexed by dictionary
+// path. A context can't be shared between threads, so each thread keeps its own; a zzip
+// uses the contexts of the thread that loaded it, and must not outlive that thread.
 struct cached_zstd_context {
     std::vector<char> dictionary_;
     ZSTD_CCtx *cctx = nullptr;
@@ -134,7 +135,7 @@ struct cached_zstd_context {
     }
 };
 
-std::unordered_map<std::string, cached_zstd_context> cached_contexts;
+thread_local std::unordered_map<std::string, cached_zstd_context> cached_contexts;
 
 } // namespace
 
@@ -440,7 +441,15 @@ std::optional<zzip> zzip::load(
 
 bool zzip::add_file( std::filesystem::path const &zzip_relative_path, std::string_view content )
 {
-    size_t estimated_size = ZSTD_compressBound( content.length() );
+    return add_files( { { zzip_relative_path, content } } );
+}
+
+bool zzip::add_files( std::vector<std::pair<std::filesystem::path, std::string_view>> const
+                      &files )
+{
+    if( files.empty() ) {
+        return true;
+    }
 
     JsonObject footer_copy = copy_footer();
     footer_copy.allow_omitted_members();
@@ -452,35 +461,42 @@ bool zzip::add_file( std::filesystem::path const &zzip_relative_path, std::strin
         old_content_end = meta_opt->content_end;
     }
 
-    std::string relative_path_string = zzip_relative_path.generic_u8string();
+    // Reserve room for the worst case of every entry up front. update_footer trims
+    // the file back down to what was actually written.
+    std::vector<std::string> relative_path_strings;
+    relative_path_strings.reserve( files.size() );
+    size_t required_size = old_content_end + kFixedSizeOverhead;
+    for( const std::pair<std::filesystem::path, std::string_view> &file : files ) {
+        relative_path_strings.emplace_back( file.first.generic_u8string() );
+        required_size += ZSTD_SKIPPABLEHEADERSIZE + relative_path_strings.back().length() +
+                         kEntryChecksumFrameSize + ZSTD_compressBound( file.second.length() );
+    }
 
-    if( !ensure_capacity_for(
-            old_content_end +
-            ZSTD_SKIPPABLEHEADERSIZE + relative_path_string.length() +
-            kEntryChecksumFrameSize +
-            estimated_size +
-            kFixedSizeOverhead ) ) {
+    if( !ensure_capacity_for( required_size ) ) {
         return false;
     }
 
-    size_t final_size = write_file_at( relative_path_string, content, old_content_end );
-
-    if( ZSTD_isError( final_size ) ) {
-        return false;
+    std::vector<compressed_entry> new_entries;
+    new_entries.reserve( files.size() );
+    // A path given more than once keeps its last content, as successive add_file calls would.
+    std::unordered_map<std::string_view, size_t> entry_index;
+    size_t content_end = old_content_end;
+    for( size_t i = 0; i < files.size(); ++i ) {
+        size_t final_size = write_file_at( relative_path_strings[i], files[i].second, content_end );
+        if( final_size == 0 || ZSTD_isError( final_size ) ) {
+            return false;
+        }
+        compressed_entry entry{ relative_path_strings[i], content_end, final_size };
+        auto [it, inserted] = entry_index.emplace( relative_path_strings[i], new_entries.size() );
+        if( inserted ) {
+            new_entries.emplace_back( std::move( entry ) );
+        } else {
+            new_entries[it->second] = std::move( entry );
+        }
+        content_end += final_size;
     }
 
-    std::vector<compressed_entry> new_entry;
-    new_entry.emplace_back( zzip::compressed_entry{
-        std::move( relative_path_string ),
-        old_content_end,
-        final_size
-    } );
-
-    if( !update_footer( footer_copy, old_content_end + final_size, new_entry ) ) {
-        return false;
-    }
-
-    return true;
+    return update_footer( footer_copy, content_end, new_entries );
 }
 
 

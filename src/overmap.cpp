@@ -4,12 +4,15 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <exception>
 #include <filesystem>
 #include <optional>
 #include <set>
 #include <sstream>
 #include <stdexcept>
+#include <string>
+#include <string_view>
 #include <unordered_set>
 #include <vector>
 
@@ -59,6 +62,8 @@
 #include "translations.h"
 #include "worldfactory.h"
 #include "zzip.h"
+
+#include <zstd/common/xxhash.h>
 
 static const mongroup_id GROUP_NEMESIS( "GROUP_NEMESIS" );
 static const mongroup_id GROUP_OCEAN_DEEP( "GROUP_OCEAN_DEEP" );
@@ -3692,6 +3697,15 @@ void overmap::place_radios()
     }
 }
 
+// Hashes both the destination and the content, so that data unchanged but bound for another
+// file (a different character's view, a different dimension) is never mistaken as saved.
+static uint64_t overmap_content_hash( const cata_path &path, std::string_view content )
+{
+    const std::string path_string = path.generic_u8string();
+    return XXH64( content.data(), content.size(),
+                  XXH64( path_string.data(), path_string.size(), 0 ) );
+}
+
 void overmap::open( overmap_special_batch &enabled_specials )
 {
     if( world_generator->active_world->has_compression_enabled() ) {
@@ -3707,9 +3721,10 @@ void overmap::open( overmap_special_batch &enabled_specials )
                                                 ( PATH_INFO::world_base_save_path() / "overmaps.dict" ).get_unrelative_path()
                                               );
 
-            if( z && read_from_zzip_optional( *z, terfilename_path, [this]( std::string_view sv ) {
+            if( z && read_from_zzip_optional( *z, terfilename_path, [this, &zzip_path]( std::string_view sv ) {
             std::istringstream is{ std::string( sv ) };
             unserialize( is );
+            terrain_disk_hash = overmap_content_hash( zzip_path, sv );
             } ) ) {
                 const cata_path plrfilename = overmapbuffer::player_filename( loc );
                 read_from_file_optional( plrfilename, [this, &plrfilename]( std::istream & is ) {
@@ -3746,16 +3761,34 @@ void overmap::open( overmap_special_batch &enabled_specials )
 // Note: this may throw io errors from std::ofstream
 void overmap::save() const
 {
-    write_to_file( overmapbuffer::player_filename( loc ), [&]( std::ostream & stream ) {
-        serialize_view( stream );
-    } );
+    // Every loaded overmap is saved on every save, but most of them are unchanged since
+    // they were last read or written, so only what changed is written out again.
+    const cata_path view_path = overmapbuffer::player_filename( loc );
+    std::ostringstream view_stream;
+    serialize_view( view_stream );
+    const std::string view = std::move( view_stream ).str();
+    const uint64_t view_hash = overmap_content_hash( view_path, view );
+    if( view_hash != view_disk_hash ) {
+        write_to_file( view_path, [&]( std::ostream & stream ) {
+            stream << view;
+        } );
+        view_disk_hash = view_hash;
+    }
+
+    std::ostringstream terrain_stream;
+    serialize( terrain_stream );
+    const std::string terrain = std::move( terrain_stream ).str();
 
     if( world_generator->active_world->has_compression_enabled() ) {
         const std::string terfilename = overmapbuffer::terrain_filename( loc );
         const std::filesystem::path terfilename_path = std::filesystem::u8path( terfilename );
         const cata_path overmaps_folder = PATH_INFO::current_dimension_save_path() / zzip_overmap_directory;
-        assure_dir_exist( overmaps_folder );
         const cata_path zzip_path = overmaps_folder / terfilename_path + zzip_suffix;
+        const uint64_t terrain_hash = overmap_content_hash( zzip_path, terrain );
+        if( terrain_hash == terrain_disk_hash ) {
+            return;
+        }
+        assure_dir_exist( overmaps_folder );
         std::optional<zzip> z = zzip::load( zzip_path.get_unrelative_path(),
                                             ( PATH_INFO::world_base_save_path() / "overmaps.dict" ).get_unrelative_path()
                                           );
@@ -3768,25 +3801,27 @@ void overmap::save() const
             );
         }
 
-        std::stringstream s;
-        serialize( s );
-
-        if( !z->add_file( terfilename_path, s.str() ) ) {
+        if( !z->add_file( terfilename_path, terrain ) ) {
             throw std::runtime_error( string_format( "Failed to save omap %d.%d to %s", loc.x(),
                                       loc.y(), zzip_path.get_unrelative_path().generic_u8string().c_str() ) );
         }
+        terrain_disk_hash = terrain_hash;
         cata_path tmp_path = zzip_path + ".tmp";
         if( z->compact_to( tmp_path.get_unrelative_path(), 2.0 ) ) {
             z.reset();
             rename_file( tmp_path, zzip_path );
         }
     } else {
-        write_to_file( PATH_INFO::current_dimension_save_path() /
-                       overmapbuffer::terrain_filename(
-                           loc ), [&](
-        std::ostream & stream ) {
-            serialize( stream );
+        const cata_path terrain_path = PATH_INFO::current_dimension_save_path() /
+                                       overmapbuffer::terrain_filename( loc );
+        const uint64_t terrain_hash = overmap_content_hash( terrain_path, terrain );
+        if( terrain_hash == terrain_disk_hash ) {
+            return;
+        }
+        write_to_file( terrain_path, [&]( std::ostream & stream ) {
+            stream << terrain;
         } );
+        terrain_disk_hash = terrain_hash;
     }
 }
 

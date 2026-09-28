@@ -2746,6 +2746,13 @@ class small_fake_map : public smallmap
     public:
         explicit small_fake_map( const ter_id &ter_type = ter_str_id( "t_dirt" ).id() );
         ~small_fake_map() override;
+
+        /**
+         * Counts, over every level, the tiles whose terrain is not base_ter and the tiles
+         * with furniture.
+         */
+        void count_terrain_and_furniture( const ter_id &base_ter, std::map<ter_id, int> &terrains,
+                                          std::map<furn_id, int> &furnitures ) const;
 };
 
 #endif // CATA_SRC_MAP_H

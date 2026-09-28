@@ -95,10 +95,14 @@ void sub_body_part_type::load( const JsonObject &jo, std::string_view )
 void sub_body_part_type::reset()
 {
     sub_body_part_factory.reset();
+    combined_similar_sub_bodyparts.clear();
 }
 
 void sub_body_part_type::finalize_all()
 {
+    // Rebuilt by finalize(). Anything left from data loaded before would repeat every
+    // entry, or name sub body parts that no longer exist.
+    combined_similar_sub_bodyparts.clear();
     sub_body_part_factory.finalize();
 }
 

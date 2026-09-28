@@ -2,9 +2,13 @@
 #ifndef CATA_SRC_MAPBUFFER_H
 #define CATA_SRC_MAPBUFFER_H
 
+#include <cstdint>
 #include <list>
 #include <map>
 #include <memory>
+#include <string>
+#include <unordered_map>
+#include <vector>
 
 #include "coordinates.h"
 
@@ -29,6 +33,15 @@ class mapbuffer
 
         /** Delete all buffered submaps. **/
         void clear();
+
+        /**
+         * Keep quads outside the reality bubble serialized and compressed in memory instead
+         * of as live submaps, once enough of them pile up, to bound memory while exploring
+         * a big world. Nothing is written to disk until save(); a compacted quad becomes
+         * live again as soon as it is looked up. Call only between turns, when nothing
+         * holds a pointer to a submap outside the reality bubble.
+         */
+        void compact_far_quads();
 
         /** Delete all buffered submaps except those inside the reality bubble.
          *
@@ -85,11 +98,24 @@ class mapbuffer
         submap *unserialize_submaps( const tripoint_abs_sm &p );
         bool submap_file_exists( const tripoint_abs_sm &p );
         void deserialize( const JsonArray &ja );
-        void save_quad(
-            const cata_path &dirname, const cata_path &filename,
-            const tripoint_abs_omt &om_addr, std::list<tripoint_abs_sm> &submaps_to_delete,
-            bool delete_after_save );
+        std::string serialize_quad( const std::vector<tripoint_abs_sm> &submap_addrs );
+        // Makes the quad holding p live again if it was compacted. Returns whether it was.
+        bool thaw_quad( const tripoint_abs_sm &p );
         submap_map_t submaps; // NOLINT(cata-serialize)
+
+        // A quad compacted by compact_far_quads(), as it would be saved.
+        struct cold_quad {
+            std::string compressed;
+            size_t size = 0;
+            uint64_t hash = 0;
+        };
+        std::unordered_map<tripoint_abs_omt, cold_quad> cold_quads; // NOLINT(cata-serialize)
+        /**
+         * Hash of each quad file's contents as last read from or written to disk, keyed by
+         * the quad's full path. save() skips a quad that serializes to the same hash, which
+         * avoids recompressing and rewriting the many quads that did not change since.
+         */
+        std::unordered_map<std::string, uint64_t> quad_disk_hashes; // NOLINT(cata-serialize)
 };
 
 extern mapbuffer MAPBUFFER;

@@ -722,6 +722,9 @@ void clear_techniques_and_martial_arts()
     martialarts.reset();
     ma_buffs.reset();
     ma_techniques.reset();
+    // finalize_martial_arts() adds similar limbs to every vector, so vectors kept from
+    // data loaded before would collect those again, or refer to body parts that are gone.
+    attack_vector::reset();
 }
 
 bool ma_requirements::buff_requirements_satisfied( const Character &u ) const

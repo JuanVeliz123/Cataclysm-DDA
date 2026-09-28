@@ -103,6 +103,27 @@ static const mod_id MOD_INFORMATION_dda( "dda" );
 
 #define dbg(x) DebugLog((x),D_GAME) << __FILE__ << ":" << __LINE__ << ": "
 
+namespace
+{
+// Logs how long a step of loading a save took, so slow loads can be traced to a step.
+class load_step_timer
+{
+    public:
+        explicit load_step_timer( std::string_view name )
+            : name( name ), start( std::chrono::steady_clock::now() ) {}
+        load_step_timer( const load_step_timer & ) = delete;
+        load_step_timer &operator=( const load_step_timer & ) = delete;
+        ~load_step_timer() {
+            const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                     std::chrono::steady_clock::now() - start );
+            DebugLog( D_WARNING, D_MAIN ) << "Save load step " << name << ": " << elapsed.count() << " ms";
+        }
+    private:
+        std::string name;
+        std::chrono::steady_clock::time_point start;
+};
+} // namespace
+
 // Load everything that will not depend on any mods
 void game::load_static_data()
 {
@@ -220,6 +241,7 @@ void game::load_core_data()
 {
     // core data can be loaded only once and must be first
     // anyway.
+    load_step_timer timer( "core data" );
     DynamicDataLoader::get_instance().unload_data();
 
     load_data_from_dir( PATH_INFO::jsondir(), "core" );
@@ -425,12 +447,18 @@ bool game::load( const save_t &name )
                     []( const JsonValue & jsin ) {
                         uistate.deserialize( jsin.get_object() );
                     } );
-                    reload_npcs();
+                    {
+                        load_step_timer timer( "reload npcs" );
+                        reload_npcs();
+                    }
                     validate_npc_followers();
                     validate_mounted_npcs();
                     validate_camps();
                     validate_linked_vehicles();
-                    update_map( u );
+                    {
+                        load_step_timer timer( "update map" );
+                        update_map( u );
+                    }
                     for( item *&e : u.inv_dump() ) {
                         e->set_owner( get_player_character() );
                     }
@@ -477,7 +505,10 @@ bool game::load( const save_t &name )
 
                     effect_on_conditions::load_existing_character( u );
                     // recalculate light level for correctly resuming crafting and disassembly
-                    here.build_map_cache( here.get_abs_sub().z() );
+                    {
+                        load_step_timer timer( "build map cache" );
+                        here.build_map_cache( here.get_abs_sub().z() );
+                    }
 
                     set_zoom( uistate.tileset_zoom );
                     set_overmap_zoom( uistate.overmap_tileset_zoom );
@@ -528,8 +559,10 @@ bool game::load( const save_t &name )
         }
     }
 
+    load_step_timer total_timer( "total" );
     for( const named_entry &e : entries ) {
         loading_ui::show( _( "Loading the save…" ), e.first );
+        load_step_timer timer( e.first );
         e.second();
         if( abort ) {
             loading_ui::done();
@@ -575,6 +608,7 @@ void game::load_world_modfiles()
     load_mod_interaction_data_from_dir( PATH_INFO::world_base_save_path() / "mods" /
                                         "mod_interactions", "custom" );
 
+    load_step_timer timer( "finalize data" );
     DynamicDataLoader::get_instance().finalize_loaded_data();
 }
 

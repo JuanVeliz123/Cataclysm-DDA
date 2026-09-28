@@ -682,6 +682,11 @@ class overmap
         // Reconstructed on load, so need not be serialized.
         std::unordered_set<tripoint_om_omt> safe_at_worldgen; // NOLINT(cata-serialize)
 
+        // Hashes of the terrain and view files as last read from or written to disk, so
+        // save() can skip rewriting an overmap that did not change. 0 means not known.
+        mutable uint64_t terrain_disk_hash = 0; // NOLINT(cata-serialize)
+        mutable uint64_t view_disk_hash = 0; // NOLINT(cata-serialize)
+
         // For oter_ts with the requires_predecessor flag, we need to store the
         // predecessor terrains so they can be used for mapgen later
         std::unordered_map<tripoint_om_omt, std::vector<oter_id>> predecessors_;

@@ -111,6 +111,63 @@ TEST_CASE( "zzip_basic_functionality", "[.][zzip]" )
     }
 }
 
+TEST_CASE( "zzip_batch_add", "[.][zzip]" )
+{
+    std::shared_ptr<mmap_file> mem_file = mmap_file::map_writeable_memory( 0 );
+    std::unordered_map<std::filesystem::path, std::string, std_fs_path_hash> files;
+
+    {
+        std::optional<zzip> z = zzip::load( mem_file );
+        REQUIRE( z.has_value() );
+        REQUIRE( z->add_file( std::filesystem::u8path( "existing.txt" ), "existing" ) );
+        REQUIRE( z->add_file( std::filesystem::u8path( "replaced.txt" ), "old" ) );
+        files[std::filesystem::u8path( "existing.txt" )] = "existing";
+
+        std::vector<std::string> contents;
+        for( int i = 0; i < 200; ++i ) {
+            contents.emplace_back( std::string( 100 + i, static_cast<char>( 'a' + i % 26 ) ) );
+        }
+        std::vector<std::pair<std::filesystem::path, std::string_view>> batch;
+        for( int i = 0; i < 200; ++i ) {
+            std::filesystem::path name = std::filesystem::u8path( std::to_string( i ) + ".map" );
+            batch.emplace_back( name, contents[i] );
+            files[name] = contents[i];
+        }
+        // A path already in the zzip is replaced, and a path given twice keeps its last content.
+        batch.emplace_back( std::filesystem::u8path( "replaced.txt" ), "first" );
+        batch.emplace_back( std::filesystem::u8path( "replaced.txt" ), "new" );
+        files[std::filesystem::u8path( "replaced.txt" )] = "new";
+
+        REQUIRE( z->add_files( batch ) );
+        REQUIRE( z->add_files( {} ) );
+
+        for( auto& [name, content] : files ) {
+            CHECK( _view( z->get_file( name ) ) == content );
+        }
+    }
+
+    // The contents survive reopening, with no stray entries.
+    std::optional<zzip> z = zzip::load( mem_file );
+    REQUIRE( z.has_value() );
+    for( auto& [name, content] : files ) {
+        CHECK( _view( z->get_file( name ) ) == content );
+    }
+    std::vector<std::filesystem::path> entries = z->get_entries();
+    CHECK( entries.size() == files.size() );
+    for( std::filesystem::path const &entry : entries ) {
+        CHECK( files.find( entry ) != files.end() );
+    }
+
+    // Compacting keeps only the latest content.
+    std::shared_ptr<mmap_file> mem_file2 = mmap_file::map_writeable_memory( 0 );
+    REQUIRE( z->compact_to( mem_file2 ) );
+    std::optional<zzip> compacted = zzip::load( mem_file2 );
+    REQUIRE( compacted.has_value() );
+    for( auto& [name, content] : files ) {
+        CHECK( _view( compacted->get_file( name ) ) == content );
+    }
+}
+
 TEST_CASE( "zzip_compaction", "[.][zzip]" )
 {
     std::unordered_map<std::filesystem::path, std::vector<std::byte>, std_fs_path_hash> files{
