@@ -74,6 +74,11 @@ const DEBUG_OVERLAY := preload("res://scripts/debug_overlay.gd")
 ## Creatures drawn as meshes rather than as sprites (3D-7c). Does nothing until a mesh
 ## exists for an id, which is the point: the migration is partial by design.
 const CREATURE_MESHES := preload("res://scripts/creature_meshes.gd")
+## Draw creatures that have art under res://meshes/creatures/ as 3D models (3D-7c).
+## Off, every creature keeps its tileset sprite -- the mesh layer is never built, so
+## nothing is suppressed -- and sprites get the contact blobs and shadow capsules.
+## Off for now, to play-test the tileset look.
+const CREATURE_MESHES_ENABLED := false
 
 ## World units between one sprite's depth and the next.
 ##
@@ -441,7 +446,8 @@ func setup(host: Node) -> void:
 	_ensure_environment()
 	_ensure_shadow_batch()
 	_ensure_shadow_proxy()
-	_ensure_creature_meshes()
+	if CREATURE_MESHES_ENABLED:
+		_ensure_creature_meshes()
 	_ensure_field_particles()
 	_ensure_weather_particles()
 	_ensure_lights()
