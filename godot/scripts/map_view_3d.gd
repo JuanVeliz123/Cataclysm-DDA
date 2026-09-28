@@ -80,6 +80,23 @@ const CREATURE_MESHES := preload("res://scripts/creature_meshes.gd")
 ## Off for now, to play-test the tileset look.
 const CREATURE_MESHES_ENABLED := false
 
+## Walls as solid blocks (tilted only). The tileset draws a wall as its face -- what you
+## see of it from the front, in the connection piece and rotation the game chose -- and
+## the stood-up world drew that as a thin card. So every side of the block shows
+## the sprite, fitted and upright, and the top -- which no sprite depicts -- is a plain
+## cap in the sprite's own colour (see wall_block in map_tiles_3d.gdshader). Putting
+## the sprite on top as well drew every wall twice. Neighbouring blocks meet
+## flush, so runs, corners and T-junctions need no pieces of their own. Real geometry,
+## so the sun shades each face by its angle and walls cast real shadows. Windows and
+## closed doors are blocks too, or they would leave notches in every run; an open door
+## is FLAT in the game's data, not DOOR, so it drops to the floor and leaves a real
+## doorway. Off restores the extruded box for all of them.
+const WALL_BLOCKS := true
+## How tall a wall block stands, in tiles of screen height. One tile keeps what a wall
+## hides behind it to a tile; a full storey (LEVEL_DROP_TILES) is what stacking z-levels
+## into buildings will want, once there is a cutaway around the avatar.
+const WALL_BLOCK_HEIGHT_TILES := 1.0
+
 ## World units between one sprite's depth and the next.
 ##
 ## The rank `MV.depth_rank` computes spans about a million values, and mapping that
@@ -313,6 +330,9 @@ var _quad: ArrayMesh
 ## basis z column, which is what lets a wall be a tile deep and a chair only as
 ## deep as the chair (see `_rebuild_batches`), all in one batch of one mesh.
 var _box: ArrayMesh
+## The unit wall block (WALL_BLOCKS); see _ensure_block.
+var _block: ArrayMesh
+var _wall_blocks: bool = WALL_BLOCKS
 ## "atlas:sway:palette:lit" -> MultiMeshInstance3D. One entry per distinct set of
 ## shader uniforms, which after 3D-1b is all a batch has to be uniform in.
 var _batches: Dictionary = {}
@@ -941,6 +961,14 @@ func _refresh_environment() -> void:
 		_fog_volume.size = Vector3(map_w + pad, top - bottom, depth + pad)
 		_fog_volume.position = Vector3(map_w * 0.5, (top + bottom) * 0.5, depth * 0.5)
 
+## Switch WALL_BLOCKS at runtime, for comparing the two looks in one session.
+func set_wall_blocks(on: bool) -> void:
+	if on == _wall_blocks:
+		return
+	_wall_blocks = on
+	_batched_generation = -1
+	refresh()
+
 ## Fill the world with light-catching fog, or drain it, at runtime. Same shape as
 ## `set_tilt_degrees`: the const is the default, this is the experiment's handle.
 func set_volumetric_fog(on: bool) -> void:
@@ -1354,7 +1382,9 @@ func _ensure_quad() -> ArrayMesh:
 ## *are* its material. Furniture that stops short of the frame edge degrades to the
 ## quad look on its own, because its edge pixels are transparent and the scissor
 ## discards the faces they cover.
-func _sprite_mesh(tall: bool, creature: bool, sway: bool) -> ArrayMesh:
+func _sprite_mesh(tall: bool, creature: bool, sway: bool, block: bool = false) -> ArrayMesh:
+	if _tilted and block:
+		return _ensure_block()
 	if _tilted and tall and not creature and not sway:
 		return _ensure_box()
 	return _ensure_quad()
@@ -1477,6 +1507,58 @@ func _ensure_box() -> ArrayMesh:
 	_box.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
 	return _box
 
+## The unit wall block (WALL_BLOCKS), in the ground quad's local space: x across the
+## sprite, y down it (south in the world), and z the height, 0 at the floor and 1 at
+## the top -- the instance transform's basis z carries the real height, so every wall
+## shares this one mesh. The sides carry the sprite; the shader caps the top (it tells
+## the top by this local position's z). No bottom: it stands on the ground.
+func _ensure_block() -> ArrayMesh:
+	if _block != null:
+		return _block
+	var vertices := PackedVector3Array([
+		# Top, z = 1: the sprite as the game draws it.
+		Vector3(0, 0, 1), Vector3(1, 0, 1), Vector3(1, 1, 1), Vector3(0, 1, 1),
+		# South side, y = 1.
+		Vector3(0, 1, 0), Vector3(1, 1, 0), Vector3(1, 1, 1), Vector3(0, 1, 1),
+		# North side, y = 0.
+		Vector3(0, 0, 0), Vector3(1, 0, 0), Vector3(1, 0, 1), Vector3(0, 0, 1),
+		# West side, x = 0.
+		Vector3(0, 0, 0), Vector3(0, 1, 0), Vector3(0, 1, 1), Vector3(0, 0, 1),
+		# East side, x = 1.
+		Vector3(1, 0, 0), Vector3(1, 1, 0), Vector3(1, 1, 1), Vector3(1, 0, 1),
+	])
+	# Fitted to each face: u across it as seen from outside, v from the top edge down
+	# to the floor, so the sprite stands on every side upright and 1:1.
+	var uvs := PackedVector2Array([
+		Vector2(0, 0), Vector2(1, 0), Vector2(1, 1), Vector2(0, 1),
+		# South, seen from the south: x runs left to right.
+		Vector2(0, 1), Vector2(1, 1), Vector2(1, 0), Vector2(0, 0),
+		# North, seen from the north: x runs right to left.
+		Vector2(1, 1), Vector2(0, 1), Vector2(0, 0), Vector2(1, 0),
+		# West, seen from the west: north is on the left, so u follows y.
+		Vector2(0, 1), Vector2(1, 1), Vector2(1, 0), Vector2(0, 0),
+		# East, seen from the east: north is on the right.
+		Vector2(1, 1), Vector2(0, 1), Vector2(0, 0), Vector2(1, 0),
+	])
+	var normals := PackedVector3Array()
+	for n in [Vector3(0, 0, 1), Vector3(0, 1, 0), Vector3(0, -1, 0),
+			Vector3(-1, 0, 0), Vector3(1, 0, 0)]:
+		for v in 4:
+			normals.append(n)
+	var indices := PackedInt32Array()
+	for f in 5:
+		var b := f * 4
+		indices.append_array([b, b + 1, b + 2, b, b + 2, b + 3])
+	var arrays := []
+	arrays.resize(Mesh.ARRAY_MAX)
+	arrays[Mesh.ARRAY_VERTEX] = vertices
+	arrays[Mesh.ARRAY_TEX_UV] = uvs
+	arrays[Mesh.ARRAY_NORMAL] = normals
+	arrays[Mesh.ARRAY_INDEX] = indices
+	_block = ArrayMesh.new()
+	_block.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+	return _block
+
 func _clear_batches() -> void:
 	for node in _batches.values():
 		if is_instance_valid(node):
@@ -1580,14 +1662,15 @@ func _row_of(i: int) -> int:
 	return int(floor(float(_cmds[i + 6] + _cmds[i + 4]) / float(th)))
 
 func _batch_for(key: String, atlas_i: int, sway: bool, palette: int,
-		lit: bool, tall: bool, creature: bool, z_below: int) -> MultiMeshInstance3D:
+		lit: bool, tall: bool, creature: bool, z_below: int,
+		block: bool = false) -> MultiMeshInstance3D:
 	var existing = _batches.get(key)
 	if existing != null and is_instance_valid(existing):
 		# Re-chosen on reuse, because batch nodes outlive the thing the choice
 		# depends on: a tilt toggle rebuilds instances but keeps the nodes, and a
 		# node built flat would keep drawing quads where the stood-up world wants
 		# boxes. Assigning the same mesh back is free.
-		existing.multimesh.mesh = _sprite_mesh(tall, creature, sway)
+		existing.multimesh.mesh = _sprite_mesh(tall, creature, sway, block)
 		return existing
 
 	var tex: Texture2D = _atlases[atlas_i]
@@ -1595,7 +1678,7 @@ func _batch_for(key: String, atlas_i: int, sway: bool, palette: int,
 	mm.transform_format = MultiMesh.TRANSFORM_3D
 	mm.use_custom_data = true
 	mm.use_colors = true
-	mm.mesh = _sprite_mesh(tall, creature, sway)
+	mm.mesh = _sprite_mesh(tall, creature, sway, block)
 
 	var mat := ShaderMaterial.new()
 	mat.shader = TILE_SHADER_3D
@@ -1605,6 +1688,7 @@ func _batch_for(key: String, atlas_i: int, sway: bool, palette: int,
 	mat.set_shader_parameter("receives_light", lit)
 	mat.set_shader_parameter("level_below", z_below)
 	mat.set_shader_parameter("alpha_scissor", ALPHA_SCISSOR)
+	mat.set_shader_parameter("wall_block", block)
 	mat.set_shader_parameter("sway_enabled", sway)
 	mat.set_shader_parameter("palette_row", palette)
 	if _palette_tex != null:
@@ -1618,7 +1702,7 @@ func _batch_for(key: String, atlas_i: int, sway: bool, palette: int,
 	# Only standing sprites in a stood-up world, and then double-sided: these are single
 	# quads, so a shadow caster that only counts its front face vanishes as soon as the light
 	# is behind it. Creatures are excluded because their capsule proxies cast for them.
-	var casts := tall and _tilted and not creature
+	var casts := (tall or block) and _tilted and not creature
 	node.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_DOUBLE_SIDED if casts \
 		else GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	# Hidden when the proxies are being shown in their place; see SHOW_SHADOW_PROXIES.
@@ -1831,13 +1915,20 @@ func _rebuild_batches() -> void:
 		# the node needs both: whether it casts (standing terrain does, creatures do not --
 		# their proxies cast for them) and whether it is drawn at all (SHOW_SHADOW_PROXIES
 		# hides creature sprites so the geometry can be seen in their place).
-		var key := "%d:%d:%d:%d:%d:%d:%d" % [atlas_i,
+		# A wall is a block (WALL_BLOCKS) rather than a standing sprite: its own
+		# batches, and `tall` cleared so the box fitting and box depth pass it by.
+		var shape: int = (flags & MV.SHAPE_MASK) >> MV.SHAPE_SHIFT
+		var block := _tilted and _wall_blocks and not creature \
+			and (shape == MV.SHAPE_WALL or shape == MV.SHAPE_WINDOW
+				or shape == MV.SHAPE_DOOR)
+		var key := "%d:%d:%d:%d:%d:%d:%d:%d" % [atlas_i,
 			1 if (flags & MV.FLAG_SWAY) != 0 else 0,
 			(flags & MV.PALETTE_MASK) >> MV.PALETTE_SHIFT,
 			1 if lit else 0,
-			1 if tall else 0,
+			1 if tall and not block else 0,
 			1 if creature else 0,
-			z_below]
+			z_below,
+			1 if block else 0]
 		if not buckets.has(key):
 			buckets[key] = PackedInt32Array()
 		var bucket: PackedInt32Array = buckets[key]
@@ -1885,8 +1976,10 @@ func _rebuild_batches() -> void:
 	for key in buckets:
 		var parts := (key as String).split(":")
 		var atlas_i := int(parts[0])
+		var block_batch := int(parts[7]) != 0
 		var node := _batch_for(key, atlas_i, int(parts[1]) != 0, int(parts[2]),
-			int(parts[3]) != 0, int(parts[4]) != 0, int(parts[5]) != 0, int(parts[6]))
+			int(parts[3]) != 0, int(parts[4]) != 0, int(parts[5]) != 0, int(parts[6]),
+			block_batch)
 		var tex: Texture2D = _atlases[atlas_i]
 		var inv_w := 1.0 / float(tex.get_width())
 		var inv_h := 1.0 / float(tex.get_height())
@@ -1955,6 +2048,14 @@ func _rebuild_batches() -> void:
 				or (_cmds[o + 9] & MV.FLAG_TALL) != 0,
 				float(_cmds[o + 6] + src_h), _depths.get(_rank_of(o), 0.0),
 				(_cmds[o + 9] & MV.Z_BELOW_MASK) >> MV.Z_BELOW_SHIFT)
+			if block_batch:
+				# Laid on the ground like a floor tile -- which is what carries the
+				# connection sprite's rotation onto the block -- then stood up by its
+				# height along world up, pre-stretched by 1/cos like every height.
+				xf = _place(flat, false, 0.0, _depths.get(_rank_of(o), 0.0),
+					(_cmds[o + 9] & MV.Z_BELOW_MASK) >> MV.Z_BELOW_SHIFT)
+				xf.basis.z = Vector3(0.0, WALL_BLOCK_HEIGHT_TILES * float(_tile_size.y)
+					/ maxf(_cos_tilt, 0.0001), 0.0)
 			if boxed:
 				# The unit-deep box takes its real depth here, in the same
 				# pre-stretched units the ground rows use.

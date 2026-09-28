@@ -43,11 +43,20 @@ varying vec2 light_uv;
 // 1.0 on a stood-up box's top face, 0.0 everywhere else (the mesh's UV2.x; a mesh
 // without UV2 reads zero). See the top-face fill in fragment().
 varying float top_face;
+// A wall block's own local position (map_view_3d.gd _ensure_block): x across the
+// sprite, y down it, z up the wall. Only meaningful while wall_block is set.
+varying vec3 block_local;
 
 // The atlas. A spatial shader has no TEXTURE built-in and MultiMeshInstance3D has
 // no texture slot, so the atlas that MultiMeshInstance2D carried as a property is
 // a uniform here. Nearest, matching `textures/canvas_textures/default_texture_filter`.
 uniform sampler2D atlas_tex : filter_nearest, repeat_disable, hint_default_black;
+// Wall blocks (map_view_3d.gd WALL_BLOCKS). The tileset draws a wall as its face --
+// what you see of it from the front -- so every side of the block shows the whole
+// sprite, fitted and upright, and the top, which no sprite depicts, is a plain cap in
+// the sprite's own average colour, shaded a little so it reads as a top.
+uniform bool wall_block = false;
+uniform float wall_top_shade = 0.8;
 // 1.0 / atlas size in pixels, for the half-texel inset.
 uniform vec2 atlas_texel = vec2(0.0);
 
@@ -170,6 +179,7 @@ vec3 srgb_to_linear(vec3 c) {
 
 void vertex() {
 	atlas_rect = INSTANCE_CUSTOM;
+	block_local = VERTEX;
 	top_face = UV2.x;
 	// COLOR carries the MultiMesh per-instance colour, as in the canvas shader.
 	tint = COLOR;
@@ -209,6 +219,22 @@ void fragment() {
 			suv.y = min(suv.y + atlas_texel.y, hi.y);
 			tex = texture(atlas_tex, suv);
 		}
+	}
+
+	if (wall_block && block_local.z > 0.999) {
+		// The cap: the sprite's average over a 4x4 grid, weighted by coverage so a
+		// transparent margin does not grey it.
+		vec3 avg = vec3(0.0);
+		float cover = 0.0;
+		for (int j = 0; j < 4; j++) {
+			for (int i = 0; i < 4; i++) {
+				vec4 c = texture(atlas_tex, atlas_rect.xy
+						+ (vec2(float(i), float(j)) + 0.5) * 0.25 * atlas_rect.zw);
+				avg += c.rgb * c.a;
+				cover += c.a;
+			}
+		}
+		tex = vec4(avg / max(cover, 0.0001) * wall_top_shade, 1.0);
 	}
 
 	if (palette_row > 0) {
